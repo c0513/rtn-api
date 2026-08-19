@@ -7,8 +7,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Настройки ЮKassa
-const SHOP_ID = '1403586';
-const SECRET_KEY = 'live_jeEn4td-Tna6Ft7zwetndt37glTeHNA7bsAyJCv8f4Y';
+const SHOP_ID = process.env.SHOP_ID || '1403586';
+const SECRET_KEY = process.env.SECRET_KEY;
 
 app.use(cors());
 app.use(express.json());
