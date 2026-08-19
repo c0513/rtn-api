@@ -49,6 +49,19 @@ app.post('/api/create-payment', async (req, res) => {
         const idempotenceKey = `${orderId || Date.now()}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
         console.log(`🔑 Idempotence-Key: ${idempotenceKey}`);
 
+        // Формируем данные для чека (обязательно для 54-ФЗ)
+        const receiptItems = Array.isArray(items) ? items.map(item => ({
+            description: `${item.name} (${item.flavor || 'стандарт'})`,
+            quantity: item.quantity || 1,
+            amount: {
+                value: ((item.price || 0) * (item.quantity || 1)).toFixed(2),
+                currency: 'RUB'
+            },
+            vat_code: 1, // 1 = НДС не облагается (можно заменить на ваш код)
+            payment_mode: 'full_payment',
+            payment_subject: 'commodity'
+        })) : [];
+
         // Формируем платеж в ЮKassa
         const paymentData = {
             amount: {
@@ -69,7 +82,14 @@ app.post('/api/create-payment', async (req, res) => {
                 customerPhone: customer?.phone || '',
                 delivery: delivery?.method || ''
             },
-            capture: true
+            capture: true,
+            receipt: {
+                customer: {
+                    email: customer?.email || 'customer@example.com',
+                    phone: customer?.phone || ''
+                },
+                items: receiptItems
+            }
         };
 
         console.log('📤 Отправляем в ЮKassa:', JSON.stringify(paymentData, null, 2));
@@ -99,11 +119,9 @@ app.post('/api/create-payment', async (req, res) => {
         console.error('\n❌ ===== ОШИБКА СОЗДАНИЯ ПЛАТЕЖА =====');
         
         if (error.response) {
-            // ЮKassa вернула ошибку
             console.error('📌 Статус ответа ЮKassa:', error.response.status);
             console.error('📌 Данные ошибки от ЮKassa:', JSON.stringify(error.response.data, null, 2));
             
-            // Извлекаем понятное сообщение об ошибке
             let errorMessage = 'Ошибка при создании платежа';
             if (error.response.data?.description) {
                 errorMessage = error.response.data.description;
@@ -116,14 +134,12 @@ app.post('/api/create-payment', async (req, res) => {
                 details: error.response.data
             });
         } else if (error.request) {
-            // Запрос был сделан, но ответа нет
             console.error('❌ Нет ответа от ЮKassa');
             res.status(500).json({
                 error: 'ЮKassa не отвечает. Попробуйте позже.',
                 details: 'No response from YooKassa'
             });
         } else {
-            // Ошибка на стороне сервера
             console.error('❌ Внутренняя ошибка:', error.message);
             res.status(500).json({
                 error: 'Внутренняя ошибка сервера',
@@ -178,8 +194,6 @@ app.post('/api/yookassa-webhook', (req, res) => {
             console.log('✅ ПЛАТЁЖ УСПЕШЕН! 🎉');
             console.log('💰 Сумма:', event.object.amount.value, event.object.amount.currency);
             console.log('📦 Заказ:', event.object.metadata?.orderId);
-            // Здесь можно обновить статус заказа в базе данных
-            // И отправить уведомление в Telegram
         }
 
         res.sendStatus(200);
