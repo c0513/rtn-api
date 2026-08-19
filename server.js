@@ -45,6 +45,10 @@ app.post('/api/create-payment', async (req, res) => {
         console.log(`💰 Сумма к оплате: ${amount} RUB`);
         console.log(`📦 Заказ: ${description || 'Без описания'}`);
 
+        // Генерируем уникальный ключ идемпотентности
+        const idempotenceKey = `${orderId || Date.now()}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        console.log(`🔑 Idempotence-Key: ${idempotenceKey}`);
+
         // Формируем платеж в ЮKassa
         const paymentData = {
             amount: {
@@ -78,6 +82,9 @@ app.post('/api/create-payment', async (req, res) => {
                 auth: {
                     username: SHOP_ID,
                     password: SECRET_KEY
+                },
+                headers: {
+                    'Idempotence-Key': idempotenceKey
                 }
             }
         );
