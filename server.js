@@ -68,15 +68,17 @@ app.post('/api/search-cities', async (req, res) => {
             }
         );
 
-        const cities = cityResponse.data.map((city: any) => ({
-            code: city.code,
-            name: city.name,
-            postalCode: city.postal_code,
-            region: city.region,
-            country: city.country_name
-        }));
+        const cities = cityResponse.data.map(function(city) {
+            return {
+                code: city.code,
+                name: city.name,
+                postalCode: city.postal_code,
+                region: city.region,
+                country: city.country_name
+            };
+        });
 
-        console.log(`✅ Найдено городов: ${cities.length}`);
+        console.log('✅ Найдено городов:', cities.length);
         res.json({ cities });
 
     } catch (error) {
@@ -96,7 +98,7 @@ app.post('/api/calculate-delivery', async (req, res) => {
     console.log('📥 Данные:', req.body);
 
     try {
-        const { cityCode, postalCode, cityName, weight = 100, length = 300, width = 300, height = 100 } = req.body;
+        const { cityCode, postalCode, cityName, weight, length, width, height } = req.body;
 
         if (!cityCode && !postalCode) {
             return res.status(400).json({ error: 'Укажите город' });
@@ -118,6 +120,12 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
         const accessToken = tokenResponse.data.access_token;
 
+        // Параметры посылки (значения по умолчанию)
+        const packageWeight = weight || 100;
+        const packageLength = length || 300;
+        const packageWidth = width || 300;
+        const packageHeight = height || 100;
+
         // Рассчитываем доставку
         const tariffResponse = await axios.post(
             'https://api.cdek.ru/v2/calculator/tariff',
@@ -132,10 +140,10 @@ app.post('/api/calculate-delivery', async (req, res) => {
                     postal_code: postalCode
                 },
                 packages: [{
-                    weight: weight,
-                    length: length,
-                    width: width,
-                    height: height
+                    weight: packageWeight,
+                    length: packageLength,
+                    width: packageWidth,
+                    height: packageHeight
                 }]
             },
             {
@@ -145,7 +153,7 @@ app.post('/api/calculate-delivery', async (req, res) => {
             }
         );
 
-        console.log(`💰 Стоимость: ${tariffResponse.data.total_sum} ₽`);
+        console.log('💰 Стоимость:', tariffResponse.data.total_sum, '₽');
         res.json({
             deliveryPrice: tariffResponse.data.total_sum,
             deliveryTime: tariffResponse.data.delivery_time,
@@ -180,23 +188,29 @@ app.post('/api/create-payment', async (req, res) => {
             return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
-        const idempotenceKey = `${orderId || Date.now()}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const idempotenceKey = orderId + '_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
 
-        const receiptItems = Array.isArray(items) ? items.map(item => ({
-            description: `${item.name} (${item.flavor || 'стандарт'})`,
-            quantity: item.quantity || 1,
-            amount: {
-                value: ((item.price || 0) * (item.quantity || 1)).toFixed(2),
-                currency: 'RUB'
-            },
-            vat_code: 1,
-            payment_mode: 'full_payment',
-            payment_subject: 'commodity'
-        })) : [];
+        var receiptItems = [];
+        if (Array.isArray(items)) {
+            for (var i = 0; i < items.length; i++) {
+                var item = items[i];
+                receiptItems.push({
+                    description: item.name + ' (' + (item.flavor || 'стандарт') + ')',
+                    quantity: item.quantity || 1,
+                    amount: {
+                        value: ((item.price || 0) * (item.quantity || 1)).toFixed(2),
+                        currency: 'RUB'
+                    },
+                    vat_code: 1,
+                    payment_mode: 'full_payment',
+                    payment_subject: 'commodity'
+                });
+            }
+        }
 
         if (delivery && delivery.price) {
             receiptItems.push({
-                description: `Доставка (${delivery.method || 'СДЭК'})`,
+                description: 'Доставка (' + (delivery.method || 'СДЭК') + ')',
                 quantity: 1,
                 amount: {
                     value: delivery.price.toFixed(2),
@@ -208,7 +222,7 @@ app.post('/api/create-payment', async (req, res) => {
             });
         }
 
-        const paymentData = {
+        var paymentData = {
             amount: {
                 value: String(amount),
                 currency: 'RUB'
@@ -220,7 +234,7 @@ app.post('/api/create-payment', async (req, res) => {
                 type: 'redirect',
                 return_url: 'https://rtn.pro/after-payment'
             },
-            description: description || `Заказ ${orderId || Date.now()}`,
+            description: description || ('Заказ ' + (orderId || Date.now())),
             metadata: {
                 orderId: orderId || Date.now().toString(),
                 customerName: customer?.name || '',
@@ -237,7 +251,7 @@ app.post('/api/create-payment', async (req, res) => {
             }
         };
 
-        const response = await axios.post(
+        var response = await axios.post(
             'https://api.yookassa.ru/v3/payments',
             paymentData,
             {
@@ -268,13 +282,13 @@ app.post('/api/create-payment', async (req, res) => {
 // ============================================================
 app.get('/api/check-payment', async (req, res) => {
     try {
-        const { paymentId } = req.query;
+        var paymentId = req.query.paymentId;
         if (!paymentId) {
             return res.status(400).json({ error: 'paymentId не указан' });
         }
 
-        const response = await axios.get(
-            `https://api.yookassa.ru/v3/payments/${paymentId}`,
+        var response = await axios.get(
+            'https://api.yookassa.ru/v3/payments/' + paymentId,
             {
                 auth: {
                     username: SHOP_ID,
@@ -299,9 +313,9 @@ app.get('/api/check-payment', async (req, res) => {
 // ============================================================
 // 5. WEBHOOK
 // ============================================================
-app.post('/api/yookassa-webhook', (req, res) => {
+app.post('/api/yookassa-webhook', function(req, res) {
     try {
-        const event = req.body;
+        var event = req.body;
         console.log('📨 Webhook:', JSON.stringify(event, null, 2));
 
         if (event.object && event.object.status === 'succeeded') {
@@ -318,16 +332,17 @@ app.post('/api/yookassa-webhook', (req, res) => {
 // ============================================================
 // 6. HEALTH CHECK
 // ============================================================
-app.get('/api/health', (req, res) => {
+app.get('/api/health', function(req, res) {
     res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
 // ============================================================
 // 7. ЗАПУСК
 // ============================================================
-app.listen(PORT, () => {
-    console.log(`\n🚀 Сервер запущен на порту ${PORT}`);
-    console.log(`✅ Health: ${PORT === 10000 ? 'https://rhino-api-yrfq.onrender.com/api/health' : `http://localhost:${PORT}/api/health`}`);
-    console.log(`🔑 SECRET_KEY: ${SECRET_KEY ? '✅' : '❌'}`);
-    console.log(`📦 СДЭК: ${CDEK_ACCOUNT && CDEK_SECRET ? '✅' : '❌'}\n`);
+app.listen(PORT, function() {
+    console.log('\n🚀 Сервер запущен на порту ' + PORT);
+    console.log('✅ Health: https://rhino-api-yrfq.onrender.com/api/health');
+    console.log('🔑 SECRET_KEY: ' + (SECRET_KEY ? '✅' : '❌'));
+    console.log('📦 СДЭК: ' + (CDEK_ACCOUNT && CDEK_SECRET ? '✅' : '❌'));
+    console.log('');
 });
