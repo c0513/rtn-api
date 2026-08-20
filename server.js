@@ -41,7 +41,6 @@ app.post('/api/search-cities', async (req, res) => {
             return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
-        // Получаем токен СДЭК
         const tokenResponse = await axios.post(
             'https://api.cdek.ru/v2/oauth/token',
             {
@@ -53,7 +52,6 @@ app.post('/api/search-cities', async (req, res) => {
 
         const accessToken = tokenResponse.data.access_token;
 
-        // Ищем города
         const cityResponse = await axios.get(
             'https://api.cdek.ru/v2/location/cities',
             {
@@ -91,7 +89,7 @@ app.post('/api/search-cities', async (req, res) => {
 });
 
 // ============================================================
-// 2. РАСЧЁТ ДОСТАВКИ СДЭК
+// 2. РАСЧЁТ ДОСТАВКИ СДЭК (с fallback)
 // ============================================================
 app.post('/api/calculate-delivery', async (req, res) => {
     console.log('\n📦 ===== РАСЧЁТ ДОСТАВКИ =====');
@@ -108,7 +106,6 @@ app.post('/api/calculate-delivery', async (req, res) => {
             return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
-        // Получаем токен
         const tokenResponse = await axios.post(
             'https://api.cdek.ru/v2/oauth/token',
             {
@@ -121,13 +118,11 @@ app.post('/api/calculate-delivery', async (req, res) => {
         const accessToken = tokenResponse.data.access_token;
         console.log('✅ Токен получен');
 
-        // Параметры посылки
         const packageWeight = 500;
         const packageLength = 400;
         const packageWidth = 400;
         const packageHeight = 200;
 
-        // Пробуем несколько тарифов
         const tariffs = [3, 137, 139];
 
         for (let i = 0; i < tariffs.length; i++) {
@@ -175,16 +170,23 @@ app.post('/api/calculate-delivery', async (req, res) => {
             }
         }
 
-        console.error('❌ Все тарифы недоступны');
-        return res.status(404).json({
-            error: 'Доставка в этот город недоступна'
+        console.log('⚠️ Все тарифы недоступны. Используем фиксированную стоимость 500 ₽');
+        return res.json({
+            deliveryPrice: 500,
+            deliveryTime: 3,
+            city: cityName || 'Город',
+            currency: 'RUB',
+            isFallback: true
         });
 
     } catch (error) {
         console.error('❌ Ошибка расчёта:', error.response?.data || error.message);
-        res.status(500).json({
-            error: 'Ошибка расчёта доставки',
-            details: error.response?.data || error.message
+        res.json({
+            deliveryPrice: 500,
+            deliveryTime: 3,
+            city: req.body.cityName || 'Город',
+            currency: 'RUB',
+            isFallback: true
         });
     }
 });
@@ -207,7 +209,6 @@ app.post('/api/get-pickup-points', async (req, res) => {
             return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
-        // Получаем токен
         const tokenResponse = await axios.post(
             'https://api.cdek.ru/v2/oauth/token',
             {
@@ -219,7 +220,6 @@ app.post('/api/get-pickup-points', async (req, res) => {
 
         const accessToken = tokenResponse.data.access_token;
 
-        // Получаем список ПВЗ
         const pickupResponse = await axios.get(
             'https://api.cdek.ru/v2/deliverypoints',
             {
