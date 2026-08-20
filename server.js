@@ -98,10 +98,109 @@ app.post('/api/calculate-delivery', async (req, res) => {
     console.log('📥 Данные:', req.body);
 
     try {
-        const { cityCode, postalCode, cityName, weight, length, width, height } = req.body;
+        const { cityCode, postalCode, cityName } = req.body;
 
-        if (!cityCode && !postalCode) {
-            return res.status(400).json({ error: 'Укажите город' });
+        if (!cityCode) {
+            return res.status(400).json({ error: 'Не передан код города' });
+        }
+
+        if (!CDEK_ACCOUNT || !CDEK_SECRET) {
+            return res.status(500).json({ error: 'Сервер не настроен' });
+        }
+
+        // Получаем токен
+        const tokenResponse = await axios.post(
+            'https://api.cdek.ru/v2/oauth/token',
+            {
+                grant_type: 'client_credentials',
+                client_id: CDEK_ACCOUNT,
+                client_secret: CDEK_SECRET
+            }
+        );
+
+        const accessToken = tokenResponse.data.access_token;
+        console.log('✅ Токен получен');
+
+        // Параметры посылки
+        const packageWeight = 500;
+        const packageLength = 400;
+        const packageWidth = 400;
+        const packageHeight = 200;
+
+        // Пробуем несколько тарифов
+        const tariffs = [3, 137, 139];
+
+        for (let i = 0; i < tariffs.length; i++) {
+            const tariffCode = tariffs[i];
+            console.log(`🔍 Пробуем тариф ${tariffCode}...`);
+
+            try {
+                const tariffResponse = await axios.post(
+                    'https://api.cdek.ru/v2/calculator/tariff',
+                    {
+                        tariff_code: tariffCode,
+                        from_location: {
+                            code: 270,
+                            postal_code: '196608'
+                        },
+                        to_location: {
+                            code: cityCode,
+                            postal_code: postalCode || undefined
+                        },
+                        packages: [{
+                            weight: packageWeight,
+                            length: packageLength,
+                            width: packageWidth,
+                            height: packageHeight
+                        }]
+                    },
+                    {
+                        headers: {
+                            'Authorization': 'Bearer ' + accessToken
+                        }
+                    }
+                );
+
+                console.log(`✅ Тариф ${tariffCode} работает! Стоимость: ${tariffResponse.data.total_sum} ₽`);
+                
+                return res.json({
+                    deliveryPrice: tariffResponse.data.total_sum,
+                    deliveryTime: tariffResponse.data.delivery_time || null,
+                    city: cityName || 'Город',
+                    currency: 'RUB'
+                });
+
+            } catch (error) {
+                console.log(`❌ Тариф ${tariffCode} не подходит`);
+            }
+        }
+
+        console.error('❌ Все тарифы недоступны');
+        return res.status(404).json({
+            error: 'Доставка в этот город недоступна'
+        });
+
+    } catch (error) {
+        console.error('❌ Ошибка расчёта:', error.response?.data || error.message);
+        res.status(500).json({
+            error: 'Ошибка расчёта доставки',
+            details: error.response?.data || error.message
+        });
+    }
+});
+
+// ============================================================
+// 3. ПОЛУЧЕНИЕ СПИСКА ПВЗ СДЭК
+// ============================================================
+app.post('/api/get-pickup-points', async (req, res) => {
+    console.log('\n📍 ===== ПОЛУЧЕНИЕ ПВЗ СДЭК =====');
+    console.log('📥 Запрос:', req.body);
+
+    try {
+        const { cityCode } = req.body;
+
+        if (!cityCode) {
+            return res.status(400).json({ error: 'Не передан код города' });
         }
 
         if (!CDEK_ACCOUNT || !CDEK_SECRET) {
@@ -120,58 +219,55 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
         const accessToken = tokenResponse.data.access_token;
 
-        // Параметры посылки (значения по умолчанию)
-        const packageWeight = weight || 100;
-        const packageLength = length || 300;
-        const packageWidth = width || 300;
-        const packageHeight = height || 100;
-
-        // Рассчитываем доставку
-        const tariffResponse = await axios.post(
-            'https://api.cdek.ru/v2/calculator/tariff',
+        // Получаем список ПВЗ
+        const pickupResponse = await axios.get(
+            'https://api.cdek.ru/v2/deliverypoints',
             {
-                tariff_code: 137,
-                from_location: {
-                    code: 270,
-                    postal_code: '196608'
+                params: {
+                    city_code: cityCode,
+                    type: 'PVZ',
+                    have_cashless: true,
+                    have_cash: true,
+                    allow_mark: true
                 },
-                to_location: {
-                    code: cityCode,
-                    postal_code: postalCode
-                },
-                packages: [{
-                    weight: packageWeight,
-                    length: packageLength,
-                    width: packageWidth,
-                    height: packageHeight
-                }]
-            },
-            {
                 headers: {
-                    'Authorization': `Bearer ${accessToken}`
+                    'Authorization': 'Bearer ' + accessToken
                 }
             }
         );
 
-        console.log('💰 Стоимость:', tariffResponse.data.total_sum, '₽');
-        res.json({
-            deliveryPrice: tariffResponse.data.total_sum,
-            deliveryTime: tariffResponse.data.delivery_time,
-            city: cityName || 'Город',
-            currency: 'RUB'
+        console.log(`✅ Найдено ПВЗ: ${pickupResponse.data.length}`);
+
+        const points = pickupResponse.data.map(function(point) {
+            return {
+                code: point.code,
+                name: point.name,
+                address: point.address,
+                city: point.city,
+                workTime: point.work_time,
+                phone: point.phone,
+                lat: point.coord_lat,
+                lon: point.coord_long,
+                nearestStation: point.nearest_station,
+                metroStation: point.metro_station,
+                weightLimit: point.weight_limit,
+                dimensions: point.dimensions
+            };
         });
 
+        res.json({ points });
+
     } catch (error) {
-        console.error('❌ Ошибка расчёта:', error.response?.data || error.message);
+        console.error('❌ Ошибка получения ПВЗ:', error.response?.data || error.message);
         res.status(500).json({
-            error: 'Ошибка расчёта доставки',
+            error: 'Ошибка получения пунктов выдачи',
             details: error.response?.data || error.message
         });
     }
 });
 
 // ============================================================
-// 3. СОЗДАНИЕ ПЛАТЕЖА (ЮKASSA)
+// 4. СОЗДАНИЕ ПЛАТЕЖА (ЮKASSA)
 // ============================================================
 app.post('/api/create-payment', async (req, res) => {
     console.log('\n🔵 ===== НОВЫЙ ПЛАТЁЖ =====');
@@ -278,7 +374,7 @@ app.post('/api/create-payment', async (req, res) => {
 });
 
 // ============================================================
-// 4. ПРОВЕРКА ПЛАТЕЖА
+// 5. ПРОВЕРКА ПЛАТЕЖА
 // ============================================================
 app.get('/api/check-payment', async (req, res) => {
     try {
@@ -311,7 +407,7 @@ app.get('/api/check-payment', async (req, res) => {
 });
 
 // ============================================================
-// 5. WEBHOOK
+// 6. WEBHOOK
 // ============================================================
 app.post('/api/yookassa-webhook', function(req, res) {
     try {
@@ -330,14 +426,14 @@ app.post('/api/yookassa-webhook', function(req, res) {
 });
 
 // ============================================================
-// 6. HEALTH CHECK
+// 7. HEALTH CHECK
 // ============================================================
 app.get('/api/health', function(req, res) {
     res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
 // ============================================================
-// 7. ЗАПУСК
+// 8. ЗАПУСК
 // ============================================================
 app.listen(PORT, function() {
     console.log('\n🚀 Сервер запущен на порту ' + PORT);
