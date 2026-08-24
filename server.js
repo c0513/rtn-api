@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ (исправленное поле city)
+// 1. ПОИСК ГОРОДОВ (с фильтрацией по названию)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
     console.log('🔍 Поиск городов для:', req.body.query);
@@ -53,7 +53,7 @@ app.post('/api/search-cities', async (req, res) => {
                 params: {
                     country_codes: 'RU',
                     q: query,
-                    limit: 20
+                    limit: 50 // больше записей для фильтрации
                 },
                 headers: {
                     'Authorization': `Bearer ${accessToken}`
@@ -63,28 +63,67 @@ app.post('/api/search-cities', async (req, res) => {
 
         console.log('📦 Ответ от СДЭК:', cityResponse.data ? cityResponse.data.length : 0, 'записей');
 
+        const queryLower = query.toLowerCase();
         const cities = [];
+
         if (cityResponse.data && cityResponse.data.length > 0) {
             for (let i = 0; i < cityResponse.data.length; i++) {
                 const city = cityResponse.data[i];
-                // Используем поле city, а не name!
-                const cityName = city.city || city.name;
-                if (!cityName) {
-                    console.log('⚠️ Пропускаем запись без названия:', JSON.stringify(city));
-                    continue;
-                }
-                
-                cities.push({
-                    code: city.code || 0,
-                    name: cityName,
-                    postalCode: city.postal_code || '',
-                    region: city.region || ''
-                });
-            }
-        }
+                const cityName = city.city || city.name || '';
+                const cityNameLower = cityName.toLowerCase();
 
-        console.log('✅ Найдено городов:', cities.length);
-        res.json({ cities });
+                // Фильтруем: показываем только если название начинается с запроса
+                // или содержит запрос как отдельное слово
+                const startsWithQuery = cityNameLower.startsWith(queryLower);
+                const containsAsWord = cityNameLower.includes(queryLower) && 
+                                       (cityNameLower.length === queryLower.length || 
+                                        cityNameLower[queryLower.length] === ' ' ||
+                                        cityNameLower[queryLower.length] === '-' ||
+                                        cityNameLower[queryLower.length] === '(');
+
+                // Также добавляем города, где запрос является точным совпадением
+                const isExactMatch = cityNameLower === queryLower;
+
+                if (startsWithQuery || containsAsWord || isExactMatch) {
+                    cities.push({
+                        code: city.code || 0,
+                        name: cityName,
+                        postalCode: city.postal_code || '',
+                        region: city.region || '',
+                        // Для сортировки
+                        isExact: isExactMatch,
+                        isStartsWith: startsWithQuery
+                    });
+                }
+            }
+
+            // Сортируем: сначала точные совпадения, потом начинающиеся с запроса, потом остальные
+            cities.sort((a, b) => {
+                if (a.isExact && !b.isExact) return -1;
+                if (!a.isExact && b.isExact) return 1;
+                if (a.isStartsWith && !b.isStartsWith) return -1;
+                if (!a.isStartsWith && b.isStartsWith) return 1;
+                return a.name.localeCompare(b.name);
+            });
+
+            // Убираем дубли по названию
+            const uniqueCities = [];
+            const seenNames = new Set();
+            for (let i = 0; i < cities.length; i++) {
+                const city = cities[i];
+                if (!seenNames.has(city.name)) {
+                    seenNames.add(city.name);
+                    uniqueCities.push(city);
+                }
+                if (uniqueCities.length >= 15) break;
+            }
+
+            console.log('✅ Найдено городов после фильтрации:', uniqueCities.length);
+            res.json({ cities: uniqueCities });
+        } else {
+            console.log('ℹ️ Города не найдены');
+            res.json({ cities: [] });
+        }
 
     } catch (error) {
         console.error('❌ Ошибка в /api/search-cities:');
