@@ -24,23 +24,25 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ СДЭК (с приоритетом и фильтрацией)
+// 1. ПОИСК ГОРОДОВ СДЭК (исправленная версия)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
-    console.log('\n🔍 ===== ПОИСК ГОРОДОВ =====');
-    console.log('📥 Запрос:', req.body);
+    console.log('🔍 Поиск городов для:', req.body.query);
 
     try {
         const { query } = req.body;
 
         if (!query || query.length < 2) {
+            console.log('⚠️ Запрос слишком короткий');
             return res.status(400).json({ error: 'Введите минимум 2 символа' });
         }
 
         if (!CDEK_ACCOUNT || !CDEK_SECRET) {
-            return res.status(500).json({ error: 'Сервер не настроен' });
+            console.error('❌ Данные СДЭК не настроены!');
+            return res.status(500).json({ error: 'Сервер не настроен для поиска городов' });
         }
 
+        console.log('🔑 Получение токена СДЭК...');
         const tokenResponse = await axios.post(
             'https://api.cdek.ru/v2/oauth/token',
             {
@@ -51,14 +53,16 @@ app.post('/api/search-cities', async (req, res) => {
         );
 
         const accessToken = tokenResponse.data.access_token;
+        console.log('✅ Токен получен');
 
+        console.log(`📡 Запрос к СДЭК для '${query}'...`);
         const cityResponse = await axios.get(
             'https://api.cdek.ru/v2/location/cities',
             {
                 params: {
                     country_codes: 'RU',
                     q: query,
-                    limit: 50
+                    limit: 10
                 },
                 headers: {
                     'Authorization': `Bearer ${accessToken}`
@@ -66,45 +70,36 @@ app.post('/api/search-cities', async (req, res) => {
             }
         );
 
-        const allCities = cityResponse.data.map(function(city) {
-            return {
-                code: city.code,
-                name: city.name,
-                postalCode: city.postal_code,
-                region: city.region,
-                country: city.country_name,
-                isExact: city.name.toLowerCase() === query.toLowerCase(),
-                isStarting: city.name.toLowerCase().startsWith(query.toLowerCase())
-            };
-        });
-
-        const sortedCities = allCities.sort(function(a, b) {
-            if (a.isExact && !b.isExact) return -1;
-            if (!a.isExact && b.isExact) return 1;
-            if (a.isStarting && !b.isStarting) return -1;
-            if (!a.isStarting && b.isStarting) return 1;
-            return a.name.localeCompare(b.name);
-        });
-
-        const uniqueCities = [];
-        const seenNames = new Set();
-        for (var i = 0; i < sortedCities.length; i++) {
-            var city = sortedCities[i];
-            if (!seenNames.has(city.name)) {
-                seenNames.add(city.name);
-                uniqueCities.push(city);
-                if (uniqueCities.length >= 10) break;
-            }
+        if (!cityResponse.data || cityResponse.data.length === 0) {
+            console.log('ℹ️ Города не найдены');
+            return res.json({ cities: [] });
         }
 
-        console.log('✅ Найдено городов:', uniqueCities.length);
-        res.json({ cities: uniqueCities });
+        const cities = cityResponse.data.map(city => ({
+            code: city.code,
+            name: city.name,
+            postalCode: city.postal_code,
+            region: city.region,
+            country: city.country_name
+        }));
+
+        console.log(`✅ Найдено городов: ${cities.length}`);
+        res.json({ cities });
 
     } catch (error) {
-        console.error('❌ Ошибка поиска городов:', error.response?.data || error.message);
+        console.error('❌ Ошибка в /api/search-cities:');
+        if (error.response) {
+            console.error('Статус:', error.response.status);
+            console.error('Данные:', JSON.stringify(error.response.data, null, 2));
+        } else if (error.request) {
+            console.error('Нет ответа от СДЭК');
+        } else {
+            console.error('Ошибка:', error.message);
+        }
+
         res.status(500).json({
-            error: 'Ошибка поиска городов',
-            details: error.response?.data || error.message
+            error: 'Ошибка поиска городов. Попробуйте позже.',
+            details: error.message || 'Неизвестная ошибка'
         });
     }
 });
