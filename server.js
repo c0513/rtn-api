@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ (минимальная версия)
+// 1. ПОИСК ГОРОДОВ (с отладкой)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
     console.log('🔍 Поиск городов для:', req.body.query);
@@ -65,13 +65,21 @@ app.post('/api/search-cities', async (req, res) => {
 
         console.log('📦 Ответ от СДЭК:', cityResponse.data ? cityResponse.data.length : 0, 'записей');
 
+        // Выведем первые 3 записи для отладки
+        if (cityResponse.data && cityResponse.data.length > 0) {
+            console.log('📋 Первые 3 записи:', JSON.stringify(cityResponse.data.slice(0, 3), null, 2));
+        }
+
         // Просто берём все города, которые есть
         const cities = [];
         if (cityResponse.data && cityResponse.data.length > 0) {
             for (let i = 0; i < cityResponse.data.length; i++) {
                 const city = cityResponse.data[i];
                 // Пропускаем, если нет названия
-                if (!city.name) continue;
+                if (!city.name) {
+                    console.log('⚠️ Город без названия:', JSON.stringify(city));
+                    continue;
+                }
                 
                 cities.push({
                     code: city.code || 0,
