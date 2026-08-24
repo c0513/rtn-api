@@ -22,7 +22,7 @@ app.use((req, res, next) => {
 // 1. ПОИСК ГОРОДОВ (с фильтрацией по названию)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
-    console.log('🔍 Поиск городов для:', req.body.query);
+    console.log('🔍 Поиск городов para:', req.body.query);
 
     try {
         const query = req.body.query;
@@ -53,7 +53,7 @@ app.post('/api/search-cities', async (req, res) => {
                 params: {
                     country_codes: 'RU',
                     q: query,
-                    limit: 50 // больше записей для фильтрации
+                    limit: 50
                 },
                 headers: {
                     'Authorization': `Bearer ${accessToken}`
@@ -72,16 +72,12 @@ app.post('/api/search-cities', async (req, res) => {
                 const cityName = city.city || city.name || '';
                 const cityNameLower = cityName.toLowerCase();
 
-                // Фильтруем: показываем только если название начинается с запроса
-                // или содержит запрос как отдельное слово
                 const startsWithQuery = cityNameLower.startsWith(queryLower);
                 const containsAsWord = cityNameLower.includes(queryLower) && 
                                        (cityNameLower.length === queryLower.length || 
                                         cityNameLower[queryLower.length] === ' ' ||
                                         cityNameLower[queryLower.length] === '-' ||
                                         cityNameLower[queryLower.length] === '(');
-
-                // Также добавляем города, где запрос является точным совпадением
                 const isExactMatch = cityNameLower === queryLower;
 
                 if (startsWithQuery || containsAsWord || isExactMatch) {
@@ -90,14 +86,12 @@ app.post('/api/search-cities', async (req, res) => {
                         name: cityName,
                         postalCode: city.postal_code || '',
                         region: city.region || '',
-                        // Для сортировки
                         isExact: isExactMatch,
                         isStartsWith: startsWithQuery
                     });
                 }
             }
 
-            // Сортируем: сначала точные совпадения, потом начинающиеся с запроса, потом остальные
             cities.sort((a, b) => {
                 if (a.isExact && !b.isExact) return -1;
                 if (!a.isExact && b.isExact) return 1;
@@ -106,7 +100,6 @@ app.post('/api/search-cities', async (req, res) => {
                 return a.name.localeCompare(b.name);
             });
 
-            // Убираем дубли по названию
             const uniqueCities = [];
             const seenNames = new Set();
             for (let i = 0; i < cities.length; i++) {
@@ -142,15 +135,20 @@ app.post('/api/search-cities', async (req, res) => {
 });
 
 // ============================================================
-// 2. РАСЧЁТ ДОСТАВКИ
+// 2. РАСЧЁТ ДОСТАВКИ СДЭК (с реальными тарифами)
 // ============================================================
 app.post('/api/calculate-delivery', async (req, res) => {
-    console.log('📦 Расчёт доставки для города:', req.body.cityCode);
+    console.log('📦 Расчёт доставки для города:', req.body);
 
     try {
-        const { cityCode } = req.body;
+        const { cityCode, postalCode, cityName } = req.body;
+
         if (!cityCode) {
             return res.status(400).json({ error: 'Не передан код города' });
+        }
+
+        if (!CDEK_ACCOUNT || !CDEK_SECRET) {
+            return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
         const tokenResponse = await axios.post(
@@ -164,53 +162,95 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
         const accessToken = tokenResponse.data.access_token;
 
+        const packageWeight = 500;
+        const packageLength = 400;
+        const packageWidth = 400;
+        const packageHeight = 200;
+
         const tariffs = [3, 137, 139];
-        for (let tariff of tariffs) {
+        let lastError = null;
+
+        for (const tariffCode of tariffs) {
             try {
+                console.log(`🔍 Пробуем тариф ${tariffCode}...`);
+                
                 const tariffResponse = await axios.post(
                     'https://api.cdek.ru/v2/calculator/tariff',
                     {
-                        tariff_code: tariff,
-                        from_location: { code: 270, postal_code: '196608' },
-                        to_location: { code: cityCode },
-                        packages: [{ weight: 500, length: 400, width: 400, height: 200 }]
+                        tariff_code: tariffCode,
+                        from_location: {
+                            code: 270,
+                            postal_code: '196608'
+                        },
+                        to_location: {
+                            code: cityCode,
+                            postal_code: postalCode || undefined
+                        },
+                        packages: [{
+                            weight: packageWeight,
+                            length: packageLength,
+                            width: packageWidth,
+                            height: packageHeight
+                        }]
                     },
                     {
-                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                        headers: {
+                            'Authorization': `Bearer ${accessToken}`
+                        }
                     }
                 );
 
+                console.log(`✅ Тариф ${tariffCode} работает! Стоимость: ${tariffResponse.data.total_sum} ₽`);
+                
                 return res.json({
                     deliveryPrice: tariffResponse.data.total_sum,
-                    deliveryTime: tariffResponse.data.delivery_time || null
+                    deliveryTime: tariffResponse.data.delivery_time || null,
+                    city: cityName || 'Город',
+                    currency: 'RUB'
                 });
 
-            } catch (e) {
-                console.log(`Тариф ${tariff} не подходит`);
+            } catch (error) {
+                console.log(`❌ Тариф ${tariffCode} не подходит`);
+                lastError = error;
             }
         }
 
-        res.json({
+        console.log('⚠️ Все тарифы недоступны. Используем фиксированную стоимость');
+        return res.json({
             deliveryPrice: 500,
+            deliveryTime: 3,
+            city: cityName || 'Город',
+            currency: 'RUB',
             isFallback: true
         });
 
     } catch (error) {
-        console.error('❌ Ошибка расчёта:', error.message);
-        res.status(500).json({ error: 'Ошибка расчёта доставки' });
+        console.error('❌ Ошибка расчёта доставки:', error.response?.data || error.message);
+        res.json({
+            deliveryPrice: 500,
+            deliveryTime: 3,
+            city: req.body.cityName || 'Город',
+            currency: 'RUB',
+            isFallback: true
+        });
     }
 });
 
 // ============================================================
-// 3. ПОЛУЧЕНИЕ ПВЗ
+// 3. ПОЛУЧЕНИЕ ПВЗ СДЭК
 // ============================================================
 app.post('/api/get-pickup-points', async (req, res) => {
-    console.log('📍 Получение ПВЗ для города:', req.body.cityCode);
+    console.log('📍 Получение ПВЗ para города:', req.body.cityCode);
 
     try {
         const { cityCode } = req.body;
+
         if (!cityCode) {
             return res.status(400).json({ error: 'Не передан код города' });
+        }
+
+        if (!CDEK_ACCOUNT || !CDEK_SECRET) {
+            return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
         const tokenResponse = await axios.post(
@@ -240,27 +280,36 @@ app.post('/api/get-pickup-points', async (req, res) => {
             }
         );
 
+        console.log(`✅ Найдено ПВЗ: ${pickupResponse.data.length}`);
+
         const points = pickupResponse.data.map(point => ({
             code: point.code,
             name: point.name,
             address: point.address,
+            city: point.city,
+            workTime: point.work_time,
+            phone: point.phone,
             lat: point.coord_lat,
             lon: point.coord_long,
-            workTime: point.work_time,
-            phone: point.phone
+            nearestStation: point.nearest_station,
+            metroStation: point.metro_station,
+            weightLimit: point.weight_limit,
+            dimensions: point.dimensions
         }));
 
-        console.log(`✅ Найдено ПВЗ: ${points.length}`);
         res.json({ points });
 
     } catch (error) {
-        console.error('❌ Ошибка получения ПВЗ:', error.message);
-        res.status(500).json({ error: 'Ошибка получения ПВЗ' });
+        console.error('❌ Ошибка получения ПВЗ:', error.response?.data || error.message);
+        res.status(500).json({
+            error: 'Ошибка получения пунктов выдачи',
+            details: error.response?.data || error.message
+        });
     }
 });
 
 // ============================================================
-// 4. СОЗДАНИЕ ПЛАТЕЖА
+// 4. СОЗДАНИЕ ПЛАТЕЖА (ЮKASSA)
 // ============================================================
 app.post('/api/create-payment', async (req, res) => {
     console.log('💳 Создание платежа');
