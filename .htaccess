@@ -1,0 +1,10 @@
+# Разрешаем доступ к API
+RewriteEngine On
+
+# Перенаправляем все запросы к /api/* на server.js
+RewriteRule ^(.*)$ server.js [QSA,L]
+
+# Заголовки CORS
+Header set Access-Control-Allow-Origin "*"
+Header set Access-Control-Allow-Methods "GET, POST, OPTIONS"
+Header set Access-Control-Allow-Headers "Content-Type"
