@@ -24,7 +24,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ СДЭК (с фильтрацией областей)
+// 1. ПОИСК ГОРОДОВ СДЭК (с проверкой на undefined)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
     console.log('🔍 Поиск городов для:', req.body.query);
@@ -62,7 +62,7 @@ app.post('/api/search-cities', async (req, res) => {
                 params: {
                     country_codes: 'RU',
                     q: query,
-                    limit: 50
+                    limit: 10
                 },
                 headers: {
                     'Authorization': `Bearer ${accessToken}`
@@ -75,45 +75,24 @@ app.post('/api/search-cities', async (req, res) => {
             return res.json({ cities: [] });
         }
 
-        const queryLower = query.toLowerCase();
-        
-        const filteredCities = cityResponse.data
-            .filter(city => {
-                const nameLower = city.name.toLowerCase();
-                
-                // Исключаем области и края
-                if (nameLower.includes('область') || nameLower.includes('край')) {
-                    return false;
-                }
+        // Безопасное преобразование
+        const cities = cityResponse.data
+            .filter(function(city) {
+                if (!city || !city.name) return false;
                 return true;
             })
-            .map(city => ({
-                code: city.code,
-                name: city.name,
-                postalCode: city.postal_code,
-                region: city.region,
-                country: city.country_name,
-                isExact: city.name.toLowerCase() === queryLower,
-                isStartsWith: city.name.toLowerCase().startsWith(queryLower)
-            }))
-            .sort((a, b) => {
-                if (a.isExact && !b.isExact) return -1;
-                if (!a.isExact && b.isExact) return 1;
-                if (a.isStartsWith && !b.isStartsWith) return -1;
-                if (!a.isStartsWith && b.isStartsWith) return 1;
-                return a.name.localeCompare(b.name);
-            })
-            .slice(0, 10)
-            .map(city => ({
-                code: city.code,
-                name: city.name,
-                postalCode: city.postalCode,
-                region: city.region,
-                country: city.country
-            }));
+            .map(function(city) {
+                return {
+                    code: city.code || 0,
+                    name: city.name || 'Неизвестно',
+                    postalCode: city.postal_code || '',
+                    region: city.region || '',
+                    country: city.country_name || 'RU'
+                };
+            });
 
-        console.log(`✅ Найдено городов: ${filteredCities.length}`);
-        res.json({ cities: filteredCities });
+        console.log(`✅ Найдено городов: ${cities.length}`);
+        res.json({ cities });
 
     } catch (error) {
         console.error('❌ Ошибка в /api/search-cities:');
