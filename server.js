@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ (с отладкой)
+// 1. ПОИСК ГОРОДОВ (исправленное поле city)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
     console.log('🔍 Поиск городов для:', req.body.query);
@@ -35,7 +35,6 @@ app.post('/api/search-cities', async (req, res) => {
             return res.status(500).json({ error: 'Сервер не настроен' });
         }
 
-        // Получаем токен
         const tokenResponse = await axios.post(
             'https://api.cdek.ru/v2/oauth/token',
             {
@@ -48,7 +47,6 @@ app.post('/api/search-cities', async (req, res) => {
         const accessToken = tokenResponse.data.access_token;
         console.log('✅ Токен получен');
 
-        // Запрашиваем города
         const cityResponse = await axios.get(
             'https://api.cdek.ru/v2/location/cities',
             {
@@ -65,25 +63,20 @@ app.post('/api/search-cities', async (req, res) => {
 
         console.log('📦 Ответ от СДЭК:', cityResponse.data ? cityResponse.data.length : 0, 'записей');
 
-        // Выведем первые 3 записи для отладки
-        if (cityResponse.data && cityResponse.data.length > 0) {
-            console.log('📋 Первые 3 записи:', JSON.stringify(cityResponse.data.slice(0, 3), null, 2));
-        }
-
-        // Просто берём все города, которые есть
         const cities = [];
         if (cityResponse.data && cityResponse.data.length > 0) {
             for (let i = 0; i < cityResponse.data.length; i++) {
                 const city = cityResponse.data[i];
-                // Пропускаем, если нет названия
-                if (!city.name) {
-                    console.log('⚠️ Город без названия:', JSON.stringify(city));
+                // Используем поле city, а не name!
+                const cityName = city.city || city.name;
+                if (!cityName) {
+                    console.log('⚠️ Пропускаем запись без названия:', JSON.stringify(city));
                     continue;
                 }
                 
                 cities.push({
                     code: city.code || 0,
-                    name: city.name || 'Неизвестно',
+                    name: cityName,
                     postalCode: city.postal_code || '',
                     region: city.region || ''
                 });
@@ -158,7 +151,6 @@ app.post('/api/calculate-delivery', async (req, res) => {
             }
         }
 
-        // Fallback
         res.json({
             deliveryPrice: 500,
             isFallback: true
