@@ -24,7 +24,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ СДЭК (с проверкой на undefined)
+// 1. ПОИСК ГОРОДОВ СДЭК (ПРАВИЛЬНЫЙ ПАРАМЕТР)
 // ============================================================
 app.post('/api/search-cities', async (req, res) => {
     console.log('🔍 Поиск городов для:', req.body.query);
@@ -61,7 +61,7 @@ app.post('/api/search-cities', async (req, res) => {
             {
                 params: {
                     country_codes: 'RU',
-                    q: query,
+                    city: query,
                     limit: 10
                 },
                 headers: {
@@ -75,7 +75,6 @@ app.post('/api/search-cities', async (req, res) => {
             return res.json({ cities: [] });
         }
 
-        // Безопасное преобразование
         const cities = cityResponse.data
             .filter(function(city) {
                 if (!city || !city.name) return false;
