@@ -12,8 +12,8 @@ app.use(express.json());
 // НАСТРОЙКИ
 // ============================================================
 
-const CDEK_CLIENT_ID = process.env.CDEK_CLIENT_ID;
-const CDEK_CLIENT_SECRET = process.env.CDEK_CLIENT_SECRET;
+const CDEK_ACCOUNT = process.env.CDEK_ACCOUNT;
+const CDEK_SECRET = process.env.CDEK_SECRET;
 
 const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID;
 const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
@@ -40,8 +40,8 @@ async function getCdekToken() {
         `${CDEK_API}/oauth/token`,
         new URLSearchParams({
             grant_type: 'client_credentials',
-            client_id: CDEK_CLIENT_ID,
-            client_secret: CDEK_CLIENT_SECRET
+            client_id: CDEK_ACCOUNT,
+            client_secret: CDEK_SECRET
         }),
         {
             headers: {
@@ -101,12 +101,14 @@ app.get('/api/health', (req, res) => {
 // 1. ПОИСК ГОРОДОВ CDEK
 // ============================================================
 
-app.get('/api/search-cities', async (req, res) => {
+app.post('/api/search-cities', async (req, res) => {
     try {
-        const query = String(req.query.q || '').trim();
+        const query = String(req.body.query || '').trim();
 
         if (query.length < 2) {
-            return res.json([]);
+            return res.json({
+                cities: []
+            });
         }
 
         const cacheKey = query.toLowerCase();
@@ -114,7 +116,9 @@ app.get('/api/search-cities', async (req, res) => {
         const cached = getCached(cityCache, cacheKey);
 
         if (cached) {
-            return res.json(cached);
+            return res.json({
+                cities: cached
+            });
         }
 
         const token = await getCdekToken();
@@ -143,7 +147,9 @@ app.get('/api/search-cities', async (req, res) => {
 
         setCached(cityCache, cacheKey, cities);
 
-        res.json(cities);
+        res.json({
+            cities
+        });
 
     } catch (error) {
         console.error(
@@ -152,7 +158,8 @@ app.get('/api/search-cities', async (req, res) => {
         );
 
         res.status(500).json({
-            error: 'Ошибка поиска города'
+            error: 'Ошибка поиска города',
+            cities: []
         });
     }
 });
@@ -161,13 +168,15 @@ app.get('/api/search-cities', async (req, res) => {
 // 2. ПОИСК АДРЕСОВ
 // ============================================================
 
-app.get('/api/search-addresses', async (req, res) => {
+app.post('/api/search-addresses', async (req, res) => {
     try {
-        const query = String(req.query.q || '').trim();
-        const city = String(req.query.city || '').trim();
+        const query = String(req.body.query || '').trim();
+        const city = String(req.body.city || '').trim();
 
         if (query.length < 2) {
-            return res.json([]);
+            return res.json({
+                addresses: []
+            });
         }
 
         const searchQuery = city
@@ -184,12 +193,10 @@ app.get('/api/search-addresses', async (req, res) => {
                     limit: 8,
                     countrycodes: 'ru'
                 },
-
                 headers: {
                     'User-Agent': 'RTN.PRO/1.0',
                     'Accept-Language': 'ru'
                 },
-
                 timeout: 8000
             }
         );
@@ -218,7 +225,9 @@ app.get('/api/search-addresses', async (req, res) => {
             lon: item.lon
         }));
 
-        res.json(addresses);
+        res.json({
+            addresses
+        });
 
     } catch (error) {
         console.error(
@@ -227,7 +236,8 @@ app.get('/api/search-addresses', async (req, res) => {
         );
 
         res.status(500).json({
-            error: 'Ошибка поиска адреса'
+            error: 'Ошибка поиска адреса',
+            addresses: []
         });
     }
 });
@@ -236,13 +246,14 @@ app.get('/api/search-addresses', async (req, res) => {
 // 3. ПУНКТЫ ВЫДАЧИ CDEK
 // ============================================================
 
-app.get('/api/get-pickup-points', async (req, res) => {
+app.post('/api/get-pickup-points', async (req, res) => {
     try {
-        const cityCode = Number(req.query.cityCode);
+        const cityCode = Number(req.body.cityCode);
 
         if (!cityCode) {
             return res.status(400).json({
-                error: 'Не указан код города'
+                error: 'Не указан код города',
+                points: []
             });
         }
 
@@ -254,12 +265,10 @@ app.get('/api/get-pickup-points', async (req, res) => {
                 headers: {
                     Authorization: `Bearer ${token}`
                 },
-
                 params: {
                     city_code: cityCode,
                     type: 'PVZ'
                 },
-
                 timeout: 15000
             }
         );
@@ -277,7 +286,9 @@ app.get('/api/get-pickup-points', async (req, res) => {
             metro: point.nearest_station || ''
         }));
 
-        res.json(points);
+        res.json({
+            points
+        });
 
     } catch (error) {
         console.error(
@@ -286,7 +297,8 @@ app.get('/api/get-pickup-points', async (req, res) => {
         );
 
         res.status(500).json({
-            error: 'Ошибка загрузки пунктов выдачи'
+            error: 'Ошибка загрузки пунктов выдачи',
+            points: []
         });
     }
 });
@@ -312,7 +324,6 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
         /*
          * delivery_mode:
-         *
          * 3 = склад → дверь
          * 4 = склад → склад / ПВЗ
          */
@@ -325,6 +336,7 @@ app.post('/api/calculate-delivery', async (req, res) => {
         const response = await axios.post(
             `${CDEK_API}/calculator/tarifflist`,
             {
+                // Москва — город отправления
                 from_location: {
                     code: 44
                 },
@@ -335,26 +347,27 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
                 packages: [
                     {
+                        // Вес в граммах
                         weight: 1000,
 
+                        // Размеры в сантиметрах
                         length: 25,
                         width: 20,
                         height: 15
                     }
                 ]
             },
-
             {
                 headers: {
                     Authorization: `Bearer ${token}`,
                     'Content-Type': 'application/json'
                 },
-
                 timeout: 15000
             }
         );
 
-        const tariffs = response.data?.tariff_codes || [];
+        const tariffs =
+            response.data?.tariff_codes || [];
 
         const suitableTariffs = tariffs
             .filter(tariff =>
@@ -377,15 +390,10 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
         res.json({
             price: Number(tariff.delivery_sum),
-
             tariffCode: tariff.tariff_code,
-
             tariffName: tariff.tariff_name,
-
             periodMin: tariff.period_min,
-
             periodMax: tariff.period_max,
-
             deliveryMode: tariff.delivery_mode
         });
 
@@ -445,10 +453,6 @@ function buildReceiptItems(
     const deliveryPrice =
         Number(delivery?.price || 0);
 
-    /*
-     * Сколько именно должны стоить товары
-     * после скидки.
-     */
     const targetGoodsTotal = Math.max(
         0,
         Math.round(
@@ -456,18 +460,6 @@ function buildReceiptItems(
         )
     );
 
-    /*
-     * Разворачиваем quantity.
-     *
-     * Например:
-     * WHEY x2
-     *
-     * превращается в две отдельные
-     * позиции по 1 шт.
-     *
-     * Так проще корректно распределить
-     * скидку до копейки.
-     */
     const units = [];
 
     (items || []).forEach(item => {
@@ -510,13 +502,6 @@ function buildReceiptItems(
         units.map((unit, index) => {
             let cents;
 
-            /*
-             * Последняя позиция получает
-             * остаток до копейки.
-             *
-             * Поэтому сумма чека будет
-             * ТОЧНО совпадать с платежом.
-             */
             if (
                 index ===
                 units.length - 1
@@ -565,16 +550,12 @@ function buildReceiptItems(
                 },
 
                 vat_code: 1,
-
-                payment_mode:
-                    'full_payment',
-
-                payment_subject:
-                    'commodity'
+                payment_mode: 'full_payment',
+                payment_subject: 'commodity'
             };
         });
 
-    // Доставка отдельной услугой
+    // Доставка идёт отдельной услугой
     if (deliveryPrice > 0) {
         receiptItems.push({
             description:
@@ -597,12 +578,8 @@ function buildReceiptItems(
             },
 
             vat_code: 1,
-
-            payment_mode:
-                'full_payment',
-
-            payment_subject:
-                'service'
+            payment_mode: 'full_payment',
+            payment_subject: 'service'
         });
     }
 
@@ -622,10 +599,7 @@ app.post('/api/create-payment', async (req, res) => {
             delivery
         } = req.body;
 
-        // ----------------------------------------------------
         // Проверяем сумму
-        // ----------------------------------------------------
-
         const paymentAmount =
             Number(amount);
 
@@ -634,15 +608,11 @@ app.post('/api/create-payment', async (req, res) => {
             paymentAmount <= 0
         ) {
             return res.status(400).json({
-                error:
-                    'Некорректная сумма платежа'
+                error: 'Некорректная сумма платежа'
             });
         }
 
-        // ----------------------------------------------------
         // Нормализуем телефон
-        // ----------------------------------------------------
-
         const normalizedPhone =
             normalizeRuPhoneForYooKassa(
                 customer?.phone
@@ -650,15 +620,11 @@ app.post('/api/create-payment', async (req, res) => {
 
         if (!normalizedPhone) {
             return res.status(400).json({
-                error:
-                    'Некорректный номер телефона'
+                error: 'Некорректный номер телефона'
             });
         }
 
-        // ----------------------------------------------------
         // Формируем чек
-        // ----------------------------------------------------
-
         const receiptItems =
             buildReceiptItems(
                 items,
@@ -668,20 +634,14 @@ app.post('/api/create-payment', async (req, res) => {
 
         if (!receiptItems.length) {
             return res.status(400).json({
-                error:
-                    'Корзина пуста'
+                error: 'Корзина пуста'
             });
         }
-
-        // ----------------------------------------------------
-        // Данные платежа
-        // ----------------------------------------------------
 
         const paymentData = {
             amount: {
                 value:
                     paymentAmount.toFixed(2),
-
                 currency: 'RUB'
             },
 
@@ -689,13 +649,11 @@ app.post('/api/create-payment', async (req, res) => {
 
             confirmation: {
                 type: 'redirect',
-
                 return_url:
                     `${FRONTEND_URL}/?payment=success`
             },
 
-            description:
-                'Заказ RTN.PRO',
+            description: 'Заказ RTN.PRO',
 
             metadata: {
                 customerName:
@@ -724,10 +682,6 @@ app.post('/api/create-payment', async (req, res) => {
                     receiptItems
             }
         };
-
-        // ----------------------------------------------------
-        // Отправляем в ЮKassa
-        // ----------------------------------------------------
 
         const idempotenceKey =
             crypto.randomUUID();
@@ -759,10 +713,6 @@ app.post('/api/create-payment', async (req, res) => {
                 }
             );
 
-        // ----------------------------------------------------
-        // Проверяем ссылку оплаты
-        // ----------------------------------------------------
-
         const confirmationUrl =
             response.data
                 ?.confirmation
@@ -781,7 +731,8 @@ app.post('/api/create-payment', async (req, res) => {
         }
 
         res.json({
-            id: response.data.id,
+            id:
+                response.data.id,
 
             status:
                 response.data.status,
