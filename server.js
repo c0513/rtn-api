@@ -1,648 +1,845 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-const SHOP_ID = process.env.SHOP_ID || '1403586';
-const SECRET_KEY = process.env.SECRET_KEY;
-const CDEK_ACCOUNT = process.env.CDEK_ACCOUNT;
-const CDEK_SECRET = process.env.CDEK_SECRET;
-
-// ============================================================
-// CDEK PERFORMANCE CACHE
-// Не запрашиваем OAuth-токен при каждом вводе буквы.
-// ============================================================
-let cdekTokenCache = {
-    token: null,
-    expiresAt: 0
-};
-
-const citySearchCache = new Map();
-const CITY_CACHE_TTL = 10 * 60 * 1000; // 10 минут
-const CITY_CACHE_MAX = 250;
-
-const addressSearchCache = new Map();
-const ADDRESS_CACHE_TTL = 30 * 60 * 1000; // 30 минут
-const ADDRESS_CACHE_MAX = 400;
-
-async function getCdekAccessToken() {
-    const now = Date.now();
-
-    // Оставляем запас 60 секунд до реального истечения токена.
-    if (cdekTokenCache.token && now < cdekTokenCache.expiresAt - 60_000) {
-        return cdekTokenCache.token;
-    }
-
-    if (!CDEK_ACCOUNT || !CDEK_SECRET) {
-        throw new Error('CDEK credentials are not configured');
-    }
-
-    const tokenResponse = await axios.post(
-        'https://api.cdek.ru/v2/oauth/token',
-        {
-            grant_type: 'client_credentials',
-            client_id: CDEK_ACCOUNT,
-            client_secret: CDEK_SECRET
-        },
-        {
-            timeout: 8000
-        }
-    );
-
-    const expiresIn = Number(tokenResponse.data.expires_in || 3600);
-
-    cdekTokenCache = {
-        token: tokenResponse.data.access_token,
-        expiresAt: now + expiresIn * 1000
-    };
-
-    console.log('✅ Новый токен СДЭК получен и закэширован');
-    return cdekTokenCache.token;
-}
-
-function getCachedCitySearch(query) {
-    const key = String(query || '').trim().toLowerCase();
-    const cached = citySearchCache.get(key);
-
-    if (!cached) return null;
-
-    if (Date.now() - cached.createdAt > CITY_CACHE_TTL) {
-        citySearchCache.delete(key);
-        return null;
-    }
-
-    return cached.cities;
-}
-
-function setCachedCitySearch(query, cities) {
-    const key = String(query || '').trim().toLowerCase();
-
-    if (citySearchCache.size >= CITY_CACHE_MAX) {
-        const oldestKey = citySearchCache.keys().next().value;
-        if (oldestKey) citySearchCache.delete(oldestKey);
-    }
-
-    citySearchCache.set(key, {
-        cities,
-        createdAt: Date.now()
-    });
-}
-
-
-function getCachedAddressSearch(cityName, query) {
-    const key = `${String(cityName || '').trim().toLowerCase()}::${String(query || '').trim().toLowerCase()}`;
-    const cached = addressSearchCache.get(key);
-
-    if (!cached) return null;
-
-    if (Date.now() - cached.createdAt > ADDRESS_CACHE_TTL) {
-        addressSearchCache.delete(key);
-        return null;
-    }
-
-    return cached.addresses;
-}
-
-function setCachedAddressSearch(cityName, query, addresses) {
-    const key = `${String(cityName || '').trim().toLowerCase()}::${String(query || '').trim().toLowerCase()}`;
-
-    if (addressSearchCache.size >= ADDRESS_CACHE_MAX) {
-        const oldestKey = addressSearchCache.keys().next().value;
-        if (oldestKey) addressSearchCache.delete(oldestKey);
-    }
-
-    addressSearchCache.set(key, {
-        addresses,
-        createdAt: Date.now()
-    });
-}
 
 app.use(cors());
 app.use(express.json());
 
-app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    next();
-});
+// ============================================================
+// НАСТРОЙКИ
+// ============================================================
 
+const CDEK_CLIENT_ID = process.env.CDEK_CLIENT_ID;
+const CDEK_CLIENT_SECRET = process.env.CDEK_CLIENT_SECRET;
+
+const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID;
+const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
+
+const CDEK_API = 'https://api.cdek.ru/v2';
+
+// ============================================================
+// CDEK TOKEN
+// ============================================================
+
+let cdekToken = null;
+let cdekTokenExpiresAt = 0;
+
+async function getCdekToken() {
+    const now = Date.now();
+
+    if (cdekToken && now < cdekTokenExpiresAt - 60000) {
+        return cdekToken;
+    }
+
+    const response = await axios.post(
+        `${CDEK_API}/oauth/token`,
+        new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: CDEK_CLIENT_ID,
+            client_secret: CDEK_CLIENT_SECRET
+        }),
+        {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            timeout: 10000
+        }
+    );
+
+    cdekToken = response.data.access_token;
+
+    cdekTokenExpiresAt =
+        now + ((response.data.expires_in || 3600) * 1000);
+
+    return cdekToken;
+}
+
+// ============================================================
+// КЭШ
+// ============================================================
+
+const cityCache = new Map();
+const CITY_CACHE_TTL = 10 * 60 * 1000;
+
+function getCached(cache, key) {
+    const value = cache.get(key);
+
+    if (!value) return null;
+
+    if (Date.now() - value.time > CITY_CACHE_TTL) {
+        cache.delete(key);
+        return null;
+    }
+
+    return value.data;
+}
+
+function setCached(cache, key, data) {
+    cache.set(key, {
+        time: Date.now(),
+        data
+    });
+}
+
+// ============================================================
+// HEALTH
+// ============================================================
 
 app.get('/api/health', (req, res) => {
     res.json({
         ok: true,
-        service: 'rtn-api',
-        time: new Date().toISOString(),
-        cdekTokenCached: Boolean(cdekTokenCache.token && Date.now() < cdekTokenCache.expiresAt)
+        service: 'rhino-api'
     });
 });
 
 // ============================================================
-// 1. ПОИСК ГОРОДОВ (с фильтрацией по названию)
+// 1. ПОИСК ГОРОДОВ CDEK
 // ============================================================
-app.post('/api/search-cities', async (req, res) => {
-    console.log('🔍 Поиск городов para:', req.body.query);
 
+app.get('/api/search-cities', async (req, res) => {
     try {
-        const query = String(req.body.query || '').trim();
+        const query = String(req.query.q || '').trim();
 
-        if (!query || query.length < 2) {
-            return res.json({ cities: [] });
+        if (query.length < 2) {
+            return res.json([]);
         }
 
-        if (!CDEK_ACCOUNT || !CDEK_SECRET) {
-            return res.status(500).json({ error: 'Сервер не настроен' });
+        const cacheKey = query.toLowerCase();
+
+        const cached = getCached(cityCache, cacheKey);
+
+        if (cached) {
+            return res.json(cached);
         }
 
-        const cachedCities = getCachedCitySearch(query);
-        if (cachedCities) {
-            console.log('⚡ Города отданы из кэша:', query, cachedCities.length);
-            return res.json({ cities: cachedCities, cached: true });
-        }
+        const token = await getCdekToken();
 
-        const accessToken = await getCdekAccessToken();
-
-        const cityResponse = await axios.get(
-            'https://api.cdek.ru/v2/location/cities',
+        const response = await axios.get(
+            `${CDEK_API}/location/cities`,
             {
+                headers: {
+                    Authorization: `Bearer ${token}`
+                },
                 params: {
                     country_codes: 'RU',
-                    q: query,
-                    limit: 25
+                    city: query,
+                    size: 10
                 },
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`
-                },
-                timeout: 8000
+                timeout: 10000
             }
         );
 
-        console.log('📦 Ответ от СДЭК:', cityResponse.data ? cityResponse.data.length : 0, 'записей');
+        const cities = (response.data || []).map(city => ({
+            code: city.code,
+            city: city.city,
+            region: city.region,
+            country: city.country
+        }));
 
-        const queryLower = query.toLowerCase();
-        const cities = [];
+        setCached(cityCache, cacheKey, cities);
 
-        if (cityResponse.data && cityResponse.data.length > 0) {
-            for (let i = 0; i < cityResponse.data.length; i++) {
-                const city = cityResponse.data[i];
-                const cityName = city.city || city.name || '';
-                const cityNameLower = cityName.toLowerCase();
-
-                const startsWithQuery = cityNameLower.startsWith(queryLower);
-                const containsAsWord = cityNameLower.includes(queryLower) && 
-                                       (cityNameLower.length === queryLower.length || 
-                                        cityNameLower[queryLower.length] === ' ' ||
-                                        cityNameLower[queryLower.length] === '-' ||
-                                        cityNameLower[queryLower.length] === '(');
-                const isExactMatch = cityNameLower === queryLower;
-
-                if (startsWithQuery || containsAsWord || isExactMatch) {
-                    cities.push({
-                        code: city.code || 0,
-                        name: cityName,
-                        postalCode: city.postal_code || '',
-                        region: city.region || '',
-                        isExact: isExactMatch,
-                        isStartsWith: startsWithQuery
-                    });
-                }
-            }
-
-            cities.sort((a, b) => {
-                if (a.isExact && !b.isExact) return -1;
-                if (!a.isExact && b.isExact) return 1;
-                if (a.isStartsWith && !b.isStartsWith) return -1;
-                if (!a.isStartsWith && b.isStartsWith) return 1;
-                return a.name.localeCompare(b.name);
-            });
-
-            const uniqueCities = [];
-            const seenNames = new Set();
-            for (let i = 0; i < cities.length; i++) {
-                const city = cities[i];
-                if (!seenNames.has(city.name)) {
-                    seenNames.add(city.name);
-                    uniqueCities.push(city);
-                }
-                if (uniqueCities.length >= 15) break;
-            }
-
-            console.log('✅ Найдено городов после фильтрации:', uniqueCities.length);
-            setCachedCitySearch(query, uniqueCities);
-            res.json({ cities: uniqueCities });
-        } else {
-            console.log('ℹ️ Города не найдены');
-            setCachedCitySearch(query, []);
-            res.json({ cities: [] });
-        }
+        res.json(cities);
 
     } catch (error) {
-        console.error('❌ Ошибка в /api/search-cities:');
-        if (error.response) {
-            console.error('Статус:', error.response.status);
-            console.error('Данные:', JSON.stringify(error.response.data, null, 2));
-        } else {
-            console.error('Ошибка:', error.message);
-        }
+        console.error(
+            'CDEK city search error:',
+            error.response?.data || error.message
+        );
 
         res.status(500).json({
-            error: 'Ошибка поиска городов',
-            details: error.message || 'Неизвестная ошибка'
+            error: 'Ошибка поиска города'
         });
     }
 });
 
 // ============================================================
-// 2. РАСЧЁТ ДОСТАВКИ СДЭК (с реальными тарифами)
+// 2. ПОИСК АДРЕСОВ
 // ============================================================
 
-// ============================================================
-// 2. ПОИСК УЛИЦ / ДОМОВ ДЛЯ КУРЬЕРСКОЙ ДОСТАВКИ
-// Быстрый серверный прокси к OpenStreetMap Nominatim.
-// На фронте запросы дебаунсятся, здесь ещё есть 30-минутный кэш.
-// ============================================================
-app.post('/api/search-addresses', async (req, res) => {
+app.get('/api/search-addresses', async (req, res) => {
     try {
-        const cityName = String(req.body.cityName || '').trim();
-        const query = String(req.body.query || '').trim();
+        const query = String(req.query.q || '').trim();
+        const city = String(req.query.city || '').trim();
 
-        if (!cityName || !query || query.length < 2) {
-            return res.json({ addresses: [] });
+        if (query.length < 2) {
+            return res.json([]);
         }
 
-        const cached = getCachedAddressSearch(cityName, query);
-        if (cached) {
-            return res.json({ addresses: cached, cached: true });
-        }
+        const searchQuery = city
+            ? `${city}, ${query}`
+            : query;
 
         const response = await axios.get(
             'https://nominatim.openstreetmap.org/search',
             {
                 params: {
-                    q: `${query}, ${cityName}, Россия`,
+                    q: searchQuery,
                     format: 'jsonv2',
                     addressdetails: 1,
                     limit: 8,
-                    countrycodes: 'ru',
-                    layer: 'address'
+                    countrycodes: 'ru'
                 },
+
                 headers: {
-                    // Для публичного Nominatim User-Agent обязателен.
-                    'User-Agent': 'RTN.PRO/1.0 (https://rtn.pro)',
+                    'User-Agent': 'RTN.PRO/1.0',
                     'Accept-Language': 'ru'
                 },
-                timeout: 7000
+
+                timeout: 8000
             }
         );
 
-        const seen = new Set();
-        const addresses = (response.data || [])
-            .map(item => {
-                const a = item.address || {};
-                const road =
-                    a.road ||
-                    a.pedestrian ||
-                    a.residential ||
-                    a.footway ||
-                    a.neighbourhood ||
-                    '';
-                const house = a.house_number || '';
-                const postcode = a.postcode || '';
+        const addresses = (response.data || []).map(item => ({
+            displayName: item.display_name,
 
-                let label = '';
-                if (road && house) label = `${road}, д. ${house}`;
-                else if (road) label = road;
-                else label = String(item.display_name || '').split(',').slice(0, 2).join(',').trim();
+            street:
+                item.address?.road ||
+                item.address?.pedestrian ||
+                item.address?.street ||
+                '',
 
-                return {
-                    id: String(item.place_id || `${item.lat}_${item.lon}`),
-                    label,
-                    road,
-                    house,
-                    postcode,
-                    displayName: item.display_name,
-                    lat: Number(item.lat),
-                    lon: Number(item.lon)
-                };
-            })
-            .filter(item => {
-                const key = item.label.toLowerCase();
-                if (!item.label || seen.has(key)) return false;
-                seen.add(key);
-                return true;
-            });
+            house:
+                item.address?.house_number ||
+                '',
 
-        setCachedAddressSearch(cityName, query, addresses);
-        res.json({ addresses });
+            city:
+                item.address?.city ||
+                item.address?.town ||
+                item.address?.village ||
+                item.address?.municipality ||
+                city,
+
+            lat: item.lat,
+            lon: item.lon
+        }));
+
+        res.json(addresses);
 
     } catch (error) {
-        console.error('❌ Ошибка поиска адреса:', error.response?.data || error.message);
-        res.status(502).json({
-            error: 'Не удалось выполнить поиск адреса',
-            addresses: []
+        console.error(
+            'Address search error:',
+            error.response?.data || error.message
+        );
+
+        res.status(500).json({
+            error: 'Ошибка поиска адреса'
         });
     }
 });
 
-app.post('/api/calculate-delivery', async (req, res) => {
-    console.log('📦 Расчёт доставки СДЭК:', req.body);
+// ============================================================
+// 3. ПУНКТЫ ВЫДАЧИ CDEK
+// ============================================================
 
+app.get('/api/get-pickup-points', async (req, res) => {
+    try {
+        const cityCode = Number(req.query.cityCode);
+
+        if (!cityCode) {
+            return res.status(400).json({
+                error: 'Не указан код города'
+            });
+        }
+
+        const token = await getCdekToken();
+
+        const response = await axios.get(
+            `${CDEK_API}/deliverypoints`,
+            {
+                headers: {
+                    Authorization: `Bearer ${token}`
+                },
+
+                params: {
+                    city_code: cityCode,
+                    type: 'PVZ'
+                },
+
+                timeout: 15000
+            }
+        );
+
+        const points = (response.data || []).map(point => ({
+            code: point.code,
+            name: point.name,
+            address: point.location?.address || '',
+            addressFull: point.location?.address_full || '',
+            city: point.location?.city || '',
+            latitude: point.location?.latitude,
+            longitude: point.location?.longitude,
+            workTime: point.work_time || '',
+            phone: point.phones?.[0]?.number || '',
+            metro: point.nearest_station || ''
+        }));
+
+        res.json(points);
+
+    } catch (error) {
+        console.error(
+            'CDEK pickup points error:',
+            error.response?.data || error.message
+        );
+
+        res.status(500).json({
+            error: 'Ошибка загрузки пунктов выдачи'
+        });
+    }
+});
+
+// ============================================================
+// 4. РАСЧЁТ ДОСТАВКИ CDEK
+// ============================================================
+
+app.post('/api/calculate-delivery', async (req, res) => {
     try {
         const {
             cityCode,
-            postalCode,
-            cityName,
-            deliveryMethod = 'cdek_courier',
-            packageWeight = 1000,
-            packageLength = 35,
-            packageWidth = 25,
-            packageHeight = 20
+            deliveryType
         } = req.body;
 
         if (!cityCode) {
-            return res.status(400).json({ error: 'Не передан код города' });
+            return res.status(400).json({
+                error: 'Не указан город доставки'
+            });
         }
 
-        if (!CDEK_ACCOUNT || !CDEK_SECRET) {
-            return res.status(500).json({ error: 'Сервер не настроен' });
-        }
+        const token = await getCdekToken();
 
-        const accessToken = await getCdekAccessToken();
+        /*
+         * delivery_mode:
+         *
+         * 3 = склад → дверь
+         * 4 = склад → склад / ПВЗ
+         */
 
-        // CDEK API:
-        // weight — граммы
-        // length / width / height — сантиметры
-        // В старой версии были размеры 400×400×200, которые API трактовал как САНТИМЕТРЫ.
-        // Из-за этого реальные тарифы часто не находились, и сайт падал в фиксу 500 ₽.
-        const safeWeight = Math.max(200, Math.min(Number(packageWeight) || 1000, 30000));
-        const safeLength = Math.max(10, Math.min(Number(packageLength) || 35, 120));
-        const safeWidth = Math.max(10, Math.min(Number(packageWidth) || 25, 80));
-        const safeHeight = Math.max(5, Math.min(Number(packageHeight) || 20, 80));
+        const wantedDeliveryMode =
+            deliveryType === 'courier'
+                ? 3
+                : 4;
 
-        const tariffResponse = await axios.post(
-            'https://api.cdek.ru/v2/calculator/tarifflist',
+        const response = await axios.post(
+            `${CDEK_API}/calculator/tarifflist`,
             {
                 from_location: {
-                    code: 270,
-                    postal_code: '196608'
+                    code: 44
                 },
+
                 to_location: {
-                    code: Number(cityCode),
-                    postal_code: postalCode || undefined
+                    code: Number(cityCode)
                 },
-                packages: [{
-                    weight: safeWeight,
-                    length: safeLength,
-                    width: safeWidth,
-                    height: safeHeight
-                }]
+
+                packages: [
+                    {
+                        weight: 1000,
+
+                        length: 25,
+                        width: 20,
+                        height: 15
+                    }
+                ]
             },
+
             {
                 headers: {
-                    'Authorization': `Bearer ${accessToken}`,
+                    Authorization: `Bearer ${token}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 10000
+
+                timeout: 15000
             }
         );
 
-        const tariffCodes = Array.isArray(tariffResponse.data?.tariff_codes)
-            ? tariffResponse.data.tariff_codes
-            : [];
+        const tariffs = response.data?.tariff_codes || [];
 
-        // CDEK delivery_mode:
-        // 1 = дверь → дверь
-        // 2 = дверь → склад
-        // 3 = склад → дверь
-        // 4 = склад → склад
-        //
-        // У RTN отправка идёт со склада:
-        // courier = склад → дверь
-        // pvz     = склад → склад (ПВЗ)
-        const wantedMode = deliveryMethod === 'cdek_pvz' ? 4 : 3;
+        const suitableTariffs = tariffs
+            .filter(tariff =>
+                tariff.delivery_mode === wantedDeliveryMode &&
+                Number(tariff.delivery_sum) > 0
+            )
+            .sort(
+                (a, b) =>
+                    Number(a.delivery_sum) -
+                    Number(b.delivery_sum)
+            );
 
-        const eligible = tariffCodes
-            .filter(t => Number(t.delivery_mode) === wantedMode)
-            .filter(t => Number.isFinite(Number(t.delivery_sum)) && Number(t.delivery_sum) > 0)
-            .sort((a, b) => Number(a.delivery_sum) - Number(b.delivery_sum));
-
-        if (eligible.length === 0) {
-            console.log('⚠️ СДЭК не вернул подходящий тариф', {
-                cityCode,
-                deliveryMethod,
-                wantedMode,
-                returned: tariffCodes.map(t => ({
-                    code: t.tariff_code,
-                    mode: t.delivery_mode,
-                    sum: t.delivery_sum
-                }))
-            });
-
-            return res.status(422).json({
-                error: deliveryMethod === 'cdek_pvz'
-                    ? 'СДЭК не нашёл тариф до ПВЗ для этого города'
-                    : 'СДЭК не нашёл курьерский тариф для этого города'
+        if (!suitableTariffs.length) {
+            return res.status(404).json({
+                error: 'СДЭК не вернул подходящий тариф'
             });
         }
 
-        const best = eligible[0];
+        const tariff = suitableTariffs[0];
 
-        console.log(
-            `✅ СДЭК: ${deliveryMethod}, тариф ${best.tariff_code}, ` +
-            `${best.tariff_name}, ${best.delivery_sum} ₽`
-        );
+        res.json({
+            price: Number(tariff.delivery_sum),
 
-        return res.json({
-            deliveryPrice: Number(best.delivery_sum),
-            deliveryTimeMin: best.period_min ?? null,
-            deliveryTimeMax: best.period_max ?? null,
-            tariffCode: best.tariff_code,
-            tariffName: best.tariff_name,
-            deliveryMode: best.delivery_mode,
-            city: cityName || 'Город',
-            currency: 'RUB',
-            calculatedByCdek: true
+            tariffCode: tariff.tariff_code,
+
+            tariffName: tariff.tariff_name,
+
+            periodMin: tariff.period_min,
+
+            periodMax: tariff.period_max,
+
+            deliveryMode: tariff.delivery_mode
         });
 
     } catch (error) {
-        console.error('❌ Ошибка расчёта доставки СДЭК:', error.response?.data || error.message);
-
-        // ВАЖНО: больше не подменяем ошибку фиктивными 500 ₽.
-        // Лучше честно показать ошибку и дать пользователю повторить расчёт.
-        return res.status(502).json({
-            error: 'СДЭК временно не смог рассчитать доставку. Попробуйте ещё раз.'
-        });
-    }
-});
-
-// ============================================================
-// 3. ПОЛУЧЕНИЕ ПВЗ СДЭК
-// ============================================================
-app.post('/api/get-pickup-points', async (req, res) => {
-    console.log('📍 Получение ПВЗ para города:', req.body.cityCode);
-
-    try {
-        const { cityCode } = req.body;
-
-        if (!cityCode) {
-            return res.status(400).json({ error: 'Не передан код города' });
-        }
-
-        if (!CDEK_ACCOUNT || !CDEK_SECRET) {
-            return res.status(500).json({ error: 'Сервер не настроен' });
-        }
-
-        const accessToken = await getCdekAccessToken();
-
-        const pickupResponse = await axios.get(
-            'https://api.cdek.ru/v2/deliverypoints',
-            {
-                params: {
-                    city_code: cityCode,
-                    type: 'PVZ',
-                    have_cashless: true,
-                    have_cash: true,
-                    allow_mark: true
-                },
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`
-                },
-                timeout: 10000
-            }
+        console.error(
+            'CDEK delivery calculation error:',
+            error.response?.data || error.message
         );
 
-        console.log(`✅ Найдено ПВЗ: ${pickupResponse.data.length}`);
-
-        const points = pickupResponse.data.map(point => ({
-            code: point.code,
-            name: point.name,
-            address: point.address,
-            city: point.city,
-            workTime: point.work_time,
-            phone: point.phone,
-            lat: point.coord_lat,
-            lon: point.coord_long,
-            nearestStation: point.nearest_station,
-            metroStation: point.metro_station,
-            weightLimit: point.weight_limit,
-            dimensions: point.dimensions
-        }));
-
-        res.json({ points });
-
-    } catch (error) {
-        console.error('❌ Ошибка получения ПВЗ:', error.response?.data || error.message);
         res.status(500).json({
-            error: 'Ошибка получения пунктов выдачи',
-            details: error.response?.data || error.message
+            error: 'Ошибка расчёта доставки',
+            details:
+                error.response?.data ||
+                error.message
         });
     }
 });
 
 // ============================================================
-// 4. СОЗДАНИЕ ПЛАТЕЖА (ЮKASSA)
+// ТЕЛЕФОН ДЛЯ ЮKASSA
 // ============================================================
-app.post('/api/create-payment', async (req, res) => {
-    console.log('💳 Создание платежа');
 
-    try {
-        const { amount, description, orderId, items, customer, delivery } = req.body;
+function normalizeRuPhoneForYooKassa(value) {
+    let digits = String(value || '')
+        .replace(/\D/g, '');
 
-        if (!amount) {
-            return res.status(400).json({ error: 'amount обязателен' });
+    if (
+        digits.length === 11 &&
+        digits.startsWith('8')
+    ) {
+        digits =
+            '7' +
+            digits.slice(1);
+
+    } else if (digits.length === 10) {
+        digits =
+            '7' +
+            digits;
+    }
+
+    if (!/^7\d{10}$/.test(digits)) {
+        return '';
+    }
+
+    return '+' + digits;
+}
+
+// ============================================================
+// ФОРМИРОВАНИЕ ЧЕКА ЮKASSA
+// ============================================================
+
+function buildReceiptItems(
+    items,
+    delivery,
+    paymentAmount
+) {
+    const deliveryPrice =
+        Number(delivery?.price || 0);
+
+    /*
+     * Сколько именно должны стоить товары
+     * после скидки.
+     */
+    const targetGoodsTotal = Math.max(
+        0,
+        Math.round(
+            (paymentAmount - deliveryPrice) * 100
+        )
+    );
+
+    /*
+     * Разворачиваем quantity.
+     *
+     * Например:
+     * WHEY x2
+     *
+     * превращается в две отдельные
+     * позиции по 1 шт.
+     *
+     * Так проще корректно распределить
+     * скидку до копейки.
+     */
+    const units = [];
+
+    (items || []).forEach(item => {
+        const qty = Math.max(
+            1,
+            Number(item.quantity || 1)
+        );
+
+        const unitPrice = Math.max(
+            0,
+            Number(item.price || 0)
+        );
+
+        for (let i = 0; i < qty; i += 1) {
+            units.push({
+                description:
+                    item.name +
+                    ' (' +
+                    (item.flavor || 'стандарт') +
+                    ')',
+
+                baseCents:
+                    Math.round(
+                        unitPrice * 100
+                    )
+            });
         }
+    });
 
-        if (!SECRET_KEY) {
-            return res.status(500).json({ error: 'Сервер не настроен' });
-        }
+    const baseGoodsTotal =
+        units.reduce(
+            (sum, unit) =>
+                sum + unit.baseCents,
+            0
+        );
 
-        const idempotenceKey = Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+    let distributed = 0;
 
-        const receiptItems = (items || []).map(item => ({
-            description: item.name + ' (' + (item.flavor || 'стандарт') + ')',
-            quantity: item.quantity || 1,
+    const receiptItems =
+        units.map((unit, index) => {
+            let cents;
+
+            /*
+             * Последняя позиция получает
+             * остаток до копейки.
+             *
+             * Поэтому сумма чека будет
+             * ТОЧНО совпадать с платежом.
+             */
+            if (
+                index ===
+                units.length - 1
+            ) {
+                cents = Math.max(
+                    1,
+                    targetGoodsTotal -
+                        distributed
+                );
+
+            } else if (
+                baseGoodsTotal > 0
+            ) {
+                cents = Math.max(
+                    1,
+                    Math.floor(
+                        targetGoodsTotal *
+                        unit.baseCents /
+                        baseGoodsTotal
+                    )
+                );
+
+                distributed += cents;
+
+            } else {
+                cents = 1;
+                distributed += cents;
+            }
+
+            return {
+                description:
+                    unit.description.slice(
+                        0,
+                        128
+                    ),
+
+                quantity: 1,
+
+                amount: {
+                    value:
+                        (
+                            cents / 100
+                        ).toFixed(2),
+
+                    currency: 'RUB'
+                },
+
+                vat_code: 1,
+
+                payment_mode:
+                    'full_payment',
+
+                payment_subject:
+                    'commodity'
+            };
+        });
+
+    // Доставка отдельной услугой
+    if (deliveryPrice > 0) {
+        receiptItems.push({
+            description:
+                (
+                    'Доставка (' +
+                    (
+                        delivery?.method ||
+                        'СДЭК'
+                    ) +
+                    ')'
+                ).slice(0, 128),
+
+            quantity: 1,
+
             amount: {
-                value: ((item.price || 0) * (item.quantity || 1)).toFixed(2),
+                value:
+                    deliveryPrice.toFixed(2),
+
                 currency: 'RUB'
             },
-            vat_code: 1,
-            payment_mode: 'full_payment',
-            payment_subject: 'commodity'
-        }));
 
-        if (delivery && delivery.price) {
-            receiptItems.push({
-                description: 'Доставка (' + (delivery.method || 'СДЭК') + ')',
-                quantity: 1,
-                amount: {
-                    value: delivery.price.toFixed(2),
-                    currency: 'RUB'
-                },
-                vat_code: 1,
-                payment_mode: 'full_payment',
-                payment_subject: 'service'
+            vat_code: 1,
+
+            payment_mode:
+                'full_payment',
+
+            payment_subject:
+                'service'
+        });
+    }
+
+    return receiptItems;
+}
+
+// ============================================================
+// 5. СОЗДАНИЕ ПЛАТЕЖА ЮKASSA
+// ============================================================
+
+app.post('/api/create-payment', async (req, res) => {
+    try {
+        const {
+            amount,
+            items,
+            customer,
+            delivery
+        } = req.body;
+
+        // ----------------------------------------------------
+        // Проверяем сумму
+        // ----------------------------------------------------
+
+        const paymentAmount =
+            Number(amount);
+
+        if (
+            !Number.isFinite(paymentAmount) ||
+            paymentAmount <= 0
+        ) {
+            return res.status(400).json({
+                error:
+                    'Некорректная сумма платежа'
             });
         }
 
-        const paymentResponse = await axios.post(
-            'https://api.yookassa.ru/v3/payments',
-            {
-                amount: {
-                    value: String(amount),
-                    currency: 'RUB'
-                },
-                payment_method_data: {
-                    type: 'bank_card'
-                },
-                confirmation: {
-                    type: 'redirect',
-                    return_url: 'https://rtn.pro/after-payment'
-                },
-                description: description || ('Заказ ' + (orderId || Date.now())),
-                metadata: {
-                    orderId: orderId || Date.now().toString(),
-                    customerName: customer?.name || '',
-                    customerPhone: customer?.phone || ''
-                },
-                capture: true,
-                receipt: {
-                    customer: {
-                        email: customer?.email || 'customer@example.com',
-                        phone: customer?.phone || ''
-                    },
-                    items: receiptItems
-                }
-            },
-            {
-                auth: {
-                    username: SHOP_ID,
-                    password: SECRET_KEY
-                },
-                headers: {
-                    'Idempotence-Key': idempotenceKey
-                }
-            }
-        );
+        // ----------------------------------------------------
+        // Нормализуем телефон
+        // ----------------------------------------------------
 
-        res.json(paymentResponse.data);
+        const normalizedPhone =
+            normalizeRuPhoneForYooKassa(
+                customer?.phone
+            );
+
+        if (!normalizedPhone) {
+            return res.status(400).json({
+                error:
+                    'Некорректный номер телефона'
+            });
+        }
+
+        // ----------------------------------------------------
+        // Формируем чек
+        // ----------------------------------------------------
+
+        const receiptItems =
+            buildReceiptItems(
+                items,
+                delivery,
+                paymentAmount
+            );
+
+        if (!receiptItems.length) {
+            return res.status(400).json({
+                error:
+                    'Корзина пуста'
+            });
+        }
+
+        // ----------------------------------------------------
+        // Данные платежа
+        // ----------------------------------------------------
+
+        const paymentData = {
+            amount: {
+                value:
+                    paymentAmount.toFixed(2),
+
+                currency: 'RUB'
+            },
+
+            capture: true,
+
+            confirmation: {
+                type: 'redirect',
+
+                return_url:
+                    `${FRONTEND_URL}/?payment=success`
+            },
+
+            description:
+                'Заказ RTN.PRO',
+
+            metadata: {
+                customerName:
+                    customer?.name || '',
+
+                customerPhone:
+                    normalizedPhone,
+
+                deliveryMethod:
+                    delivery?.method || '',
+
+                deliveryCity:
+                    delivery?.city || '',
+
+                deliveryAddress:
+                    delivery?.address || ''
+            },
+
+            receipt: {
+                customer: {
+                    phone:
+                        normalizedPhone
+                },
+
+                items:
+                    receiptItems
+            }
+        };
+
+        // ----------------------------------------------------
+        // Отправляем в ЮKassa
+        // ----------------------------------------------------
+
+        const idempotenceKey =
+            crypto.randomUUID();
+
+        const response =
+            await axios.post(
+                'https://api.yookassa.ru/v3/payments',
+
+                paymentData,
+
+                {
+                    auth: {
+                        username:
+                            YOOKASSA_SHOP_ID,
+
+                        password:
+                            YOOKASSA_SECRET_KEY
+                    },
+
+                    headers: {
+                        'Idempotence-Key':
+                            idempotenceKey,
+
+                        'Content-Type':
+                            'application/json'
+                    },
+
+                    timeout: 15000
+                }
+            );
+
+        // ----------------------------------------------------
+        // Проверяем ссылку оплаты
+        // ----------------------------------------------------
+
+        const confirmationUrl =
+            response.data
+                ?.confirmation
+                ?.confirmation_url;
+
+        if (!confirmationUrl) {
+            console.error(
+                'YooKassa did not return confirmation_url:',
+                response.data
+            );
+
+            return res.status(500).json({
+                error:
+                    'ЮKassa не вернула ссылку на оплату'
+            });
+        }
+
+        res.json({
+            id: response.data.id,
+
+            status:
+                response.data.status,
+
+            confirmationUrl
+        });
 
     } catch (error) {
-        console.error('❌ Ошибка платежа:', error.response?.data || error.message);
-        res.status(500).json({
-            error: 'Ошибка создания платежа',
-            details: error.response?.data || error.message
+        console.error(
+            'YooKassa payment error:',
+            error.response?.data ||
+            error.message
+        );
+
+        const yooError =
+            error.response?.data;
+
+        const description =
+            yooError?.description ||
+            yooError?.parameter ||
+            error.message ||
+            'Неизвестная ошибка';
+
+        res.status(
+            error.response?.status ||
+            500
+        ).json({
+            error:
+                'Ошибка создания платежа: ' +
+                description,
+
+            details:
+                yooError ||
+                error.message
         });
     }
 });
 
 // ============================================================
-// 5. HEALTH CHECK
+// 404
 // ============================================================
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+
+app.use((req, res) => {
+    res.status(404).json({
+        error: 'Endpoint not found'
+    });
 });
 
+// ============================================================
+// START
+// ============================================================
+
+const PORT =
+    process.env.PORT ||
+    3000;
+
 app.listen(PORT, () => {
-    console.log(`🚀 Сервер запущен на порту ${PORT}`);
-    console.log(`✅ Health: https://rhino-api-yrfq.onrender.com/api/health`);
+    console.log(
+        `RTN API запущен на порту ${PORT}`
+    );
 });
