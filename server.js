@@ -550,6 +550,27 @@ const BITRIX_PROMO_FIELDS = {
     contactAmbassadorHistory: 'UF_CRM_RTN_AMBASSADOR_HISTORY'
 };
 
+const BITRIX_ORDER_FIELDS = {
+    orderNumber: 'UF_CRM_RTN_ORDER_NUMBER',
+    amountBeforeDiscount: 'UF_CRM_RTN_AMOUNT_BEFORE_DISCOUNT',
+    discountAmount: 'UF_CRM_RTN_DISCOUNT_AMOUNT',
+    deliveryType: 'UF_CRM_RTN_DELIVERY_TYPE',
+    deliveryAddress: 'UF_CRM_RTN_DELIVERY_ADDRESS',
+    deliveryCost: 'UF_CRM_RTN_DELIVERY_COST',
+    clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
+    paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS'
+};
+
+const RTN_DELIVERY_TYPES = [
+    'ПВЗ',
+    'КУРЬЕР'
+];
+
+const RTN_PAYMENT_STATUSES = [
+    'Ожидает оплаты',
+    'Оплачен'
+];
+
 const RTN_PROMO_AMBASSADORS = {
     RHINO: 'Роман Халиулин — Носорог',
     BIGGY: 'Вячеслав Коростелев — Бегемот',
@@ -569,15 +590,130 @@ const bitrixEnumOptionPromises = new Map();
 const bitrixEnumOptionIdCache = new Map();
 let bitrixPromoFieldsBootstrapPromise = null;
 let bitrixPromoFieldsReady = false;
+let bitrixOrderFieldsBootstrapPromise = null;
+let bitrixOrderFieldsReady = false;
 
 function getPublicOrderNumber(orderId) {
-    const raw = String(orderId || '').trim();
+    const raw =
+        String(orderId || '').trim();
 
-    if (!raw) {
-        return String(Date.now());
+    const timestampPart =
+        raw.split('-')[0];
+
+    let timestamp =
+        Number(timestampPart);
+
+    if (
+        !Number.isFinite(timestamp) ||
+        timestamp < 1000000000000
+    ) {
+        timestamp = Date.now();
     }
 
-    return raw.split('-')[0] || raw;
+    // Москва в 2026 году = UTC+3 без перехода на летнее время.
+    const moscowDate =
+        new Date(
+            timestamp +
+            3 * 60 * 60 * 1000
+        );
+
+    const pad = value =>
+        String(value).padStart(2, '0');
+
+    const day =
+        pad(moscowDate.getUTCDate());
+
+    const month =
+        pad(moscowDate.getUTCMonth() + 1);
+
+    const year =
+        String(
+            moscowDate.getUTCFullYear()
+        );
+
+    const hour =
+        pad(moscowDate.getUTCHours());
+
+    const minute =
+        pad(moscowDate.getUTCMinutes());
+
+    return `${day}${month}${year}${hour}${minute}`;
+}
+
+function getOrderFinancials({
+    items,
+    delivery,
+    amount
+}) {
+    const goodsBeforeDiscount =
+        (Array.isArray(items) ? items : [])
+            .reduce(
+                (sum, item) =>
+                    sum +
+                    Number(item?.price || 0) *
+                    Math.max(
+                        1,
+                        Number(item?.quantity || 1)
+                    ),
+                0
+            );
+
+    const deliveryCost =
+        Math.max(
+            0,
+            Number(delivery?.price || 0)
+        );
+
+    const amountBeforeDiscount =
+        goodsBeforeDiscount +
+        deliveryCost;
+
+    const finalAmount =
+        Math.max(
+            0,
+            Number(amount || 0)
+        );
+
+    const discountAmount =
+        Math.max(
+            0,
+            amountBeforeDiscount -
+            finalAmount
+        );
+
+    return {
+        goodsBeforeDiscount,
+        deliveryCost,
+        amountBeforeDiscount,
+        finalAmount,
+        discountAmount
+    };
+}
+
+function normalizeDeliveryType(delivery) {
+    const method =
+        String(
+            delivery?.method || ''
+        )
+            .trim()
+            .toUpperCase();
+
+    if (
+        method.includes('КУРЬЕР') ||
+        method.includes('COURIER')
+    ) {
+        return 'КУРЬЕР';
+    }
+
+    if (
+        method.includes('ПВЗ') ||
+        method.includes('PICKUP') ||
+        method.includes('СДЭК')
+    ) {
+        return 'ПВЗ';
+    }
+
+    return '';
 }
 
 function normalizePromoCode(value) {
@@ -622,6 +758,88 @@ async function getBitrixUserField(entity, fieldName) {
     return Array.isArray(result)
         ? (result[0] || null)
         : null;
+}
+
+
+async function ensureBitrixSimpleField({
+    entity,
+    fieldName,
+    label,
+    userTypeId = 'string',
+    multiple = false,
+    sort = 3000,
+    settings = {}
+}) {
+    let field =
+        await getBitrixUserField(
+            entity,
+            fieldName
+        );
+
+    if (!field) {
+        await bitrixCall(
+            getUserFieldApi(entity, 'add'),
+            {
+                fields: {
+                    FIELD_NAME:
+                        fieldName,
+
+                    USER_TYPE_ID:
+                        userTypeId,
+
+                    MULTIPLE:
+                        multiple ? 'Y' : 'N',
+
+                    MANDATORY:
+                        'N',
+
+                    SHOW_FILTER:
+                        'Y',
+
+                    SHOW_IN_LIST:
+                        'Y',
+
+                    EDIT_IN_LIST:
+                        'Y',
+
+                    EDIT_FORM_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+
+                    LIST_COLUMN_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+
+                    LIST_FILTER_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+
+                    SETTINGS:
+                        settings,
+
+                    SORT:
+                        sort
+                }
+            }
+        );
+
+        field =
+            await getBitrixUserField(
+                entity,
+                fieldName
+            );
+    }
+
+    if (!field) {
+        throw new Error(
+            `Не удалось создать/получить поле ${fieldName}`
+        );
+    }
+
+    return field;
 }
 
 async function ensureBitrixEnumerationField({
@@ -1038,6 +1256,382 @@ async function syncPromoFieldsToBitrix() {
     return bitrixPromoFieldsBootstrapPromise;
 }
 
+
+async function syncOrderFieldsToBitrix() {
+    if (!isBitrixConfigured()) {
+        return false;
+    }
+
+    if (bitrixOrderFieldsReady) {
+        return true;
+    }
+
+    if (bitrixOrderFieldsBootstrapPromise) {
+        return bitrixOrderFieldsBootstrapPromise;
+    }
+
+    bitrixOrderFieldsBootstrapPromise =
+        (async () => {
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.orderNumber,
+
+                label:
+                    'Номер заказа RTN',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3200
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.amountBeforeDiscount,
+
+                label:
+                    'Сумма до скидки',
+
+                userTypeId:
+                    'double',
+
+                sort:
+                    3210
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.discountAmount,
+
+                label:
+                    'Скидка',
+
+                userTypeId:
+                    'double',
+
+                sort:
+                    3220
+            });
+
+            await ensureBitrixEnumerationField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.deliveryType,
+
+                label:
+                    'Тип доставки',
+
+                multiple:
+                    false,
+
+                initialValues:
+                    RTN_DELIVERY_TYPES,
+
+                sort:
+                    3230
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.deliveryAddress,
+
+                label:
+                    'Адрес доставки / ПВЗ',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3240,
+
+                settings: {
+                    ROWS:
+                        3
+                }
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.deliveryCost,
+
+                label:
+                    'Стоимость доставки',
+
+                userTypeId:
+                    'double',
+
+                sort:
+                    3250
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.clientComment,
+
+                label:
+                    'Комментарий клиента',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3260,
+
+                settings: {
+                    ROWS:
+                        4
+                }
+            });
+
+            await ensureBitrixEnumerationField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.paymentStatus,
+
+                label:
+                    'Статус оплаты',
+
+                multiple:
+                    false,
+
+                initialValues:
+                    RTN_PAYMENT_STATUSES,
+
+                sort:
+                    3270
+            });
+
+            await ensureBitrixEnumOptionsBatch({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.deliveryType,
+
+                values:
+                    RTN_DELIVERY_TYPES,
+
+                xmlPrefix:
+                    'RTN_DELIVERY_TYPE'
+            });
+
+            await ensureBitrixEnumOptionsBatch({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.paymentStatus,
+
+                values:
+                    RTN_PAYMENT_STATUSES,
+
+                xmlPrefix:
+                    'RTN_PAYMENT_STATUS'
+            });
+
+            bitrixOrderFieldsReady = true;
+
+            console.log(
+                'Bitrix24 order fields sync finished'
+            );
+
+            return true;
+        })().catch(error => {
+            bitrixOrderFieldsReady = false;
+            throw error;
+        }).finally(() => {
+            bitrixOrderFieldsBootstrapPromise =
+                null;
+        });
+
+    return bitrixOrderFieldsBootstrapPromise;
+}
+
+async function applyOrderFieldsToBitrixDeal({
+    dealId,
+    orderId,
+    amount,
+    items,
+    delivery,
+    comment
+}) {
+    if (!dealId) {
+        return;
+    }
+
+    await syncOrderFieldsToBitrix();
+
+    const financials =
+        getOrderFinancials({
+            items,
+            delivery,
+            amount
+        });
+
+    const deliveryType =
+        normalizeDeliveryType(
+            delivery
+        );
+
+    const deliveryTypeId =
+        deliveryType
+            ? await ensureBitrixEnumOption({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.deliveryType,
+
+                value:
+                    deliveryType,
+
+                xmlPrefix:
+                    'RTN_DELIVERY_TYPE'
+            })
+            : null;
+
+    const paymentStatusId =
+        await ensureBitrixEnumOption({
+            entity:
+                'deal',
+
+            fieldName:
+                BITRIX_ORDER_FIELDS.paymentStatus,
+
+            value:
+                'Ожидает оплаты',
+
+            xmlPrefix:
+                'RTN_PAYMENT_STATUS'
+        });
+
+    const fields = {
+        TITLE:
+            `RTN.PRO заказ #${getPublicOrderNumber(orderId)}`,
+
+        COMMENTS:
+            buildBitrixDealComment({
+                items
+            }),
+
+        OPPORTUNITY:
+            financials.finalAmount,
+
+        IS_MANUAL_OPPORTUNITY:
+            'Y',
+
+        [BITRIX_ORDER_FIELDS.orderNumber]:
+            getPublicOrderNumber(orderId),
+
+        [BITRIX_ORDER_FIELDS.amountBeforeDiscount]:
+            financials.amountBeforeDiscount,
+
+        [BITRIX_ORDER_FIELDS.discountAmount]:
+            financials.discountAmount,
+
+        [BITRIX_ORDER_FIELDS.deliveryAddress]:
+            String(
+                delivery?.address || ''
+            ).trim(),
+
+        [BITRIX_ORDER_FIELDS.deliveryCost]:
+            financials.deliveryCost,
+
+        [BITRIX_ORDER_FIELDS.clientComment]:
+            String(
+                comment || ''
+            ).trim()
+    };
+
+    if (deliveryTypeId) {
+        fields[
+            BITRIX_ORDER_FIELDS.deliveryType
+        ] = Number(deliveryTypeId);
+    }
+
+    if (paymentStatusId) {
+        fields[
+            BITRIX_ORDER_FIELDS.paymentStatus
+        ] = Number(paymentStatusId);
+    }
+
+    await bitrixCall(
+        'crm.deal.update',
+        {
+            id:
+                Number(dealId),
+
+            fields
+        }
+    );
+}
+
+async function markBitrixPaymentStatus(
+    dealId,
+    status
+) {
+    if (!dealId || !status) {
+        return;
+    }
+
+    await syncOrderFieldsToBitrix();
+
+    const statusId =
+        await ensureBitrixEnumOption({
+            entity:
+                'deal',
+
+            fieldName:
+                BITRIX_ORDER_FIELDS.paymentStatus,
+
+            value:
+                status,
+
+            xmlPrefix:
+                'RTN_PAYMENT_STATUS'
+        });
+
+    if (!statusId) {
+        return;
+    }
+
+    await bitrixCall(
+        'crm.deal.update',
+        {
+            id:
+                Number(dealId),
+
+            fields: {
+                [BITRIX_ORDER_FIELDS.paymentStatus]:
+                    Number(statusId)
+            }
+        }
+    );
+}
+
 function toNumericIdArray(value) {
     const source =
         Array.isArray(value)
@@ -1367,76 +1961,33 @@ async function findExistingBitrixDeal(orderId) {
 }
 
 function buildBitrixDealComment({
-    orderId,
-    customer,
-    delivery,
-    items,
-    comment,
-    amount,
-    promoCode
+    items
 }) {
-    const goodsBeforeDiscount =
-        (Array.isArray(items) ? items : [])
-            .reduce(
-                (sum, item) =>
-                    sum +
-                    Number(item?.price || 0) *
-                    Math.max(
-                        1,
-                        Number(item?.quantity || 1)
-                    ),
-                0
-            );
-
-    const deliveryPrice =
-        Number(delivery?.price || 0);
-
-    const totalBeforeDiscount =
-        goodsBeforeDiscount +
-        deliveryPrice;
-
-    const finalAmount =
-        Number(amount || 0);
-
-    const discountAmount =
-        Math.max(
-            0,
-            totalBeforeDiscount -
-            finalAmount
-        );
-
     const lines = [
-        `Заказ RTN.PRO: #${getPublicOrderNumber(orderId)}`,
-        `Сумма до скидки: ${totalBeforeDiscount.toLocaleString('ru-RU')} ₽`,
-        ...(discountAmount > 0
-            ? [`Скидка: -${discountAmount.toLocaleString('ru-RU')} ₽`]
-            : []),
-        `Итого к оплате: ${finalAmount.toLocaleString('ru-RU')} ₽`,
-        ...(normalizePromoCode(promoCode)
-            ? [`Промокод: ${normalizePromoCode(promoCode)}`]
-            : []),
-        `Клиент: ${customer?.name || '—'}`,
-        `Телефон: ${customer?.phone || '—'}`,
-        `Email: ${customer?.email || '—'}`,
-        '',
-        `Доставка: ${delivery?.method || '—'}`,
-        `Адрес / ПВЗ: ${delivery?.address || '—'}`,
-        `Стоимость доставки: ${deliveryPrice.toLocaleString('ru-RU')} ₽`,
-        '',
         'Состав заказа:'
     ];
 
-    (Array.isArray(items) ? items : []).forEach((item, index) => {
-        lines.push(
-            `${index + 1}. ${item?.name || 'Товар'}${item?.flavor ? ` — ${item.flavor}` : ''} × ${Number(item?.quantity || 1)} = ${Number(item?.price || 0).toLocaleString('ru-RU')} ₽/шт. до скидки`
+    (Array.isArray(items) ? items : [])
+        .forEach(
+            (item, index) => {
+                const quantity =
+                    Math.max(
+                        1,
+                        Number(
+                            item?.quantity || 1
+                        )
+                    );
+
+                const unitPrice =
+                    Number(
+                        item?.price || 0
+                    );
+
+                lines.push(
+                    `${index + 1}. ${item?.name || 'Товар'}${item?.flavor ? ` — ${item.flavor}` : ''} × ${quantity} = ${unitPrice.toLocaleString('ru-RU')} ₽/шт. до скидки`
+                );
+            }
         );
-    });
-
-    if (comment) {
-        lines.push('', `Комментарий клиента: ${comment}`);
-    }
-
-    lines.push('', 'Статус оплаты: ожидает оплаты');
 
     return lines.join('\n');
 }
@@ -1684,6 +2235,25 @@ async function syncOrderToBitrix({
         }
 
         try {
+            await applyOrderFieldsToBitrixDeal({
+                dealId:
+                    existingDealId,
+
+                orderId,
+                amount,
+                items,
+                delivery,
+                comment
+            });
+        } catch (error) {
+            console.error(
+                'Bitrix24 existing deal order fields error:',
+                error.response?.data ||
+                error.message
+            );
+        }
+
+        try {
             const productRows =
                 await buildBitrixProductRows(items, delivery, amount);
 
@@ -1750,13 +2320,7 @@ async function syncOrderToBitrix({
 
         comments:
             buildBitrixDealComment({
-                orderId,
-                customer,
-                delivery,
-                items,
-                comment,
-                amount,
-                promoCode: normalizedPromoCode
+                items
             })
     };
 
@@ -1804,6 +2368,23 @@ async function syncOrderToBitrix({
                 error.response?.data || error.message
             );
         }
+    }
+
+    try {
+        await applyOrderFieldsToBitrixDeal({
+            dealId,
+            orderId,
+            amount,
+            items,
+            delivery,
+            comment
+        });
+    } catch (error) {
+        console.error(
+            'Bitrix24 deal order fields error:',
+            error.response?.data ||
+            error.message
+        );
     }
 
     const productRows =
@@ -1929,6 +2510,19 @@ async function moveBitrixDealToPaid({ dealId, payment }) {
             fields
         }
     );
+
+    try {
+        await markBitrixPaymentStatus(
+            dealId,
+            'Оплачен'
+        );
+    } catch (error) {
+        console.error(
+            'Bitrix24 payment status field error:',
+            error.response?.data ||
+            error.message
+        );
+    }
 }
 
 app.post('/api/yookassa/webhook', async (req, res) => {
@@ -2207,6 +2801,7 @@ app.get('/api/health', (req, res) => {
         bitrixStagePaid: BITRIX_STAGE_PAID,
         bitrixProductsCached: bitrixProductIdCache.size,
         bitrixPromoTracking: bitrixPromoFieldsReady,
+        bitrixOrderFieldsReady: bitrixOrderFieldsReady,
         yookassaConfigured: Boolean(
             YOOKASSA_SHOP_ID &&
             YOOKASSA_SECRET_KEY
@@ -3259,10 +3854,22 @@ app.listen(PORT, () => {
                 );
             }
 
-            await sleep(2500);
+            await sleep(1500);
 
             try {
-                // Каталог синхронизируем уже после полей, чтобы не забивать REST параллельными запросами.
+                await syncOrderFieldsToBitrix();
+            } catch (error) {
+                console.error(
+                    'Bitrix24 startup order fields sync error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+
+            await sleep(2000);
+
+            try {
+                // Каталог синхронизируем уже после CRM-полей, чтобы не забивать REST параллельными запросами.
                 await syncAllRtnProductsToBitrix();
             } catch (error) {
                 console.error(
