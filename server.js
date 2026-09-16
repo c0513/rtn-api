@@ -535,6 +535,16 @@ const bitrixEnumOptionIdCache = new Map();
 let bitrixPromoFieldsBootstrapPromise = null;
 let bitrixPromoFieldsReady = false;
 
+function getPublicOrderNumber(orderId) {
+    const raw = String(orderId || '').trim();
+
+    if (!raw) {
+        return String(Date.now());
+    }
+
+    return raw.split('-')[0] || raw;
+}
+
 function normalizePromoCode(value) {
     return String(value || '')
         .trim()
@@ -1361,7 +1371,7 @@ function buildBitrixDealComment({
         );
 
     const lines = [
-        `Заказ RTN.PRO: #${orderId || '—'}`,
+        `Заказ RTN.PRO: #${getPublicOrderNumber(orderId)}`,
         `Сумма до скидки: ${totalBeforeDiscount.toLocaleString('ru-RU')} ₽`,
         ...(discountAmount > 0
             ? [`Скидка: -${discountAmount.toLocaleString('ru-RU')} ₽`]
@@ -1393,7 +1403,7 @@ function buildBitrixDealComment({
 
     lines.push('', 'Статус оплаты: ожидает оплаты');
 
-    return lines.join('\\n');
+    return lines.join('\n');
 }
 
 
@@ -1677,7 +1687,7 @@ async function syncOrderToBitrix({
 
     const fields = {
         title:
-            `RTN.PRO заказ #${orderId || Date.now()}`,
+            `RTN.PRO заказ #${getPublicOrderNumber(orderId)}`,
 
         categoryId:
             BITRIX_CATEGORY_ID,
@@ -2161,7 +2171,15 @@ app.get('/api/health', (req, res) => {
         bitrixStageNew: BITRIX_STAGE_NEW,
         bitrixStagePaid: BITRIX_STAGE_PAID,
         bitrixProductsCached: bitrixProductIdCache.size,
-        bitrixPromoTracking: bitrixPromoFieldsReady
+        bitrixPromoTracking: bitrixPromoFieldsReady,
+        yookassaConfigured: Boolean(
+            YOOKASSA_SHOP_ID &&
+            YOOKASSA_SECRET_KEY
+        ),
+        yookassaShopIdMasked:
+            YOOKASSA_SHOP_ID
+                ? `***${String(YOOKASSA_SHOP_ID).slice(-4)}`
+                : null
     });
 });
 
@@ -3005,16 +3023,40 @@ app.post('/api/create-payment', async (req, res) => {
         const yooError =
             error.response?.data;
 
+        const statusCode =
+            error.response?.status ||
+            500;
+
         const description =
             yooError?.description ||
             yooError?.parameter ||
             error.message ||
             'Неизвестная ошибка';
 
-        res.status(
-            error.response?.status ||
-            500
-        ).json({
+        if (
+            statusCode === 401 ||
+            yooError?.code === 'invalid_credentials'
+        ) {
+            return res.status(401).json({
+                error:
+                    'ЮKassa отклонила авторизацию. Проверьте, что YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY относятся к одному и тому же магазину ЮKassa.',
+
+                details: {
+                    code:
+                        yooError?.code ||
+                        'invalid_credentials',
+
+                    description,
+
+                    shopIdMasked:
+                        YOOKASSA_SHOP_ID
+                            ? `***${String(YOOKASSA_SHOP_ID).slice(-4)}`
+                            : null
+                }
+            });
+        }
+
+        res.status(statusCode).json({
             error:
                 'Ошибка создания платежа: ' +
                 description,
