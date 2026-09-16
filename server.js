@@ -47,7 +47,7 @@ async function getCdekToken() {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
             },
-            timeout: 10000
+            timeout: 6000
         }
     );
 
@@ -91,9 +91,16 @@ function setCached(cache, key, data) {
 // ============================================================
 
 app.get('/api/health', (req, res) => {
+    // Возвращаем health сразу, а токен СДЭК прогреваем параллельно.
+    // Поэтому открытие checkout будит Render и заодно готовит СДЭК к поиску.
+    getCdekToken().catch(error => {
+        console.warn('CDEK warm-up failed:', error.response?.data || error.message);
+    });
+
     res.json({
         ok: true,
-        service: 'rhino-api'
+        service: 'rhino-api',
+        cdekTokenCached: Boolean(cdekToken && Date.now() < cdekTokenExpiresAt - 60000)
     });
 });
 
@@ -106,54 +113,66 @@ app.post('/api/search-cities', async (req, res) => {
         const query = String(req.body.query || '').trim();
 
         if (query.length < 2) {
-            return res.json({
-                cities: []
-            });
+            return res.json({ cities: [] });
         }
 
         const cacheKey = query.toLowerCase();
-
         const cached = getCached(cityCache, cacheKey);
 
         if (cached) {
-            return res.json({
-                cities: cached
-            });
+            return res.json({ cities: cached, cached: true });
         }
 
         const token = await getCdekToken();
 
+        // Специальный метод СДЭК для автодополнения.
+        // В отличие от /location/cities он нормально работает по префиксу "Моск", "Санкт" и т.п.
         const response = await axios.get(
-            `${CDEK_API}/location/cities`,
+            `${CDEK_API}/location/suggest/cities`,
             {
                 headers: {
                     Authorization: `Bearer ${token}`
                 },
                 params: {
-                    country_codes: 'RU',
-                    city: query,
-                    size: 10
+                    name: query,
+                    country_code: 'RU'
                 },
-                timeout: 10000
+                timeout: 6000
             }
         );
 
-        const cities = (response.data || []).map(city => ({
-            code: city.code,
-            city: city.city,
-            region: city.region,
-            country: city.country
-        }));
+        const cities = (response.data || [])
+            .map(item => {
+                const fullName = String(item.full_name || '').trim();
+                const parts = fullName
+                    .split(',')
+                    .map(part => part.trim())
+                    .filter(Boolean);
+
+                const name = parts[0] || fullName;
+                const country = parts.length > 1 ? parts[parts.length - 1] : 'Россия';
+                const region = parts.length > 2
+                    ? parts.slice(1, -1).join(', ')
+                    : (parts[1] || '');
+
+                return {
+                    code: Number(item.code),
+                    name,
+                    postalCode: '',
+                    region,
+                    country,
+                    fullName
+                };
+            })
+            .filter(city => city.code && city.name)
+            .slice(0, 10);
 
         setCached(cityCache, cacheKey, cities);
 
-        res.json({
-            cities
-        });
-
+        res.json({ cities });
     } catch (error) {
         console.error(
-            'CDEK city search error:',
+            'CDEK city suggest error:',
             error.response?.data || error.message
         );
 
@@ -275,15 +294,19 @@ app.post('/api/get-pickup-points', async (req, res) => {
 
         const points = (response.data || []).map(point => ({
             code: point.code,
-            name: point.name,
-            address: point.location?.address || '',
-            addressFull: point.location?.address_full || '',
+            name: point.name || point.code,
+            address: point.location?.address || point.location?.address_full || '',
             city: point.location?.city || '',
-            latitude: point.location?.latitude,
-            longitude: point.location?.longitude,
             workTime: point.work_time || '',
             phone: point.phones?.[0]?.number || '',
-            metro: point.nearest_station || ''
+            lat: Number(point.location?.latitude || 0),
+            lon: Number(point.location?.longitude || 0),
+            nearestStation: point.nearest_station || '',
+            metroStation: point.nearest_metro_station || '',
+            weightLimit: Number(point.weight_max || 0),
+            dimensions: Array.isArray(point.dimensions)
+                ? point.dimensions.map(d => [d.width, d.height, d.depth].filter(Boolean).join('×')).filter(Boolean).join(', ')
+                : ''
         }));
 
         res.json({
@@ -311,7 +334,12 @@ app.post('/api/calculate-delivery', async (req, res) => {
     try {
         const {
             cityCode,
-            deliveryType
+            deliveryType,
+            deliveryMethod,
+            weight,
+            length,
+            width,
+            height
         } = req.body;
 
         if (!cityCode) {
@@ -328,10 +356,11 @@ app.post('/api/calculate-delivery', async (req, res) => {
          * 4 = склад → склад / ПВЗ
          */
 
-        const wantedDeliveryMode =
-            deliveryType === 'courier'
-                ? 3
-                : 4;
+        const isCourier =
+            deliveryType === 'courier' ||
+            deliveryMethod === 'cdek_courier';
+
+        const wantedDeliveryMode = isCourier ? 3 : 4;
 
         const response = await axios.post(
             `${CDEK_API}/calculator/tarifflist`,
@@ -347,13 +376,11 @@ app.post('/api/calculate-delivery', async (req, res) => {
 
                 packages: [
                     {
-                        // Вес в граммах
-                        weight: 1000,
-
-                        // Размеры в сантиметрах
-                        length: 25,
-                        width: 20,
-                        height: 15
+                        // Берём реальные оценочные габариты корзины из фронтенда.
+                        weight: Math.max(1, Number(weight) || 1000),
+                        length: Math.max(1, Number(length) || 25),
+                        width: Math.max(1, Number(width) || 20),
+                        height: Math.max(1, Number(height) || 15)
                     }
                 ]
             },
@@ -389,6 +416,9 @@ app.post('/api/calculate-delivery', async (req, res) => {
         const tariff = suitableTariffs[0];
 
         res.json({
+            // deliveryPrice — основной контракт фронтенда.
+            // price оставляем для обратной совместимости.
+            deliveryPrice: Number(tariff.delivery_sum),
             price: Number(tariff.delivery_sum),
             tariffCode: tariff.tariff_code,
             tariffName: tariff.tariff_name,
