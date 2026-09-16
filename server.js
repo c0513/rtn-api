@@ -1274,7 +1274,11 @@ app.post('/api/search-cities', async (req, res) => {
 app.post('/api/search-addresses', async (req, res) => {
     try {
         const query = String(req.body.query || '').trim();
-        const city = String(req.body.city || '').trim();
+        const city = String(
+            req.body.cityName ||
+            req.body.city ||
+            ''
+        ).trim();
 
         if (query.length < 2) {
             return res.json({
@@ -1297,36 +1301,55 @@ app.post('/api/search-addresses', async (req, res) => {
                     countrycodes: 'ru'
                 },
                 headers: {
-                    'User-Agent': 'RTN.PRO/1.0',
+                    'User-Agent': 'RTN.PRO/1.0 (https://rtn.pro)',
                     'Accept-Language': 'ru'
                 },
-                timeout: 8000
+                timeout: 10000
             }
         );
 
-        const addresses = (response.data || []).map(item => ({
-            displayName: item.display_name,
-
-            street:
+        const addresses = (response.data || []).map((item, index) => {
+            const road = String(
                 item.address?.road ||
                 item.address?.pedestrian ||
                 item.address?.street ||
-                '',
+                item.address?.residential ||
+                ''
+            ).trim();
 
-            house:
+            const house = String(
                 item.address?.house_number ||
-                '',
+                ''
+            ).trim();
 
-            city:
-                item.address?.city ||
-                item.address?.town ||
-                item.address?.village ||
-                item.address?.municipality ||
-                city,
+            const postcode = String(
+                item.address?.postcode ||
+                ''
+            ).trim();
 
-            lat: item.lat,
-            lon: item.lon
-        }));
+            const displayName = String(
+                item.display_name ||
+                ''
+            ).trim();
+
+            const label = [road, house]
+                .filter(Boolean)
+                .join(', ') || displayName;
+
+            return {
+                id: String(
+                    item.place_id ||
+                    `${index}-${item.lat || ''}-${item.lon || ''}`
+                ),
+                label,
+                road,
+                house,
+                postcode,
+                displayName,
+                lat: Number(item.lat) || 0,
+                lon: Number(item.lon) || 0
+            };
+        }).filter(item => item.label);
 
         res.json({
             addresses
