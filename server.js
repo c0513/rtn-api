@@ -49,32 +49,98 @@ function isBitrixConfigured() {
     return Boolean(BITRIX_WEBHOOK_URL);
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableBitrixError(error) {
+    const status = Number(error?.response?.status || 0);
+
+    return (
+        error?.code === 'ECONNABORTED' ||
+        error?.code === 'ECONNRESET' ||
+        error?.code === 'ETIMEDOUT' ||
+        status === 429 ||
+        status >= 500
+    );
+}
+
 async function bitrixCall(method, params = {}) {
     if (!isBitrixConfigured()) {
         throw new Error('BITRIX_WEBHOOK_URL не настроен');
     }
 
-    const response = await axios.post(
-        `${BITRIX_WEBHOOK_URL}/${method}.json`,
-        params,
-        {
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            timeout: 10000
+    const isSlowUserFieldMethod =
+        /\.userfield\.(add|update)$/.test(method);
+
+    const timeout =
+        isSlowUserFieldMethod
+            ? 60000
+            : 30000;
+
+    // add может успеть выполниться в Bitrix, даже если ответ потерялся.
+    // Для таких методов автоматический повтор способен создать дубль.
+    const canRetry =
+        !method.endsWith('.add') &&
+        !/\.userfield\.update$/.test(method);
+
+    const maxAttempts =
+        canRetry ? 3 : 1;
+
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            const response = await axios.post(
+                `${BITRIX_WEBHOOK_URL}/${method}.json`,
+                params,
+                {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    timeout
+                }
+            );
+
+            if (response.data?.error) {
+                const description =
+                    response.data?.error_description ||
+                    response.data?.error ||
+                    'Bitrix24 API error';
+
+                const error =
+                    new Error(description);
+
+                error.bitrixError =
+                    response.data?.error;
+
+                throw error;
+            }
+
+            return response.data?.result;
+
+        } catch (error) {
+            lastError = error;
+
+            if (
+                attempt >= maxAttempts ||
+                !isRetryableBitrixError(error)
+            ) {
+                throw error;
+            }
+
+            const waitMs =
+                1200 * attempt;
+
+            console.warn(
+                `Bitrix24 ${method}: временная ошибка, повтор ${attempt + 1}/${maxAttempts} через ${waitMs}ms`
+            );
+
+            await sleep(waitMs);
         }
-    );
-
-    if (response.data?.error) {
-        const description =
-            response.data?.error_description ||
-            response.data?.error ||
-            'Bitrix24 API error';
-
-        throw new Error(description);
     }
 
-    return response.data?.result;
+    throw lastError;
 }
 
 
@@ -424,6 +490,9 @@ async function syncAllRtnProductsToBitrix() {
                     error.response?.data || error.message
                 );
             }
+
+            // Не перегружаем Bitrix серией запросов подряд.
+            await sleep(250);
         }
 
         console.log(
@@ -462,7 +531,9 @@ const RTN_KNOWN_PROMO_CODES = [
 ];
 
 const bitrixEnumOptionPromises = new Map();
+const bitrixEnumOptionIdCache = new Map();
 let bitrixPromoFieldsBootstrapPromise = null;
+let bitrixPromoFieldsReady = false;
 
 function normalizePromoCode(value) {
     return String(value || '')
@@ -614,17 +685,15 @@ async function ensureBitrixEnumOption({
         return null;
     }
 
-    const promiseKey =
-        `${entity}:${fieldName}:${normalizedValue}`;
+    const cacheKey =
+        `${entity}:${fieldName}:${normalizedValue.toUpperCase()}`;
 
-    if (
-        bitrixEnumOptionPromises.has(
-            promiseKey
-        )
-    ) {
-        return bitrixEnumOptionPromises.get(
-            promiseKey
-        );
+    if (bitrixEnumOptionIdCache.has(cacheKey)) {
+        return bitrixEnumOptionIdCache.get(cacheKey);
+    }
+
+    if (bitrixEnumOptionPromises.has(cacheKey)) {
+        return bitrixEnumOptionPromises.get(cacheKey);
     }
 
     const promise = (async () => {
@@ -646,34 +715,34 @@ async function ensureBitrixEnumOption({
                 : []
             ).find(
                 item =>
-                    String(
-                        item?.VALUE || ''
-                    ).trim().toUpperCase() ===
+                    String(item?.VALUE || '')
+                        .trim()
+                        .toUpperCase() ===
                     normalizedValue.toUpperCase()
             );
 
-        let option =
-            findOption(field);
+        let option = findOption(field);
 
         if (option?.ID) {
-            return Number(option.ID);
+            const optionId =
+                Number(option.ID);
+
+            bitrixEnumOptionIdCache.set(
+                cacheKey,
+                optionId
+            );
+
+            return optionId;
         }
 
         await bitrixCall(
-            getUserFieldApi(
-                entity,
-                'update'
-            ),
+            getUserFieldApi(entity, 'update'),
             {
-                id:
-                    Number(field.ID),
-
+                id: Number(field.ID),
                 fields: {
                     LIST: [
                         {
-                            VALUE:
-                                normalizedValue,
-
+                            VALUE: normalizedValue,
                             XML_ID:
                                 makeEnumXmlId(
                                     xmlPrefix,
@@ -691,8 +760,7 @@ async function ensureBitrixEnumOption({
                 fieldName
             );
 
-        option =
-            findOption(field);
+        option = findOption(field);
 
         if (!option?.ID) {
             throw new Error(
@@ -700,24 +768,132 @@ async function ensureBitrixEnumOption({
             );
         }
 
-        return Number(option.ID);
-    })().finally(() => {
-        bitrixEnumOptionPromises.delete(
-            promiseKey
+        const optionId =
+            Number(option.ID);
+
+        bitrixEnumOptionIdCache.set(
+            cacheKey,
+            optionId
         );
+
+        return optionId;
+    })().finally(() => {
+        bitrixEnumOptionPromises.delete(cacheKey);
     });
 
     bitrixEnumOptionPromises.set(
-        promiseKey,
+        cacheKey,
         promise
     );
 
     return promise;
 }
 
+async function ensureBitrixEnumOptionsBatch({
+    entity,
+    fieldName,
+    values,
+    xmlPrefix
+}) {
+    let field =
+        await getBitrixUserField(
+            entity,
+            fieldName
+        );
+
+    if (!field) {
+        throw new Error(
+            `Поле ${fieldName} ещё не создано`
+        );
+    }
+
+    const list =
+        Array.isArray(field.LIST)
+            ? field.LIST
+            : [];
+
+    const existing =
+        new Map(
+            list.map(item => [
+                String(item?.VALUE || '')
+                    .trim()
+                    .toUpperCase(),
+                Number(item?.ID || 0)
+            ])
+        );
+
+    const uniqueValues =
+        Array.from(
+            new Set(
+                (values || [])
+                    .map(value =>
+                        String(value || '').trim()
+                    )
+                    .filter(Boolean)
+            )
+        );
+
+    const missing =
+        uniqueValues.filter(
+            value =>
+                !existing.has(
+                    value.toUpperCase()
+                )
+        );
+
+    if (missing.length) {
+        await bitrixCall(
+            getUserFieldApi(entity, 'update'),
+            {
+                id: Number(field.ID),
+                fields: {
+                    LIST: missing.map(
+                        value => ({
+                            VALUE: value,
+                            XML_ID:
+                                makeEnumXmlId(
+                                    xmlPrefix,
+                                    value
+                                )
+                        })
+                    )
+                }
+            }
+        );
+
+        field =
+            await getBitrixUserField(
+                entity,
+                fieldName
+            );
+    }
+
+    for (const item of (field.LIST || [])) {
+        const value =
+            String(item?.VALUE || '')
+                .trim();
+
+        const id =
+            Number(item?.ID || 0);
+
+        if (!value || !id) continue;
+
+        bitrixEnumOptionIdCache.set(
+            `${entity}:${fieldName}:${value.toUpperCase()}`,
+            id
+        );
+    }
+
+    return field;
+}
+
 async function syncPromoFieldsToBitrix() {
     if (!isBitrixConfigured()) {
-        return;
+        return false;
+    }
+
+    if (bitrixPromoFieldsReady) {
+        return true;
     }
 
     if (bitrixPromoFieldsBootstrapPromise) {
@@ -771,42 +947,46 @@ async function syncPromoFieldsToBitrix() {
                 sort: 3110
             });
 
-            for (const code of RTN_KNOWN_PROMO_CODES) {
-                await ensureBitrixEnumOption({
-                    entity: 'deal',
-                    fieldName: BITRIX_PROMO_FIELDS.dealPromo,
-                    value: code,
-                    xmlPrefix: 'RTN_PROMO_DEAL'
-                });
+            // Проверяем варианты списков пакетно, а не десятками REST-запросов.
+            await ensureBitrixEnumOptionsBatch({
+                entity: 'deal',
+                fieldName: BITRIX_PROMO_FIELDS.dealPromo,
+                values: RTN_KNOWN_PROMO_CODES,
+                xmlPrefix: 'RTN_PROMO_DEAL'
+            });
 
-                await ensureBitrixEnumOption({
-                    entity: 'contact',
-                    fieldName: BITRIX_PROMO_FIELDS.contactPromoHistory,
-                    value: code,
-                    xmlPrefix: 'RTN_PROMO_CONTACT'
-                });
-            }
+            await ensureBitrixEnumOptionsBatch({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.contactPromoHistory,
+                values: RTN_KNOWN_PROMO_CODES,
+                xmlPrefix: 'RTN_PROMO_CONTACT'
+            });
 
-            for (const ambassador of knownAmbassadors) {
-                await ensureBitrixEnumOption({
-                    entity: 'deal',
-                    fieldName: BITRIX_PROMO_FIELDS.dealAmbassador,
-                    value: ambassador,
-                    xmlPrefix: 'RTN_AMB_DEAL'
-                });
+            await ensureBitrixEnumOptionsBatch({
+                entity: 'deal',
+                fieldName: BITRIX_PROMO_FIELDS.dealAmbassador,
+                values: knownAmbassadors,
+                xmlPrefix: 'RTN_AMB_DEAL'
+            });
 
-                await ensureBitrixEnumOption({
-                    entity: 'contact',
-                    fieldName: BITRIX_PROMO_FIELDS.contactAmbassadorHistory,
-                    value: ambassador,
-                    xmlPrefix: 'RTN_AMB_CONTACT'
-                });
-            }
+            await ensureBitrixEnumOptionsBatch({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.contactAmbassadorHistory,
+                values: knownAmbassadors,
+                xmlPrefix: 'RTN_AMB_CONTACT'
+            });
+
+            bitrixPromoFieldsReady = true;
 
             console.log(
                 'Bitrix24 promo fields sync finished'
             );
-        })().finally(() => {
+
+            return true;
+        })().catch(error => {
+            bitrixPromoFieldsReady = false;
+            throw error;
+        }).finally(() => {
             bitrixPromoFieldsBootstrapPromise = null;
         });
 
@@ -1150,10 +1330,43 @@ function buildBitrixDealComment({
     amount,
     promoCode
 }) {
+    const goodsBeforeDiscount =
+        (Array.isArray(items) ? items : [])
+            .reduce(
+                (sum, item) =>
+                    sum +
+                    Number(item?.price || 0) *
+                    Math.max(
+                        1,
+                        Number(item?.quantity || 1)
+                    ),
+                0
+            );
+
+    const deliveryPrice =
+        Number(delivery?.price || 0);
+
+    const totalBeforeDiscount =
+        goodsBeforeDiscount +
+        deliveryPrice;
+
+    const finalAmount =
+        Number(amount || 0);
+
+    const discountAmount =
+        Math.max(
+            0,
+            totalBeforeDiscount -
+            finalAmount
+        );
+
     const lines = [
-        `Заказ с сайта RTN.PRO #${orderId || 'без номера'}`,
-        '',
-        `Сумма заказа: ${Number(amount || 0).toLocaleString('ru-RU')} ₽`,
+        `Заказ RTN.PRO: #${orderId || '—'}`,
+        `Сумма до скидки: ${totalBeforeDiscount.toLocaleString('ru-RU')} ₽`,
+        ...(discountAmount > 0
+            ? [`Скидка: -${discountAmount.toLocaleString('ru-RU')} ₽`]
+            : []),
+        `Итого к оплате: ${finalAmount.toLocaleString('ru-RU')} ₽`,
         ...(normalizePromoCode(promoCode)
             ? [`Промокод: ${normalizePromoCode(promoCode)}`]
             : []),
@@ -1163,14 +1376,14 @@ function buildBitrixDealComment({
         '',
         `Доставка: ${delivery?.method || '—'}`,
         `Адрес / ПВЗ: ${delivery?.address || '—'}`,
-        `Стоимость доставки: ${Number(delivery?.price || 0).toLocaleString('ru-RU')} ₽`,
+        `Стоимость доставки: ${deliveryPrice.toLocaleString('ru-RU')} ₽`,
         '',
         'Состав заказа:'
     ];
 
     (Array.isArray(items) ? items : []).forEach((item, index) => {
         lines.push(
-            `${index + 1}. ${item?.name || 'Товар'}${item?.flavor ? ` — ${item.flavor}` : ''} × ${Number(item?.quantity || 1)} = ${Number(item?.price || 0).toLocaleString('ru-RU')} ₽/шт.`
+            `${index + 1}. ${item?.name || 'Товар'}${item?.flavor ? ` — ${item.flavor}` : ''} × ${Number(item?.quantity || 1)} = ${Number(item?.price || 0).toLocaleString('ru-RU')} ₽/шт. до скидки`
         );
     });
 
@@ -1180,44 +1393,169 @@ function buildBitrixDealComment({
 
     lines.push('', 'Статус оплаты: ожидает оплаты');
 
-    return lines.join('\n');
+    return lines.join('\\n');
 }
 
-async function buildBitrixProductRows(items, delivery) {
+
+async function buildBitrixProductRows(
+    items,
+    delivery,
+    finalAmount
+) {
     const rows = [];
-    const sourceItems = Array.isArray(items) ? items : [];
+    const sourceItems =
+        Array.isArray(items)
+            ? items
+            : [];
 
-    for (let index = 0; index < sourceItems.length; index += 1) {
-        const item = sourceItems[index];
+    const deliveryPrice =
+        Math.max(
+            0,
+            Number(delivery?.price || 0)
+        );
 
-        const price = Number(item?.price || 0);
-        const quantity = Math.max(1, Number(item?.quantity || 1));
+    const targetGoodsCents =
+        Math.max(
+            0,
+            Math.round(
+                (
+                    Number(finalAmount || 0) -
+                    deliveryPrice
+                ) * 100
+            )
+        );
 
-        if (!Number.isFinite(price) || price < 0) {
-            continue;
+    const baseRows =
+        sourceItems.map(item => {
+            const quantity =
+                Math.max(
+                    1,
+                    Number(item?.quantity || 1)
+                );
+
+            const baseUnitPrice =
+                Math.max(
+                    0,
+                    Number(item?.price || 0)
+                );
+
+            return {
+                item,
+                quantity,
+                baseUnitPrice,
+                baseRowCents:
+                    Math.round(
+                        baseUnitPrice *
+                        quantity *
+                        100
+                    )
+            };
+        });
+
+    const baseGoodsCents =
+        baseRows.reduce(
+            (sum, row) =>
+                sum + row.baseRowCents,
+            0
+        );
+
+    let distributedCents = 0;
+
+    for (let index = 0; index < baseRows.length; index += 1) {
+        const {
+            item,
+            quantity,
+            baseUnitPrice,
+            baseRowCents
+        } = baseRows[index];
+
+        let targetRowCents;
+
+        if (
+            index ===
+            baseRows.length - 1
+        ) {
+            targetRowCents =
+                Math.max(
+                    0,
+                    targetGoodsCents -
+                    distributedCents
+                );
+        } else if (
+            baseGoodsCents > 0
+        ) {
+            targetRowCents =
+                Math.max(
+                    0,
+                    Math.floor(
+                        targetGoodsCents *
+                        baseRowCents /
+                        baseGoodsCents
+                    )
+                );
+
+            distributedCents +=
+                targetRowCents;
+        } else {
+            targetRowCents = 0;
         }
+
+        const discountedUnitPrice =
+            quantity > 0
+                ? targetRowCents /
+                    100 /
+                    quantity
+                : 0;
 
         let productId = null;
 
         try {
-            const rtnProduct = findRtnProductForOrderItem(item);
+            const rtnProduct =
+                findRtnProductForOrderItem(item);
 
             if (rtnProduct) {
                 productId =
-                    await ensureBitrixCatalogProduct(rtnProduct);
+                    await ensureBitrixCatalogProduct(
+                        rtnProduct
+                    );
             }
         } catch (error) {
             console.error(
                 'Bitrix24 product binding error:',
-                error.response?.data || error.message
+                error.response?.data ||
+                error.message
             );
         }
 
         const row = {
-            price,
+            // Bitrix трактует price как цену единицы уже с учетом скидки.
+            price:
+                Number(
+                    discountedUnitPrice
+                        .toFixed(4)
+                ),
+
             quantity,
-            sort: (index + 1) * 10
+
+            sort:
+                (index + 1) * 10
         };
+
+        const discountPerUnit =
+            Math.max(
+                0,
+                baseUnitPrice -
+                discountedUnitPrice
+            );
+
+        if (discountPerUnit > 0.0001) {
+            row.discountTypeId = 1;
+            row.discountSum =
+                Number(
+                    discountPerUnit
+                        .toFixed(4)
+                );
+        }
 
         if (productId) {
             row.productId = productId;
@@ -1229,14 +1567,16 @@ async function buildBitrixProductRows(items, delivery) {
         rows.push(row);
     }
 
-    const deliveryPrice = Number(delivery?.price || 0);
-
-    if (Number.isFinite(deliveryPrice) && deliveryPrice > 0) {
+    if (deliveryPrice > 0) {
         rows.push({
-            productName: `Доставка — ${delivery?.method || 'СДЭК'}`,
-            price: deliveryPrice,
-            quantity: 1,
-            sort: (rows.length + 1) * 10
+            productName:
+                `Доставка — ${delivery?.method || 'СДЭК'}`,
+            price:
+                deliveryPrice,
+            quantity:
+                1,
+            sort:
+                (rows.length + 1) * 10
         });
     }
 
@@ -1300,7 +1640,7 @@ async function syncOrderToBitrix({
 
         try {
             const productRows =
-                await buildBitrixProductRows(items, delivery);
+                await buildBitrixProductRows(items, delivery, amount);
 
             if (productRows.length) {
                 await bitrixCall(
@@ -1309,6 +1649,19 @@ async function syncOrderToBitrix({
                         ownerType: 'D',
                         ownerId: existingDealId,
                         productRows
+                    }
+                );
+
+                await bitrixCall(
+                    'crm.deal.update',
+                    {
+                        id: Number(existingDealId),
+                        fields: {
+                            OPPORTUNITY:
+                                Number(amount || 0),
+                            IS_MANUAL_OPPORTUNITY:
+                                'Y'
+                        }
                     }
                 );
             }
@@ -1411,7 +1764,8 @@ async function syncOrderToBitrix({
     const productRows =
         await buildBitrixProductRows(
             items,
-            delivery
+            delivery,
+            amount
         );
 
     if (productRows.length) {
@@ -1422,6 +1776,19 @@ async function syncOrderToBitrix({
                     ownerType: 'D',
                     ownerId: dealId,
                     productRows
+                }
+            );
+
+            await bitrixCall(
+                'crm.deal.update',
+                {
+                    id: Number(dealId),
+                    fields: {
+                        OPPORTUNITY:
+                            Number(amount || 0),
+                        IS_MANUAL_OPPORTUNITY:
+                            'Y'
+                    }
                 }
             );
         } catch (error) {
@@ -1794,7 +2161,7 @@ app.get('/api/health', (req, res) => {
         bitrixStageNew: BITRIX_STAGE_NEW,
         bitrixStagePaid: BITRIX_STAGE_PAID,
         bitrixProductsCached: bitrixProductIdCache.size,
-        bitrixPromoTracking: true
+        bitrixPromoTracking: bitrixPromoFieldsReady
     });
 });
 
@@ -2434,6 +2801,10 @@ app.post('/api/create-payment', async (req, res) => {
         const paymentAmount =
             Number(amount);
 
+        console.log(
+            `RTN checkout: promo=${normalizePromoCode(promoCode) || 'NONE'}, amount=${paymentAmount}`
+        );
+
         if (
             !Number.isFinite(paymentAmount) ||
             paymentAmount <= 0
@@ -2679,22 +3050,30 @@ app.listen(PORT, () => {
     );
 
     if (isBitrixConfigured()) {
-        setTimeout(() => {
-            syncAllRtnProductsToBitrix()
-                .catch(error => {
-                    console.error(
-                        'Bitrix24 startup catalog sync error:',
-                        error.response?.data || error.message
-                    );
-                });
+        setTimeout(async () => {
+            try {
+                // Сначала критичные для заказов поля промокодов.
+                await syncPromoFieldsToBitrix();
+            } catch (error) {
+                console.error(
+                    'Bitrix24 startup promo fields sync error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
 
-            syncPromoFieldsToBitrix()
-                .catch(error => {
-                    console.error(
-                        'Bitrix24 startup promo fields sync error:',
-                        error.response?.data || error.message
-                    );
-                });
+            await sleep(2500);
+
+            try {
+                // Каталог синхронизируем уже после полей, чтобы не забивать REST параллельными запросами.
+                await syncAllRtnProductsToBitrix();
+            } catch (error) {
+                console.error(
+                    'Bitrix24 startup catalog sync error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
         }, 1500);
     }
 });
