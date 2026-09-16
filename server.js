@@ -28,6 +28,7 @@ const CDEK_API = 'https://api.cdek.ru/v2';
 
 let cdekToken = null;
 let cdekTokenExpiresAt = 0;
+let cdekTokenPromise = null;
 
 async function getCdekToken() {
     const now = Date.now();
@@ -36,7 +37,13 @@ async function getCdekToken() {
         return cdekToken;
     }
 
-    const response = await axios.post(
+    // Не запускаем несколько OAuth-запросов одновременно:
+    // health/search/calculate могут прийти почти в один момент после cold start Render.
+    if (cdekTokenPromise) {
+        return cdekTokenPromise;
+    }
+
+    cdekTokenPromise = axios.post(
         `${CDEK_API}/oauth/token`,
         new URLSearchParams({
             grant_type: 'client_credentials',
@@ -47,16 +54,19 @@ async function getCdekToken() {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
             },
-            timeout: 6000
+            timeout: 7000
         }
-    );
+    ).then(response => {
+        cdekToken = response.data.access_token;
+        cdekTokenExpiresAt =
+            Date.now() + ((response.data.expires_in || 3600) * 1000);
 
-    cdekToken = response.data.access_token;
+        return cdekToken;
+    }).finally(() => {
+        cdekTokenPromise = null;
+    });
 
-    cdekTokenExpiresAt =
-        now + ((response.data.expires_in || 3600) * 1000);
-
-    return cdekToken;
+    return cdekTokenPromise;
 }
 
 // ============================================================
@@ -86,6 +96,107 @@ function setCached(cache, key, data) {
     });
 }
 
+
+// ============================================================
+// CDEK TARIFF META CACHE
+// ============================================================
+
+let tariffModeMap = new Map();
+let tariffModeExpiresAt = 0;
+let tariffModePromise = null;
+
+async function getTariffModeMap(token) {
+    const now = Date.now();
+
+    if (tariffModeMap.size && now < tariffModeExpiresAt) {
+        return tariffModeMap;
+    }
+
+    if (tariffModePromise) {
+        return tariffModePromise;
+    }
+
+    tariffModePromise = axios.get(
+        `${CDEK_API}/calculator/alltariffs`,
+        {
+            headers: {
+                Authorization: `Bearer ${token}`
+            },
+            params: {
+                lang: 'rus'
+            },
+            timeout: 6000
+        }
+    ).then(response => {
+        const map = new Map();
+        const tariffGroups = response.data?.tariff_codes || [];
+
+        tariffGroups.forEach(group => {
+            // Текущий формат alltariffs:
+            // tariff -> delivery_modes[] -> tariff_code + delivery_mode.
+            if (Array.isArray(group.delivery_modes)) {
+                group.delivery_modes.forEach(mode => {
+                    const code = Number(mode.tariff_code);
+                    const deliveryMode = Number(mode.delivery_mode);
+
+                    if (code && deliveryMode) {
+                        map.set(code, deliveryMode);
+                    }
+                });
+            }
+
+            // Обратная совместимость со старым плоским форматом.
+            const flatCode = Number(group.tariff_code);
+            const flatMode = Number(group.delivery_mode);
+
+            if (flatCode && flatMode) {
+                map.set(flatCode, flatMode);
+            }
+        });
+
+        tariffModeMap = map;
+        tariffModeExpiresAt = Date.now() + 12 * 60 * 60 * 1000;
+
+        return tariffModeMap;
+    }).catch(error => {
+        console.warn(
+            'CDEK alltariffs warning:',
+            error.response?.data || error.message
+        );
+
+        // Расчёт всё равно попробуем выполнить:
+        // часть ответов tarifflist содержит delivery_mode непосредственно.
+        return new Map();
+    }).finally(() => {
+        tariffModePromise = null;
+    });
+
+    return tariffModePromise;
+}
+
+const deliveryCache = new Map();
+const DELIVERY_CACHE_TTL = 10 * 60 * 1000;
+
+function getDeliveryCached(key) {
+    const value = deliveryCache.get(key);
+
+    if (!value) return null;
+
+    if (Date.now() - value.time > DELIVERY_CACHE_TTL) {
+        deliveryCache.delete(key);
+        return null;
+    }
+
+    return value.data;
+}
+
+function setDeliveryCached(key, data) {
+    deliveryCache.set(key, {
+        time: Date.now(),
+        data
+    });
+}
+
 // ============================================================
 // HEALTH
 // ============================================================
@@ -93,9 +204,11 @@ function setCached(cache, key, data) {
 app.get('/api/health', (req, res) => {
     // Возвращаем health сразу, а токен СДЭК прогреваем параллельно.
     // Поэтому открытие checkout будит Render и заодно готовит СДЭК к поиску.
-    getCdekToken().catch(error => {
-        console.warn('CDEK warm-up failed:', error.response?.data || error.message);
-    });
+    getCdekToken()
+        .then(token => getTariffModeMap(token))
+        .catch(error => {
+            console.warn('CDEK warm-up failed:', error.response?.data || error.message);
+        });
 
     res.json({
         ok: true,
@@ -336,6 +449,14 @@ app.post('/api/calculate-delivery', async (req, res) => {
             cityCode,
             deliveryType,
             deliveryMethod,
+
+            // Новый фронт.
+            packageWeight,
+            packageLength,
+            packageWidth,
+            packageHeight,
+
+            // Обратная совместимость.
             weight,
             length,
             width,
@@ -348,96 +469,285 @@ app.post('/api/calculate-delivery', async (req, res) => {
             });
         }
 
-        const token = await getCdekToken();
-
-        /*
-         * delivery_mode:
-         * 3 = склад → дверь
-         * 4 = склад → склад / ПВЗ
-         */
-
         const isCourier =
             deliveryType === 'courier' ||
             deliveryMethod === 'cdek_courier';
 
+        /*
+         * delivery_mode СДЭК:
+         * 3 = склад → дверь
+         * 4 = склад → склад / ПВЗ
+         */
         const wantedDeliveryMode = isCourier ? 3 : 4;
 
-        const response = await axios.post(
-            `${CDEK_API}/calculator/tarifflist`,
-            {
-                // Москва — город отправления
-                from_location: {
-                    code: 44
-                },
-
-                to_location: {
-                    code: Number(cityCode)
-                },
-
-                packages: [
-                    {
-                        // Берём реальные оценочные габариты корзины из фронтенда.
-                        weight: Math.max(1, Number(weight) || 1000),
-                        length: Math.max(1, Number(length) || 25),
-                        width: Math.max(1, Number(width) || 20),
-                        height: Math.max(1, Number(height) || 15)
-                    }
-                ]
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 15000
-            }
+        const normalizedWeight = Math.max(
+            1,
+            Number(packageWeight ?? weight) || 1000
         );
 
-        const tariffs =
-            response.data?.tariff_codes || [];
+        const normalizedLength = Math.max(
+            1,
+            Number(packageLength ?? length) || 35
+        );
 
-        const suitableTariffs = tariffs
+        const normalizedWidth = Math.max(
+            1,
+            Number(packageWidth ?? width) || 25
+        );
+
+        const normalizedHeight = Math.max(
+            1,
+            Number(packageHeight ?? height) || 20
+        );
+
+        const cacheKey = [
+            cityCode,
+            wantedDeliveryMode,
+            normalizedWeight,
+            normalizedLength,
+            normalizedWidth,
+            normalizedHeight
+        ].join(':');
+
+        const cached = getDeliveryCached(cacheKey);
+
+        if (cached) {
+            return res.json({
+                ...cached,
+                cached: true
+            });
+        }
+
+        const token = await getCdekToken();
+
+        const payload = {
+            type: 1,
+            currency: 1,
+            lang: 'rus',
+
+            // Москва — город отправления.
+            from_location: {
+                code: Number(process.env.CDEK_FROM_CITY_CODE || 44)
+            },
+
+            to_location: {
+                code: Number(cityCode)
+            },
+
+            packages: [
+                {
+                    weight: normalizedWeight,
+                    length: normalizedLength,
+                    width: normalizedWidth,
+                    height: normalizedHeight
+                }
+            ]
+        };
+
+        // tarifflist и метаданные тарифов запрашиваем параллельно.
+        const [response, modeMap] = await Promise.all([
+            axios.post(
+                `${CDEK_API}/calculator/tarifflist`,
+                payload,
+                {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 9000
+                }
+            ),
+            getTariffModeMap(token)
+        ]);
+
+        const rawTariffs = response.data?.tariff_codes || [];
+
+        /*
+         * CDEK встречается в двух форматах:
+         *
+         * Старый:
+         * { tariff_code, delivery_mode, delivery_sum, period_min ... }
+         *
+         * Новый:
+         * {
+         *   tariff_code,
+         *   status,
+         *   result: { delivery_sum, total_sum, period_min ... }
+         * }
+         *
+         * Поэтому читаем оба формата.
+         */
+        const normalizedTariffs = rawTariffs
+            .map(item => {
+                const result =
+                    item && typeof item.result === 'object' && item.result
+                        ? item.result
+                        : item;
+
+                const tariffCode = Number(
+                    item?.tariff_code ??
+                    result?.tariff_code
+                );
+
+                const deliveryMode = Number(
+                    item?.delivery_mode ??
+                    result?.delivery_mode ??
+                    modeMap.get(tariffCode) ??
+                    0
+                );
+
+                const deliverySum = Number(
+                    result?.delivery_sum ??
+                    item?.delivery_sum ??
+                    result?.total_sum ??
+                    item?.total_sum ??
+                    0
+                );
+
+                const errors = [
+                    ...(Array.isArray(item?.errors) ? item.errors : []),
+                    ...(Array.isArray(result?.errors) ? result.errors : [])
+                ];
+
+                return {
+                    tariffCode,
+                    tariffName:
+                        item?.tariff_name ??
+                        result?.tariff_name ??
+                        '',
+                    deliveryMode,
+                    deliverySum,
+                    periodMin:
+                        result?.period_min ??
+                        item?.period_min ??
+                        null,
+                    periodMax:
+                        result?.period_max ??
+                        item?.period_max ??
+                        null,
+                    status:
+                        String(item?.status || '').toUpperCase(),
+                    errors
+                };
+            })
             .filter(tariff =>
-                tariff.delivery_mode === wantedDeliveryMode &&
-                Number(tariff.delivery_sum) > 0
-            )
-            .sort(
-                (a, b) =>
-                    Number(a.delivery_sum) -
-                    Number(b.delivery_sum)
+                tariff.tariffCode &&
+                tariff.deliverySum > 0 &&
+                tariff.status !== 'ERROR' &&
+                tariff.status !== 'INVALID' &&
+                tariff.errors.length === 0
             );
 
+        let suitableTariffs = normalizedTariffs
+            .filter(tariff =>
+                tariff.deliveryMode === wantedDeliveryMode
+            )
+            .sort((a, b) =>
+                a.deliverySum - b.deliverySum
+            );
+
+        /*
+         * Если конкретный ответ tarifflist не содержит delivery_mode,
+         * но вернул стандартные e-commerce тарифы:
+         * 136 = склад-склад, 137 = склад-дверь.
+         */
         if (!suitableTariffs.length) {
-            return res.status(404).json({
-                error: 'СДЭК не вернул подходящий тариф'
+            const standardCode =
+                wantedDeliveryMode === 4
+                    ? 136
+                    : 137;
+
+            const standardTariff =
+                normalizedTariffs.find(
+                    tariff =>
+                        tariff.tariffCode === standardCode
+                );
+
+            if (standardTariff) {
+                suitableTariffs = [standardTariff];
+            }
+        }
+
+        if (!suitableTariffs.length) {
+            const cdekErrors = [
+                ...(Array.isArray(response.data?.errors)
+                    ? response.data.errors
+                    : []),
+                ...rawTariffs.flatMap(item => {
+                    const result =
+                        item && typeof item.result === 'object' && item.result
+                            ? item.result
+                            : {};
+
+                    return [
+                        ...(Array.isArray(item?.errors) ? item.errors : []),
+                        ...(Array.isArray(result?.errors) ? result.errors : [])
+                    ];
+                })
+            ];
+
+            console.error(
+                'CDEK no suitable tariff:',
+                JSON.stringify({
+                    cityCode,
+                    wantedDeliveryMode,
+                    rawTariffs,
+                    cdekErrors
+                })
+            );
+
+            return res.status(422).json({
+                error:
+                    isCourier
+                        ? 'СДЭК не вернул курьерский тариф для выбранного города'
+                        : 'СДЭК не вернул тариф до пункта выдачи для выбранного города',
+                details: cdekErrors
             });
         }
 
         const tariff = suitableTariffs[0];
 
-        res.json({
-            // deliveryPrice — основной контракт фронтенда.
-            // price оставляем для обратной совместимости.
-            deliveryPrice: Number(tariff.delivery_sum),
-            price: Number(tariff.delivery_sum),
-            tariffCode: tariff.tariff_code,
-            tariffName: tariff.tariff_name,
-            periodMin: tariff.period_min,
-            periodMax: tariff.period_max,
-            deliveryMode: tariff.delivery_mode
-        });
+        const result = {
+            deliveryPrice: tariff.deliverySum,
+            price: tariff.deliverySum,
+            tariffCode: tariff.tariffCode,
+            tariffName: tariff.tariffName,
+            periodMin: tariff.periodMin,
+            periodMax: tariff.periodMax,
+            deliveryMode:
+                tariff.deliveryMode || wantedDeliveryMode
+        };
+
+        setDeliveryCached(cacheKey, result);
+
+        return res.json(result);
 
     } catch (error) {
+        const cdekData =
+            error.response?.data;
+
         console.error(
             'CDEK delivery calculation error:',
-            error.response?.data || error.message
+            cdekData || error.message
         );
 
-        res.status(500).json({
-            error: 'Ошибка расчёта доставки',
+        const cdekMessage =
+            cdekData?.errors?.[0]?.message ||
+            cdekData?.message ||
+            error.message ||
+            'Неизвестная ошибка';
+
+        res.status(
+            error.response?.status &&
+            error.response.status >= 400 &&
+            error.response.status < 500
+                ? 422
+                : 500
+        ).json({
+            error:
+                'Не удалось рассчитать доставку СДЭК',
             details:
-                error.response?.data ||
-                error.message
+                cdekMessage
         });
     }
 });
