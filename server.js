@@ -34,10 +34,14 @@ function normalizeEnvValue(value) {
 }
 
 const RAW_YOOKASSA_SHOP_ID =
-    process.env.YOOKASSA_SHOP_ID || '';
+    process.env.YOOKASSA_SHOP_ID ||
+    process.env.SHOP_ID ||
+    '';
 
 const RAW_YOOKASSA_SECRET_KEY =
-    process.env.YOOKASSA_SECRET_KEY || '';
+    process.env.YOOKASSA_SECRET_KEY ||
+    process.env.SECRET_KEY ||
+    '';
 
 const YOOKASSA_SHOP_ID =
     normalizeEnvValue(
