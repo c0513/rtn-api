@@ -15,8 +15,39 @@ app.use(express.json());
 const CDEK_ACCOUNT = process.env.CDEK_ACCOUNT;
 const CDEK_SECRET = process.env.CDEK_SECRET;
 
-const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID;
-const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
+function normalizeEnvValue(value) {
+    let result = String(value || '')
+        .replace(/^\uFEFF/, '')
+        .trim();
+
+    if (
+        result.length >= 2 &&
+        (
+            (result.startsWith('"') && result.endsWith('"')) ||
+            (result.startsWith("'") && result.endsWith("'"))
+        )
+    ) {
+        result = result.slice(1, -1).trim();
+    }
+
+    return result;
+}
+
+const RAW_YOOKASSA_SHOP_ID =
+    process.env.YOOKASSA_SHOP_ID || '';
+
+const RAW_YOOKASSA_SECRET_KEY =
+    process.env.YOOKASSA_SECRET_KEY || '';
+
+const YOOKASSA_SHOP_ID =
+    normalizeEnvValue(
+        RAW_YOOKASSA_SHOP_ID
+    );
+
+const YOOKASSA_SECRET_KEY =
+    normalizeEnvValue(
+        RAW_YOOKASSA_SECRET_KEY
+    );
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
 
@@ -2179,7 +2210,11 @@ app.get('/api/health', (req, res) => {
         yookassaShopIdMasked:
             YOOKASSA_SHOP_ID
                 ? `***${String(YOOKASSA_SHOP_ID).slice(-4)}`
-                : null
+                : null,
+        yookassaShopIdLength:
+            YOOKASSA_SHOP_ID.length,
+        yookassaSecretKeyLength:
+            YOOKASSA_SECRET_KEY.length
     });
 });
 
@@ -2802,6 +2837,122 @@ function buildReceiptItems(
 // ============================================================
 // 5. СОЗДАНИЕ ПЛАТЕЖА ЮKASSA
 // ============================================================
+
+
+app.get('/api/yookassa/check', async (req, res) => {
+    const rawShop =
+        String(RAW_YOOKASSA_SHOP_ID || '');
+
+    const rawKey =
+        String(RAW_YOOKASSA_SECRET_KEY || '');
+
+    const safeDiagnostics = {
+        configured:
+            Boolean(
+                YOOKASSA_SHOP_ID &&
+                YOOKASSA_SECRET_KEY
+            ),
+
+        shopIdMasked:
+            YOOKASSA_SHOP_ID
+                ? `***${YOOKASSA_SHOP_ID.slice(-4)}`
+                : null,
+
+        shopIdLength:
+            YOOKASSA_SHOP_ID.length,
+
+        secretKeyLength:
+            YOOKASSA_SECRET_KEY.length,
+
+        rawShopHadOuterWhitespace:
+            rawShop !== rawShop.trim(),
+
+        rawSecretHadOuterWhitespace:
+            rawKey !== rawKey.trim(),
+
+        rawShopHadQuotes:
+            /^["'].*["']$/.test(
+                rawShop.trim()
+            ),
+
+        rawSecretHadQuotes:
+            /^["'].*["']$/.test(
+                rawKey.trim()
+            )
+    };
+
+    if (
+        !YOOKASSA_SHOP_ID ||
+        !YOOKASSA_SECRET_KEY
+    ) {
+        return res.status(500).json({
+            ok: false,
+            error:
+                'YOOKASSA_SHOP_ID или YOOKASSA_SECRET_KEY отсутствует в Render',
+            ...safeDiagnostics
+        });
+    }
+
+    try {
+        // Безопасный GET: ничего не создаёт и не списывает.
+        // Проверяет именно ту пару shopId/key, которую реально видит Render.
+        const response =
+            await axios.get(
+                'https://api.yookassa.ru/v3/payments?limit=1',
+                {
+                    auth: {
+                        username:
+                            YOOKASSA_SHOP_ID,
+
+                        password:
+                            YOOKASSA_SECRET_KEY
+                    },
+
+                    headers: {
+                        'Accept':
+                            'application/json'
+                    },
+
+                    timeout:
+                        15000
+                }
+            );
+
+        return res.status(200).json({
+            ok: true,
+            yookassaStatus:
+                response.status,
+            ...safeDiagnostics
+        });
+
+    } catch (error) {
+        const yooError =
+            error.response?.data;
+
+        return res
+            .status(
+                error.response?.status ||
+                500
+            )
+            .json({
+                ok: false,
+
+                yookassaStatus:
+                    error.response?.status ||
+                    null,
+
+                code:
+                    yooError?.code ||
+                    null,
+
+                description:
+                    yooError?.description ||
+                    error.message,
+
+                ...safeDiagnostics
+            });
+    }
+});
 
 app.post('/api/create-payment', async (req, res) => {
     try {
