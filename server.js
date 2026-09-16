@@ -438,6 +438,564 @@ async function syncAllRtnProductsToBitrix() {
     return bitrixStartupSyncPromise;
 }
 
+
+const BITRIX_PROMO_FIELDS = {
+    dealPromo: 'UF_CRM_RTN_PROMO_CODE',
+    dealAmbassador: 'UF_CRM_RTN_AMBASSADOR',
+    contactPromoHistory: 'UF_CRM_RTN_PROMO_HISTORY',
+    contactAmbassadorHistory: 'UF_CRM_RTN_AMBASSADOR_HISTORY'
+};
+
+const RTN_PROMO_AMBASSADORS = {
+    RHINO: 'Роман Халиулин — Носорог',
+    BIGGY: 'Вячеслав Коростелев — Бегемот',
+    BATR: 'Александр Батраков — Сибирский Медведь',
+    DOC: 'Богдан Душин — Доктор'
+};
+
+const RTN_KNOWN_PROMO_CODES = [
+    'RTN2026',
+    'RHINO',
+    'BIGGY',
+    'BATR',
+    'DOC'
+];
+
+const bitrixEnumOptionPromises = new Map();
+let bitrixPromoFieldsBootstrapPromise = null;
+
+function normalizePromoCode(value) {
+    return String(value || '')
+        .trim()
+        .toUpperCase();
+}
+
+function getPromoAmbassador(promoCode) {
+    return RTN_PROMO_AMBASSADORS[
+        normalizePromoCode(promoCode)
+    ] || '';
+}
+
+function makeEnumXmlId(prefix, value) {
+    const hex = Buffer
+        .from(String(value || ''), 'utf8')
+        .toString('hex')
+        .slice(0, 60);
+
+    return `${prefix}_${hex}`;
+}
+
+function getUserFieldApi(entity, action) {
+    if (!['deal', 'contact'].includes(entity)) {
+        throw new Error(`Unsupported CRM entity: ${entity}`);
+    }
+
+    return `crm.${entity}.userfield.${action}`;
+}
+
+async function getBitrixUserField(entity, fieldName) {
+    const result = await bitrixCall(
+        getUserFieldApi(entity, 'list'),
+        {
+            filter: {
+                FIELD_NAME: fieldName
+            }
+        }
+    );
+
+    return Array.isArray(result)
+        ? (result[0] || null)
+        : null;
+}
+
+async function ensureBitrixEnumerationField({
+    entity,
+    fieldName,
+    label,
+    multiple,
+    initialValues = [],
+    sort = 3000
+}) {
+    let field =
+        await getBitrixUserField(
+            entity,
+            fieldName
+        );
+
+    if (!field) {
+        await bitrixCall(
+            getUserFieldApi(entity, 'add'),
+            {
+                fields: {
+                    FIELD_NAME:
+                        fieldName,
+
+                    USER_TYPE_ID:
+                        'enumeration',
+
+                    MULTIPLE:
+                        multiple ? 'Y' : 'N',
+
+                    MANDATORY:
+                        'N',
+
+                    SHOW_FILTER:
+                        'Y',
+
+                    EDIT_FORM_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+
+                    LIST_FILTER_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+
+                    LIST: initialValues.map(
+                        (value, index) => ({
+                            VALUE:
+                                value,
+
+                            XML_ID:
+                                makeEnumXmlId(
+                                    `RTN_${fieldName}`,
+                                    value
+                                ),
+
+                            SORT:
+                                (index + 1) * 100
+                        })
+                    ),
+
+                    SETTINGS: {
+                        DISPLAY:
+                            'UI',
+
+                        LIST_HEIGHT:
+                            Math.max(
+                                5,
+                                initialValues.length
+                            )
+                    },
+
+                    SORT:
+                        sort
+                }
+            }
+        );
+
+        field =
+            await getBitrixUserField(
+                entity,
+                fieldName
+            );
+    }
+
+    if (!field) {
+        throw new Error(
+            `Не удалось создать/получить поле ${fieldName}`
+        );
+    }
+
+    return field;
+}
+
+async function ensureBitrixEnumOption({
+    entity,
+    fieldName,
+    value,
+    xmlPrefix = 'RTN_ENUM'
+}) {
+    const normalizedValue =
+        String(value || '').trim();
+
+    if (!normalizedValue) {
+        return null;
+    }
+
+    const promiseKey =
+        `${entity}:${fieldName}:${normalizedValue}`;
+
+    if (
+        bitrixEnumOptionPromises.has(
+            promiseKey
+        )
+    ) {
+        return bitrixEnumOptionPromises.get(
+            promiseKey
+        );
+    }
+
+    const promise = (async () => {
+        let field =
+            await getBitrixUserField(
+                entity,
+                fieldName
+            );
+
+        if (!field) {
+            throw new Error(
+                `Поле ${fieldName} ещё не создано`
+            );
+        }
+
+        const findOption = currentField =>
+            (Array.isArray(currentField?.LIST)
+                ? currentField.LIST
+                : []
+            ).find(
+                item =>
+                    String(
+                        item?.VALUE || ''
+                    ).trim().toUpperCase() ===
+                    normalizedValue.toUpperCase()
+            );
+
+        let option =
+            findOption(field);
+
+        if (option?.ID) {
+            return Number(option.ID);
+        }
+
+        await bitrixCall(
+            getUserFieldApi(
+                entity,
+                'update'
+            ),
+            {
+                id:
+                    Number(field.ID),
+
+                fields: {
+                    LIST: [
+                        {
+                            VALUE:
+                                normalizedValue,
+
+                            XML_ID:
+                                makeEnumXmlId(
+                                    xmlPrefix,
+                                    normalizedValue
+                                )
+                        }
+                    ]
+                }
+            }
+        );
+
+        field =
+            await getBitrixUserField(
+                entity,
+                fieldName
+            );
+
+        option =
+            findOption(field);
+
+        if (!option?.ID) {
+            throw new Error(
+                `Bitrix24 не вернул ID значения "${normalizedValue}" для ${fieldName}`
+            );
+        }
+
+        return Number(option.ID);
+    })().finally(() => {
+        bitrixEnumOptionPromises.delete(
+            promiseKey
+        );
+    });
+
+    bitrixEnumOptionPromises.set(
+        promiseKey,
+        promise
+    );
+
+    return promise;
+}
+
+async function syncPromoFieldsToBitrix() {
+    if (!isBitrixConfigured()) {
+        return;
+    }
+
+    if (bitrixPromoFieldsBootstrapPromise) {
+        return bitrixPromoFieldsBootstrapPromise;
+    }
+
+    bitrixPromoFieldsBootstrapPromise =
+        (async () => {
+            const knownAmbassadors =
+                Array.from(
+                    new Set(
+                        Object.values(
+                            RTN_PROMO_AMBASSADORS
+                        )
+                    )
+                );
+
+            await ensureBitrixEnumerationField({
+                entity: 'deal',
+                fieldName: BITRIX_PROMO_FIELDS.dealPromo,
+                label: 'Промокод RTN',
+                multiple: false,
+                initialValues: RTN_KNOWN_PROMO_CODES,
+                sort: 3100
+            });
+
+            await ensureBitrixEnumerationField({
+                entity: 'deal',
+                fieldName: BITRIX_PROMO_FIELDS.dealAmbassador,
+                label: 'Амбассадор RTN',
+                multiple: false,
+                initialValues: knownAmbassadors,
+                sort: 3110
+            });
+
+            await ensureBitrixEnumerationField({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.contactPromoHistory,
+                label: 'Промокоды RTN (история)',
+                multiple: true,
+                initialValues: RTN_KNOWN_PROMO_CODES,
+                sort: 3100
+            });
+
+            await ensureBitrixEnumerationField({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.contactAmbassadorHistory,
+                label: 'Амбассадоры RTN (история)',
+                multiple: true,
+                initialValues: knownAmbassadors,
+                sort: 3110
+            });
+
+            for (const code of RTN_KNOWN_PROMO_CODES) {
+                await ensureBitrixEnumOption({
+                    entity: 'deal',
+                    fieldName: BITRIX_PROMO_FIELDS.dealPromo,
+                    value: code,
+                    xmlPrefix: 'RTN_PROMO_DEAL'
+                });
+
+                await ensureBitrixEnumOption({
+                    entity: 'contact',
+                    fieldName: BITRIX_PROMO_FIELDS.contactPromoHistory,
+                    value: code,
+                    xmlPrefix: 'RTN_PROMO_CONTACT'
+                });
+            }
+
+            for (const ambassador of knownAmbassadors) {
+                await ensureBitrixEnumOption({
+                    entity: 'deal',
+                    fieldName: BITRIX_PROMO_FIELDS.dealAmbassador,
+                    value: ambassador,
+                    xmlPrefix: 'RTN_AMB_DEAL'
+                });
+
+                await ensureBitrixEnumOption({
+                    entity: 'contact',
+                    fieldName: BITRIX_PROMO_FIELDS.contactAmbassadorHistory,
+                    value: ambassador,
+                    xmlPrefix: 'RTN_AMB_CONTACT'
+                });
+            }
+
+            console.log(
+                'Bitrix24 promo fields sync finished'
+            );
+        })().finally(() => {
+            bitrixPromoFieldsBootstrapPromise = null;
+        });
+
+    return bitrixPromoFieldsBootstrapPromise;
+}
+
+function toNumericIdArray(value) {
+    const source =
+        Array.isArray(value)
+            ? value
+            : (
+                value === null ||
+                value === undefined ||
+                value === ''
+                    ? []
+                    : [value]
+            );
+
+    return Array.from(
+        new Set(
+            source
+                .map(item => Number(item))
+                .filter(
+                    item =>
+                        Number.isFinite(item) &&
+                        item > 0
+                )
+        )
+    );
+}
+
+async function applyPromoToBitrixContact(
+    contactId,
+    promoCode
+) {
+    const normalizedPromo =
+        normalizePromoCode(promoCode);
+
+    if (!contactId || !normalizedPromo) {
+        return;
+    }
+
+    await syncPromoFieldsToBitrix();
+
+    const promoOptionId =
+        await ensureBitrixEnumOption({
+            entity: 'contact',
+            fieldName: BITRIX_PROMO_FIELDS.contactPromoHistory,
+            value: normalizedPromo,
+            xmlPrefix: 'RTN_PROMO_CONTACT'
+        });
+
+    const ambassador =
+        getPromoAmbassador(
+            normalizedPromo
+        );
+
+    const ambassadorOptionId =
+        ambassador
+            ? await ensureBitrixEnumOption({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.contactAmbassadorHistory,
+                value: ambassador,
+                xmlPrefix: 'RTN_AMB_CONTACT'
+            })
+            : null;
+
+    const contact =
+        await bitrixCall(
+            'crm.contact.get',
+            {
+                id: Number(contactId)
+            }
+        );
+
+    const currentPromoIds =
+        toNumericIdArray(
+            contact?.[
+                BITRIX_PROMO_FIELDS
+                    .contactPromoHistory
+            ]
+        );
+
+    const currentAmbassadorIds =
+        toNumericIdArray(
+            contact?.[
+                BITRIX_PROMO_FIELDS
+                    .contactAmbassadorHistory
+            ]
+        );
+
+    const fields = {};
+
+    if (promoOptionId) {
+        fields[
+            BITRIX_PROMO_FIELDS
+                .contactPromoHistory
+        ] = Array.from(
+            new Set([
+                ...currentPromoIds,
+                Number(promoOptionId)
+            ])
+        );
+    }
+
+    if (ambassadorOptionId) {
+        fields[
+            BITRIX_PROMO_FIELDS
+                .contactAmbassadorHistory
+        ] = Array.from(
+            new Set([
+                ...currentAmbassadorIds,
+                Number(ambassadorOptionId)
+            ])
+        );
+    }
+
+    if (Object.keys(fields).length) {
+        await bitrixCall(
+            'crm.contact.update',
+            {
+                id: Number(contactId),
+                fields
+            }
+        );
+    }
+}
+
+async function applyPromoToBitrixDeal(
+    dealId,
+    promoCode
+) {
+    const normalizedPromo =
+        normalizePromoCode(promoCode);
+
+    if (!dealId || !normalizedPromo) {
+        return;
+    }
+
+    await syncPromoFieldsToBitrix();
+
+    const promoOptionId =
+        await ensureBitrixEnumOption({
+            entity: 'deal',
+            fieldName: BITRIX_PROMO_FIELDS.dealPromo,
+            value: normalizedPromo,
+            xmlPrefix: 'RTN_PROMO_DEAL'
+        });
+
+    const ambassador =
+        getPromoAmbassador(
+            normalizedPromo
+        );
+
+    const ambassadorOptionId =
+        ambassador
+            ? await ensureBitrixEnumOption({
+                entity: 'deal',
+                fieldName: BITRIX_PROMO_FIELDS.dealAmbassador,
+                value: ambassador,
+                xmlPrefix: 'RTN_AMB_DEAL'
+            })
+            : null;
+
+    const fields = {};
+
+    if (promoOptionId) {
+        fields[
+            BITRIX_PROMO_FIELDS.dealPromo
+        ] = Number(promoOptionId);
+    }
+
+    if (ambassadorOptionId) {
+        fields[
+            BITRIX_PROMO_FIELDS.dealAmbassador
+        ] = Number(ambassadorOptionId);
+    }
+
+    if (Object.keys(fields).length) {
+        await bitrixCall(
+            'crm.deal.update',
+            {
+                id: Number(dealId),
+                fields
+            }
+        );
+    }
+}
+
 function normalizeBitrixPhone(value) {
     const digits = String(value || '').replace(/\D/g, '');
 
@@ -589,12 +1147,16 @@ function buildBitrixDealComment({
     delivery,
     items,
     comment,
-    amount
+    amount,
+    promoCode
 }) {
     const lines = [
         `Заказ с сайта RTN.PRO #${orderId || 'без номера'}`,
         '',
         `Сумма заказа: ${Number(amount || 0).toLocaleString('ru-RU')} ₽`,
+        ...(normalizePromoCode(promoCode)
+            ? [`Промокод: ${normalizePromoCode(promoCode)}`]
+            : []),
         `Клиент: ${customer?.name || '—'}`,
         `Телефон: ${customer?.phone || '—'}`,
         `Email: ${customer?.email || '—'}`,
@@ -687,7 +1249,8 @@ async function syncOrderToBitrix({
     items,
     customer,
     delivery,
-    comment
+    comment,
+    promoCode
 }) {
     if (!isBitrixConfigured()) {
         console.warn(
@@ -697,10 +1260,44 @@ async function syncOrderToBitrix({
         return null;
     }
 
+    const normalizedPromoCode =
+        normalizePromoCode(promoCode);
+
+    const contactId =
+        await getOrCreateBitrixContact(customer);
+
+    if (contactId && normalizedPromoCode) {
+        try {
+            await applyPromoToBitrixContact(
+                contactId,
+                normalizedPromoCode
+            );
+        } catch (error) {
+            console.error(
+                'Bitrix24 contact promo attribution error:',
+                error.response?.data || error.message
+            );
+        }
+    }
+
     const existingDealId =
         await findExistingBitrixDeal(orderId);
 
     if (existingDealId) {
+        if (normalizedPromoCode) {
+            try {
+                await applyPromoToBitrixDeal(
+                    existingDealId,
+                    normalizedPromoCode
+                );
+            } catch (error) {
+                console.error(
+                    'Bitrix24 existing deal promo attribution error:',
+                    error.response?.data || error.message
+                );
+            }
+        }
+
         try {
             const productRows =
                 await buildBitrixProductRows(items, delivery);
@@ -724,9 +1321,6 @@ async function syncOrderToBitrix({
 
         return existingDealId;
     }
-
-    const contactId =
-        await getOrCreateBitrixContact(customer);
 
     const fields = {
         title:
@@ -763,7 +1357,8 @@ async function syncOrderToBitrix({
                 delivery,
                 items,
                 comment,
-                amount
+                amount,
+                promoCode: normalizedPromoCode
             })
     };
 
@@ -797,6 +1392,20 @@ async function syncOrderToBitrix({
         throw new Error(
             'Bitrix24 не вернул ID сделки'
         );
+    }
+
+    if (normalizedPromoCode) {
+        try {
+            await applyPromoToBitrixDeal(
+                dealId,
+                normalizedPromoCode
+            );
+        } catch (error) {
+            console.error(
+                'Bitrix24 deal promo attribution error:',
+                error.response?.data || error.message
+            );
+        }
     }
 
     const productRows =
@@ -1184,7 +1793,8 @@ app.get('/api/health', (req, res) => {
         bitrixCategoryId: BITRIX_CATEGORY_ID,
         bitrixStageNew: BITRIX_STAGE_NEW,
         bitrixStagePaid: BITRIX_STAGE_PAID,
-        bitrixProductsCached: bitrixProductIdCache.size
+        bitrixProductsCached: bitrixProductIdCache.size,
+        bitrixPromoTracking: true
     });
 });
 
@@ -1816,7 +2426,8 @@ app.post('/api/create-payment', async (req, res) => {
             customer,
             delivery,
             orderId,
-            comment
+            comment,
+            promoCode
         } = req.body;
 
         // Проверяем сумму
@@ -1870,7 +2481,8 @@ app.post('/api/create-payment', async (req, res) => {
                     items,
                     customer,
                     delivery,
-                    comment
+                    comment,
+                    promoCode
                 });
         } catch (bitrixError) {
             // Ошибка CRM не должна блокировать оплату.
@@ -1920,7 +2532,10 @@ app.post('/api/create-payment', async (req, res) => {
                 bitrixDealId:
                     bitrixDealId
                         ? String(bitrixDealId)
-                        : ''
+                        : '',
+
+                promoCode:
+                    normalizePromoCode(promoCode)
             },
 
             receipt: {
@@ -2069,6 +2684,14 @@ app.listen(PORT, () => {
                 .catch(error => {
                     console.error(
                         'Bitrix24 startup catalog sync error:',
+                        error.response?.data || error.message
+                    );
+                });
+
+            syncPromoFieldsToBitrix()
+                .catch(error => {
+                    console.error(
+                        'Bitrix24 startup promo fields sync error:',
                         error.response?.data || error.message
                     );
                 });
