@@ -53,6 +53,23 @@ const YOOKASSA_SECRET_KEY =
         RAW_YOOKASSA_SECRET_KEY
     );
 
+
+const TELEGRAM_BOT_TOKEN =
+    normalizeEnvValue(
+        process.env.RTN_TELEGRAM_BOT_TOKEN ||
+        process.env.TELEGRAM_BOT_TOKEN ||
+        process.env.TG_BOT_TOKEN ||
+        ''
+    );
+
+const TELEGRAM_CHAT_ID =
+    normalizeEnvValue(
+        process.env.RTN_TELEGRAM_CHAT_ID ||
+        process.env.TELEGRAM_CHAT_ID ||
+        process.env.TG_CHAT_ID ||
+        ''
+    );
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
 
 const BITRIX_WEBHOOK_URL =
@@ -2802,6 +2819,16 @@ app.get('/api/health', (req, res) => {
         bitrixProductsCached: bitrixProductIdCache.size,
         bitrixPromoTracking: bitrixPromoFieldsReady,
         bitrixOrderFieldsReady: bitrixOrderFieldsReady,
+        launchNotifyConfigured: Boolean(
+            isBitrixConfigured() &&
+            TELEGRAM_BOT_TOKEN &&
+            TELEGRAM_CHAT_ID
+        ),
+        launchNotifyBitrixConfigured: isBitrixConfigured(),
+        launchNotifyTelegramConfigured: Boolean(
+            TELEGRAM_BOT_TOKEN &&
+            TELEGRAM_CHAT_ID
+        ),
         yookassaConfigured: Boolean(
             YOOKASSA_SHOP_ID &&
             YOOKASSA_SECRET_KEY
@@ -2816,6 +2843,272 @@ app.get('/api/health', (req, res) => {
             YOOKASSA_SECRET_KEY.length
     });
 });
+
+// ============================================================
+// ПРЕДЗАПУСК 01.10.2026 — EMAIL-УВЕДОМЛЕНИЯ
+// ============================================================
+
+const launchNotifyRecent = new Map();
+const LAUNCH_NOTIFY_TTL =
+    5 * 60 * 1000;
+
+function normalizeLaunchEmail(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase();
+}
+
+function isValidLaunchEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        .test(value);
+}
+
+function cleanupLaunchNotifyRecent() {
+    const now = Date.now();
+
+    for (
+        const [key, timestamp]
+        of launchNotifyRecent.entries()
+    ) {
+        if (
+            now - timestamp >
+            LAUNCH_NOTIFY_TTL
+        ) {
+            launchNotifyRecent.delete(key);
+        }
+    }
+}
+
+async function registerLaunchNotifyInBitrix(
+    email
+) {
+    if (!isBitrixConfigured()) {
+        throw new Error(
+            'Bitrix24 не настроен'
+        );
+    }
+
+    let contactId =
+        await findBitrixContactId(
+            '',
+            email
+        );
+
+    let created = false;
+
+    if (!contactId) {
+        const result =
+            await bitrixCall(
+                'crm.item.add',
+                {
+                    entityTypeId: 3,
+
+                    fields: {
+                        name:
+                            'Подписчик RTN.PRO',
+
+                        sourceId:
+                            'WEB',
+
+                        sourceDescription:
+                            'Уведомление о старте продаж RTN.PRO 01.10.2026',
+
+                        fm: [
+                            {
+                                typeId:
+                                    'EMAIL',
+
+                                valueType:
+                                    'WORK',
+
+                                value:
+                                    email
+                            }
+                        ]
+                    }
+                }
+            );
+
+        contactId =
+            Number(
+                result?.item?.id
+            );
+
+        created = true;
+    }
+
+    if (!contactId) {
+        throw new Error(
+            'Bitrix24 не вернул ID контакта'
+        );
+    }
+
+    // Отмечаем подписку в таймлайне даже у уже существующего контакта.
+    await bitrixCall(
+        'crm.timeline.comment.add',
+        {
+            fields: {
+                ENTITY_ID:
+                    Number(contactId),
+
+                ENTITY_TYPE:
+                    'contact',
+
+                COMMENT:
+                    [
+                        'RTN.PRO — подписка на уведомление о старте продаж',
+                        `Email: ${email}`,
+                        'Старт продаж: 01.10.2026 00:00 МСК',
+                        'Источник: заглушка rtn.pro'
+                    ].join('\n')
+            }
+        }
+    );
+
+    return {
+        contactId,
+        created
+    };
+}
+
+async function sendLaunchNotifyToTelegram({
+    email,
+    contactId,
+    created
+}) {
+    if (
+        !TELEGRAM_BOT_TOKEN ||
+        !TELEGRAM_CHAT_ID
+    ) {
+        throw new Error(
+            'Telegram не настроен: нужны TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID'
+        );
+    }
+
+    const text = [
+        '🦏 RTN.PRO — новая подписка на старт продаж',
+        '',
+        `Email: ${email}`,
+        'Старт: 01.10.2026 00:00 МСК',
+        `Bitrix contact: #${contactId}`,
+        `Контакт: ${created ? 'создан' : 'уже существовал'}`,
+        'Источник: preloader rtn.pro'
+    ].join('\n');
+
+    await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+            chat_id:
+                TELEGRAM_CHAT_ID,
+
+            text,
+
+            disable_web_page_preview:
+                true
+        },
+        {
+            timeout:
+                12000
+        }
+    );
+}
+
+app.post(
+    '/api/launch-notify',
+    async (req, res) => {
+        const email =
+            normalizeLaunchEmail(
+                req.body?.email
+            );
+
+        if (!isValidLaunchEmail(email)) {
+            return res
+                .status(400)
+                .json({
+                    ok: false,
+                    error:
+                        'Укажите корректный email'
+                });
+        }
+
+        cleanupLaunchNotifyRecent();
+
+        const ip =
+            String(
+                req.headers[
+                    'x-forwarded-for'
+                ] ||
+                req.socket?.remoteAddress ||
+                ''
+            )
+                .split(',')[0]
+                .trim();
+
+        const dedupeKey =
+            `${email}|${ip}`;
+
+        const recentAt =
+            launchNotifyRecent.get(
+                dedupeKey
+            );
+
+        if (
+            recentAt &&
+            Date.now() - recentAt <
+            LAUNCH_NOTIFY_TTL
+        ) {
+            return res.json({
+                ok: true,
+                duplicate: true
+            });
+        }
+
+        try {
+            const bitrix =
+                await registerLaunchNotifyInBitrix(
+                    email
+                );
+
+            await sendLaunchNotifyToTelegram({
+                email,
+                contactId:
+                    bitrix.contactId,
+                created:
+                    bitrix.created
+            });
+
+            launchNotifyRecent.set(
+                dedupeKey,
+                Date.now()
+            );
+
+            console.log(
+                `RTN launch notify registered: ${email}`
+            );
+
+            return res.json({
+                ok: true,
+                bitrixStored: true,
+                telegramSent: true
+            });
+
+        } catch (error) {
+            console.error(
+                'RTN launch notify error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res
+                .status(503)
+                .json({
+                    ok: false,
+                    error:
+                        'Не удалось зарегистрировать уведомление. Попробуйте ещё раз.'
+                });
+        }
+    }
+);
 
 // ============================================================
 // 1. ПОИСК ГОРОДОВ CDEK
