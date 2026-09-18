@@ -2820,11 +2820,10 @@ app.get('/api/health', (req, res) => {
         bitrixPromoTracking: bitrixPromoFieldsReady,
         bitrixOrderFieldsReady: bitrixOrderFieldsReady,
         launchNotifyConfigured: Boolean(
-            isBitrixConfigured() &&
             TELEGRAM_BOT_TOKEN &&
             TELEGRAM_CHAT_ID
         ),
-        launchNotifyBitrixConfigured: isBitrixConfigured(),
+        launchNotifyMode: 'telegram_only',
         launchNotifyTelegramConfigured: Boolean(
             TELEGRAM_BOT_TOKEN &&
             TELEGRAM_CHAT_ID
@@ -2879,102 +2878,9 @@ function cleanupLaunchNotifyRecent() {
     }
 }
 
-async function registerLaunchNotifyInBitrix(
-    email
-) {
-    if (!isBitrixConfigured()) {
-        throw new Error(
-            'Bitrix24 не настроен'
-        );
-    }
-
-    let contactId =
-        await findBitrixContactId(
-            '',
-            email
-        );
-
-    let created = false;
-
-    if (!contactId) {
-        const result =
-            await bitrixCall(
-                'crm.item.add',
-                {
-                    entityTypeId: 3,
-
-                    fields: {
-                        name:
-                            'Подписчик RTN.PRO',
-
-                        sourceId:
-                            'WEB',
-
-                        sourceDescription:
-                            'Уведомление о старте продаж RTN.PRO 01.10.2026',
-
-                        fm: [
-                            {
-                                typeId:
-                                    'EMAIL',
-
-                                valueType:
-                                    'WORK',
-
-                                value:
-                                    email
-                            }
-                        ]
-                    }
-                }
-            );
-
-        contactId =
-            Number(
-                result?.item?.id
-            );
-
-        created = true;
-    }
-
-    if (!contactId) {
-        throw new Error(
-            'Bitrix24 не вернул ID контакта'
-        );
-    }
-
-    // Отмечаем подписку в таймлайне даже у уже существующего контакта.
-    await bitrixCall(
-        'crm.timeline.comment.add',
-        {
-            fields: {
-                ENTITY_ID:
-                    Number(contactId),
-
-                ENTITY_TYPE:
-                    'contact',
-
-                COMMENT:
-                    [
-                        'RTN.PRO — подписка на уведомление о старте продаж',
-                        `Email: ${email}`,
-                        'Старт продаж: 01.10.2026 00:00 МСК',
-                        'Источник: заглушка rtn.pro'
-                    ].join('\n')
-            }
-        }
-    );
-
-    return {
-        contactId,
-        created
-    };
-}
-
 async function sendLaunchNotifyToTelegram({
     email,
-    contactId,
-    created
+    source
 }) {
     if (
         !TELEGRAM_BOT_TOKEN ||
@@ -2990,9 +2896,7 @@ async function sendLaunchNotifyToTelegram({
         '',
         `Email: ${email}`,
         'Старт: 01.10.2026 00:00 МСК',
-        `Bitrix contact: #${contactId}`,
-        `Контакт: ${created ? 'создан' : 'уже существовал'}`,
-        'Источник: preloader rtn.pro'
+        `Источник: ${source || 'preloader rtn.pro'}`
     ].join('\n');
 
     await axios.post(
@@ -3020,6 +2924,12 @@ app.post(
             normalizeLaunchEmail(
                 req.body?.email
             );
+
+        const source =
+            String(
+                req.body?.source ||
+                'preloader rtn.pro'
+            ).trim();
 
         if (!isValidLaunchEmail(email)) {
             return res
@@ -3059,22 +2969,15 @@ app.post(
         ) {
             return res.json({
                 ok: true,
-                duplicate: true
+                duplicate: true,
+                telegramSent: true
             });
         }
 
         try {
-            const bitrix =
-                await registerLaunchNotifyInBitrix(
-                    email
-                );
-
             await sendLaunchNotifyToTelegram({
                 email,
-                contactId:
-                    bitrix.contactId,
-                created:
-                    bitrix.created
+                source
             });
 
             launchNotifyRecent.set(
@@ -3083,18 +2986,18 @@ app.post(
             );
 
             console.log(
-                `RTN launch notify registered: ${email}`
+                `RTN launch notify sent to Telegram: ${email}`
             );
 
             return res.json({
                 ok: true,
-                bitrixStored: true,
-                telegramSent: true
+                telegramSent: true,
+                mode: 'telegram_only'
             });
 
         } catch (error) {
             console.error(
-                'RTN launch notify error:',
+                'RTN launch notify Telegram error:',
                 error.response?.data ||
                 error.message
             );
@@ -3104,7 +3007,7 @@ app.post(
                 .json({
                     ok: false,
                     error:
-                        'Не удалось зарегистрировать уведомление. Попробуйте ещё раз.'
+                        'Не удалось отправить уведомление в Telegram. Проверьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.'
                 });
         }
     }
