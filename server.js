@@ -2547,6 +2547,10 @@ app.post('/api/yookassa/webhook', async (req, res) => {
         const event = req.body?.event;
         const notifiedPayment = req.body?.object;
 
+        console.log(
+            `YooKassa webhook received: event=${event || 'UNKNOWN'}, payment=${notifiedPayment?.id || 'NO_ID'}`
+        );
+
         if (event !== 'payment.succeeded') {
             return res.status(200).json({
                 ok: true,
@@ -3994,6 +3998,84 @@ app.get('/api/yookassa/check', async (req, res) => {
 
                 ...safeDiagnostics
             });
+    }
+});
+
+// ============================================================
+// PAYMENT STATUS FALLBACK
+// Клиент вызывает этот endpoint после возврата из ЮKassa.
+// Это резервный путь для Telegram-уведомления, если webhook
+// payment.succeeded по какой-либо причине не дошёл.
+// ============================================================
+
+app.get('/api/payment-status/:paymentId', async (req, res) => {
+    try {
+        const paymentId =
+            String(req.params?.paymentId || '')
+                .trim();
+
+        if (!paymentId) {
+            return res.status(400).json({
+                ok: false,
+                error: 'Не указан payment id'
+            });
+        }
+
+        const payment =
+            await getYooKassaPayment(
+                paymentId
+            );
+
+        const succeeded =
+            payment?.status === 'succeeded' &&
+            payment?.paid === true;
+
+        if (succeeded) {
+            try {
+                const sent =
+                    await sendPaidOrderToTelegram(
+                        payment
+                    );
+
+                if (sent) {
+                    console.log(
+                        `YooKassa payment ${paymentId}: paid notification sent to Telegram by success-page fallback`
+                    );
+                }
+            } catch (telegramError) {
+                console.error(
+                    'RTN paid order Telegram fallback error:',
+                    telegramError.response?.data ||
+                    telegramError.message
+                );
+            }
+        }
+
+        return res.json({
+            ok: true,
+            paymentId:
+                payment?.id || paymentId,
+            status:
+                payment?.status || 'unknown',
+            paid:
+                payment?.paid === true,
+            succeeded,
+            orderId:
+                payment?.metadata?.orderId || ''
+        });
+
+    } catch (error) {
+        console.error(
+            'YooKassa payment status check error:',
+            error.response?.data ||
+            error.message
+        );
+
+        return res.status(503).json({
+            ok: false,
+            error:
+                'Не удалось проверить статус платежа'
+        });
     }
 });
 
