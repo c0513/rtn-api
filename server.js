@@ -2576,32 +2576,70 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             });
         }
 
-        let dealId =
-            Number(payment?.metadata?.bitrixDealId || 0);
+        // Сначала Telegram. Подтверждение уже перепроверено через API ЮKassa,
+        // поэтому сообщение означает реальную успешную оплату.
+        try {
+            const sent =
+                await sendPaidOrderToTelegram(
+                    payment
+                );
 
-        if (!dealId) {
-            const orderId = payment?.metadata?.orderId;
-
-            if (orderId) {
-                dealId =
-                    await findExistingBitrixDeal(orderId);
+            if (sent) {
+                console.log(
+                    `YooKassa payment ${paymentId}: paid notification sent to Telegram`
+                );
             }
-        }
-
-        if (!dealId) {
-            throw new Error(
-                'Сделка Bitrix24 для платежа не найдена'
+        } catch (telegramError) {
+            // Telegram не должен заставлять ЮKassa повторять webhook бесконечно.
+            console.error(
+                'RTN paid order Telegram error:',
+                telegramError.response?.data ||
+                telegramError.message
             );
         }
 
-        await moveBitrixDealToPaid({
-            dealId,
-            payment
-        });
+        // Bitrix24 сейчас может быть недоступен по тарифу.
+        // CRM-синхронизацию оставляем best-effort и не ломаем webhook.
+        try {
+            let dealId =
+                Number(
+                    payment?.metadata?.bitrixDealId ||
+                    0
+                );
 
-        console.log(
-            `YooKassa payment ${paymentId}: Bitrix24 deal ${dealId} moved to ${BITRIX_STAGE_PAID}`
-        );
+            if (!dealId) {
+                const orderId =
+                    payment?.metadata?.orderId;
+
+                if (orderId) {
+                    dealId =
+                        await findExistingBitrixDeal(
+                            orderId
+                        );
+                }
+            }
+
+            if (dealId) {
+                await moveBitrixDealToPaid({
+                    dealId,
+                    payment
+                });
+
+                console.log(
+                    `YooKassa payment ${paymentId}: Bitrix24 deal ${dealId} moved to ${BITRIX_STAGE_PAID}`
+                );
+            } else {
+                console.warn(
+                    `YooKassa payment ${paymentId}: Bitrix24 deal not found; Telegram notification already processed`
+                );
+            }
+        } catch (bitrixError) {
+            console.error(
+                'YooKassa Bitrix24 paid sync error:',
+                bitrixError.response?.data ||
+                bitrixError.message
+            );
+        }
 
         return res.status(200).json({
             ok: true
@@ -2828,6 +2866,10 @@ app.get('/api/health', (req, res) => {
             TELEGRAM_BOT_TOKEN &&
             TELEGRAM_CHAT_ID
         ),
+        orderTelegramNotificationsConfigured: Boolean(
+            TELEGRAM_BOT_TOKEN &&
+            TELEGRAM_CHAT_ID
+        ),
         yookassaConfigured: Boolean(
             YOOKASSA_SHOP_ID &&
             YOOKASSA_SECRET_KEY
@@ -2878,6 +2920,227 @@ function cleanupLaunchNotifyRecent() {
     }
 }
 
+function formatTelegramMoney(value) {
+    const amount = Number(value);
+
+    if (!Number.isFinite(amount)) {
+        return '—';
+    }
+
+    return `${Math.round(amount).toLocaleString('ru-RU')} ₽`;
+}
+
+function compactTelegramValue(value, fallback = '—') {
+    const text = String(value ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    return text || fallback;
+}
+
+function buildTelegramItemsSummary(items) {
+    if (!Array.isArray(items) || !items.length) {
+        return '—';
+    }
+
+    const lines = items
+        .slice(0, 12)
+        .map((item, index) => {
+            const qty =
+                Math.max(
+                    1,
+                    Number(item?.quantity) || 1
+                );
+
+            const name =
+                compactTelegramValue(
+                    item?.name ||
+                    item?.productName ||
+                    'Товар'
+                );
+
+            const flavor =
+                compactTelegramValue(
+                    item?.flavor,
+                    ''
+                );
+
+            const price =
+                Number(item?.price);
+
+            const parts = [];
+
+            if (flavor) {
+                parts.push(flavor);
+            }
+
+            if (Number.isFinite(price)) {
+                parts.push(
+                    `${formatTelegramMoney(price)} × ${qty}`
+                );
+            } else {
+                parts.push(`× ${qty}`);
+            }
+
+            return `${index + 1}. ${name} — ${parts.join(' · ')}`;
+        });
+
+    if (items.length > 12) {
+        lines.push(
+            `…ещё ${items.length - 12} поз.`
+        );
+    }
+
+    return lines.join('\n');
+}
+
+async function sendTelegramText(text) {
+    if (
+        !TELEGRAM_BOT_TOKEN ||
+        !TELEGRAM_CHAT_ID
+    ) {
+        throw new Error(
+            'Telegram не настроен: нужны TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID'
+        );
+    }
+
+    await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+            chat_id:
+                TELEGRAM_CHAT_ID,
+
+            text:
+                String(text || '')
+                    .slice(0, 3900),
+
+            disable_web_page_preview:
+                true
+        },
+        {
+            timeout:
+                10000
+        }
+    );
+}
+
+async function sendOrderAttemptToTelegram({
+    amount,
+    items,
+    customer,
+    delivery,
+    orderId,
+    promoCode,
+    comment
+}) {
+    const deliveryAddress =
+        compactTelegramValue(
+            delivery?.address ||
+            delivery?.city
+        );
+
+    const text = [
+        '🛒 RTN.PRO — ПОПЫТКА ЗАКАЗА',
+        '',
+        `Заказ: ${compactTelegramValue(orderId)}`,
+        `Сумма: ${formatTelegramMoney(amount)}`,
+        `Имя: ${compactTelegramValue(customer?.name)}`,
+        `Телефон: ${compactTelegramValue(customer?.phone)}`,
+        `Email: ${compactTelegramValue(customer?.email)}`,
+        `Получение: ${compactTelegramValue(delivery?.method)}`,
+        `Адрес: ${deliveryAddress}`,
+        `Промокод: ${normalizePromoCode(promoCode) || 'НЕТ'}`,
+        comment
+            ? `Комментарий: ${compactTelegramValue(comment)}`
+            : null,
+        '',
+        'Товары:',
+        buildTelegramItemsSummary(items)
+    ]
+        .filter(Boolean)
+        .join('\n');
+
+    await sendTelegramText(text);
+}
+
+const paidTelegramNotifications =
+    new Map();
+
+const PAID_TELEGRAM_TTL =
+    24 * 60 * 60 * 1000;
+
+function cleanupPaidTelegramNotifications() {
+    const now = Date.now();
+
+    for (
+        const [paymentId, timestamp]
+        of paidTelegramNotifications.entries()
+    ) {
+        if (
+            now - timestamp >
+            PAID_TELEGRAM_TTL
+        ) {
+            paidTelegramNotifications.delete(
+                paymentId
+            );
+        }
+    }
+}
+
+async function sendPaidOrderToTelegram(payment) {
+    const paymentId =
+        compactTelegramValue(
+            payment?.id
+        );
+
+    cleanupPaidTelegramNotifications();
+
+    if (
+        paymentId !== '—' &&
+        paidTelegramNotifications.has(
+            paymentId
+        )
+    ) {
+        return false;
+    }
+
+    const metadata =
+        payment?.metadata || {};
+
+    const deliveryAddress = [
+        metadata.deliveryCity,
+        metadata.deliveryAddress
+    ]
+        .filter(Boolean)
+        .join(', ');
+
+    const text = [
+        '✅ RTN.PRO — ЗАКАЗ ОПЛАЧЕН',
+        '',
+        `Заказ: ${compactTelegramValue(metadata.orderId)}`,
+        `Платёж: ${paymentId}`,
+        `Сумма: ${formatTelegramMoney(payment?.amount?.value)}`,
+        `Имя: ${compactTelegramValue(metadata.customerName)}`,
+        `Телефон: ${compactTelegramValue(metadata.customerPhone)}`,
+        `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
+        `Адрес: ${compactTelegramValue(deliveryAddress)}`,
+        `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
+        '',
+        'Статус ЮKassa: ОПЛАЧЕН ✓'
+    ].join('\n');
+
+    await sendTelegramText(text);
+
+    if (paymentId !== '—') {
+        paidTelegramNotifications.set(
+            paymentId,
+            Date.now()
+        );
+    }
+
+    return true;
+}
+
 async function sendLaunchNotifyToTelegram({
     email,
     source
@@ -2899,22 +3162,7 @@ async function sendLaunchNotifyToTelegram({
         `Источник: ${source || 'preloader rtn.pro'}`
     ].join('\n');
 
-    await axios.post(
-        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-        {
-            chat_id:
-                TELEGRAM_CHAT_ID,
-
-            text,
-
-            disable_web_page_preview:
-                true
-        },
-        {
-            timeout:
-                12000
-        }
-    );
+    await sendTelegramText(text);
 }
 
 app.post(
@@ -3803,6 +4051,24 @@ app.post('/api/create-payment', async (req, res) => {
                 error: 'Корзина пуста'
             });
         }
+
+        // Сразу фиксируем попытку заказа в Telegram.
+        // Ошибка Telegram НЕ должна ломать оплату.
+        sendOrderAttemptToTelegram({
+            amount: paymentAmount,
+            items,
+            customer,
+            delivery,
+            orderId,
+            promoCode,
+            comment
+        }).catch(error => {
+            console.error(
+                'RTN order attempt Telegram error:',
+                error.response?.data ||
+                error.message
+            );
+        });
 
         // Сначала фиксируем заказ в Bitrix24.
         // Даже если ЮKassa временно не работает, заявка не потеряется.
