@@ -592,7 +592,10 @@ const RTN_PROMO_AMBASSADORS = {
     RHINO: 'Роман Халиулин — Носорог',
     BIGGY: 'Вячеслав Коростелев — Бегемот',
     BATR: 'Александр Батраков — Сибирский Медведь',
-    DOC: 'Богдан Душин — Доктор'
+    DOC: 'Богдан Душин — Доктор',
+    TOPLIVO10: 'Протокол Топливо',
+    LION: 'Протокол Лев',
+    PANTERA: 'Протокол Пантера'
 };
 
 const RTN_KNOWN_PROMO_CODES = [
@@ -600,7 +603,10 @@ const RTN_KNOWN_PROMO_CODES = [
     'RHINO',
     'BIGGY',
     'BATR',
-    'DOC'
+    'DOC',
+    'TOPLIVO10',
+    'LION',
+    'PANTERA'
 ];
 
 const bitrixEnumOptionPromises = new Map();
