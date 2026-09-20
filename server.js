@@ -3126,6 +3126,7 @@ async function sendPaidOrderToTelegram(payment) {
         `Сумма: ${formatTelegramMoney(payment?.amount?.value)}`,
         `Имя: ${compactTelegramValue(metadata.customerName)}`,
         `Телефон: ${compactTelegramValue(metadata.customerPhone)}`,
+        `Email: ${compactTelegramValue(metadata.customerEmail)}`,
         `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
         `Адрес: ${compactTelegramValue(deliveryAddress)}`,
         `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
@@ -3736,6 +3737,24 @@ function normalizeRuPhoneForYooKassa(value) {
     return '+' + digits;
 }
 
+function normalizeEmailForYooKassa(value) {
+    const email =
+        String(value || '')
+            .trim()
+            .toLowerCase();
+
+    if (
+        !email ||
+        email.length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/
+            .test(email)
+    ) {
+        return '';
+    }
+
+    return email;
+}
+
 // ============================================================
 // ФОРМИРОВАНИЕ ЧЕКА ЮKASSA
 // ============================================================
@@ -4120,6 +4139,23 @@ app.post('/api/create-payment', async (req, res) => {
             });
         }
 
+        // Для электронного чека ЮKassa нужен корректный email покупателя.
+        const normalizedEmail =
+            normalizeEmailForYooKassa(
+                customer?.email
+            );
+
+        if (!normalizedEmail) {
+            return res.status(400).json({
+                error: 'Укажите корректный email для отправки электронного чека'
+            });
+        }
+
+        const customerFullName =
+            String(customer?.name || '')
+                .trim()
+                .slice(0, 256);
+
         // Формируем чек
         const receiptItems =
             buildReceiptItems(
@@ -4133,6 +4169,10 @@ app.post('/api/create-payment', async (req, res) => {
                 error: 'Корзина пуста'
             });
         }
+
+        console.log(
+            `YooKassa receipt prepared: order=${String(orderId || 'NO_ID')}, email=yes, phone=yes, items=${receiptItems.length}`
+        );
 
         // Сразу фиксируем попытку заказа в Telegram.
         // Ошибка Telegram НЕ должна ломать оплату.
@@ -4200,6 +4240,9 @@ app.post('/api/create-payment', async (req, res) => {
                 customerPhone:
                     normalizedPhone,
 
+                customerEmail:
+                    normalizedEmail,
+
                 deliveryMethod:
                     delivery?.method || '',
 
@@ -4223,6 +4266,12 @@ app.post('/api/create-payment', async (req, res) => {
 
             receipt: {
                 customer: {
+                    full_name:
+                        customerFullName,
+
+                    email:
+                        normalizedEmail,
+
                     phone:
                         normalizedPhone
                 },
