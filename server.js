@@ -4196,6 +4196,24 @@ app.post('/api/contact', async (req, res) => {
     }
 });
 
+function buildPaymentDescription({ orderId, customerName, items }) {
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const shorten = (value, max) => value.length <= max ? value : value.slice(0, max - 1) + '…';
+    const order = shorten(clean(orderId), 40);
+    const name = shorten(clean(customerName), 28);
+    const summary = (Array.isArray(items) ? items : []).map(item => {
+        const title = clean(item?.name || item?.productName) || 'Товар';
+        const quantity = Math.max(1, Math.floor(Number(item?.quantity) || 1));
+        return `${title} ×${quantity}`;
+    }).join(', ');
+    return shorten([
+        'RTN.PRO',
+        order ? `Заказ ${order}` : 'Заказ',
+        name,
+        summary
+    ].filter(Boolean).join(' · '), 128);
+}
+
 app.post('/api/create-payment', async (req, res) => {
     try {
         const {
@@ -4329,7 +4347,11 @@ app.post('/api/create-payment', async (req, res) => {
                     `${FRONTEND_URL}/?payment=success`
             },
 
-            description: 'Заказ RTN.PRO',
+            description: buildPaymentDescription({
+                orderId,
+                customerName: customerFullName,
+                items
+            }),
 
             metadata: {
                 customerName:
