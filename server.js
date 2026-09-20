@@ -92,6 +92,50 @@ const BITRIX_ASSIGNED_BY_ID =
 
 const CDEK_API = 'https://api.cdek.ru/v2';
 
+const YCP_ACCESS_TOKEN =
+    normalizeEnvValue(
+        process.env.YCP_ACCESS_TOKEN ||
+        ''
+    );
+
+const YCP_API_TOKEN =
+    normalizeEnvValue(
+        process.env.YCP_API_TOKEN ||
+        ''
+    );
+
+const YCP_WAREHOUSE_ID =
+    normalizeEnvValue(
+        process.env.YCP_WAREHOUSE_ID ||
+        'rtn-main'
+    );
+
+const YCP_WAREHOUSE_TITLE =
+    normalizeEnvValue(
+        process.env.YCP_WAREHOUSE_TITLE ||
+        'RTN.PRO / SuppStore'
+    );
+
+const YCP_WAREHOUSE_ADDRESS =
+    normalizeEnvValue(
+        process.env.YCP_WAREHOUSE_ADDRESS ||
+        'Санкт-Петербург, улица Маршала Казакова, 58'
+    );
+
+const YCP_DEFAULT_STOCK =
+    Math.max(
+        0,
+        Number(
+            process.env.YCP_DEFAULT_STOCK ||
+            0
+        ) || 0
+    );
+
+const {
+    YCP_PRODUCTS,
+    YCP_PRODUCTS_BY_ID
+} = require('./ycp-catalog');
+
 
 // ============================================================
 // BITRIX24
@@ -592,10 +636,7 @@ const RTN_PROMO_AMBASSADORS = {
     RHINO: 'Роман Халиулин — Носорог',
     BIGGY: 'Вячеслав Коростелев — Бегемот',
     BATR: 'Александр Батраков — Сибирский Медведь',
-    DOC: 'Богдан Душин — Доктор',
-    TOPLIVO10: 'Протокол Топливо',
-    LION: 'Протокол Лев',
-    PANTERA: 'Протокол Пантера'
+    DOC: 'Богдан Душин — Доктор'
 };
 
 const RTN_KNOWN_PROMO_CODES = [
@@ -603,10 +644,7 @@ const RTN_KNOWN_PROMO_CODES = [
     'RHINO',
     'BIGGY',
     'BATR',
-    'DOC',
-    'TOPLIVO10',
-    'LION',
-    'PANTERA'
+    'DOC'
 ];
 
 const bitrixEnumOptionPromises = new Map();
@@ -2880,6 +2918,18 @@ app.get('/api/health', (req, res) => {
             TELEGRAM_BOT_TOKEN &&
             TELEGRAM_CHAT_ID
         ),
+        ycpAccessTokenConfigured: Boolean(
+            YCP_ACCESS_TOKEN
+        ),
+        ycpApiTokenConfigured: Boolean(
+            YCP_API_TOKEN
+        ),
+        ycpWarehouseId:
+            YCP_WAREHOUSE_ID,
+        ycpDefaultStock:
+            YCP_DEFAULT_STOCK,
+        ycpProducts:
+            YCP_PRODUCTS.length,
         yookassaConfigured: Boolean(
             YOOKASSA_SHOP_ID &&
             YOOKASSA_SECRET_KEY
@@ -4416,6 +4466,855 @@ app.post('/api/create-payment', async (req, res) => {
         });
     }
 });
+
+
+// ============================================================
+// YANDEX COMMERCE PROTOCOL (YCP) — БАЗОВЫЕ МЕТОДЫ
+// ============================================================
+
+const ycpSessions = new Map();
+const ycpOrders = new Map();
+
+const YCP_SESSION_TTL_MS =
+    60 * 60 * 1000;
+
+function secureStringEqual(left, right) {
+    const a = Buffer.from(String(left || ''));
+    const b = Buffer.from(String(right || ''));
+
+    if (a.length !== b.length) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(a, b);
+}
+
+function extractYcpIncomingToken(req) {
+    const authorization =
+        String(
+            req.get('authorization') ||
+            ''
+        ).trim();
+
+    const strippedAuthorization =
+        authorization.replace(
+            /^(Bearer|Token|Api-Key)\s+/i,
+            ''
+        ).trim();
+
+    return (
+        strippedAuthorization ||
+        String(req.get('x-api-key') || '').trim() ||
+        String(req.get('api-key') || '').trim() ||
+        String(req.get('x-ycp-token') || '').trim() ||
+        String(req.get('x-access-token') || '').trim()
+    );
+}
+
+function requireYcpAuth(req, res, next) {
+    if (!YCP_ACCESS_TOKEN) {
+        return res.status(503).json({
+            error:
+                'YCP access token is not configured'
+        });
+    }
+
+    const incomingToken =
+        extractYcpIncomingToken(req);
+
+    if (
+        !incomingToken ||
+        !secureStringEqual(
+            incomingToken,
+            YCP_ACCESS_TOKEN
+        )
+    ) {
+        return res.status(401).json({
+            error:
+                'Не авторизован'
+        });
+    }
+
+    return next();
+}
+
+function cleanupYcpSessions() {
+    const now = Date.now();
+
+    for (
+        const [sessionId, session]
+        of ycpSessions.entries()
+    ) {
+        if (
+            now - session.createdAt >
+            YCP_SESSION_TTL_MS
+        ) {
+            ycpSessions.delete(sessionId);
+        }
+    }
+}
+
+function ycpStockForProduct() {
+    return YCP_DEFAULT_STOCK;
+}
+
+function ycpProductVariations(product) {
+    if (!product) {
+        return [];
+    }
+
+    return YCP_PRODUCTS
+        .filter(candidate =>
+            candidate.group === product.group &&
+            candidate.id !== product.id
+        )
+        .map(candidate =>
+            buildYcpBasketItem(
+                candidate,
+                false
+            )
+        );
+}
+
+function ycpProductCharacteristics(product) {
+    if (!product?.flavor) {
+        return [];
+    }
+
+    return [
+        {
+            display_type:
+                'text',
+
+            code:
+                'FLAVOR',
+
+            name:
+                'Вкус',
+
+            properties: {
+                value:
+                    product.flavor
+            }
+        }
+    ];
+}
+
+function buildYcpBasketItem(
+    product,
+    includeVariations = true
+) {
+    const item = {
+        id:
+            product.id,
+
+        name:
+            product.name,
+
+        regular_price:
+            product.price,
+
+        final_price:
+            product.price,
+
+        img:
+            product.img,
+
+        url:
+            product.url,
+
+        warehouses: [
+            {
+                id:
+                    YCP_WAREHOUSE_ID,
+
+                available_quantity:
+                    ycpStockForProduct(
+                        product
+                    )
+            }
+        ],
+
+        dimensions:
+            product.dimensions,
+
+        characteristics:
+            ycpProductCharacteristics(
+                product
+            )
+    };
+
+    if (includeVariations) {
+        item.variations =
+            ycpProductVariations(
+                product
+            );
+    }
+
+    return item;
+}
+
+function ycpActualInventory(items) {
+    return {
+        items:
+            (Array.isArray(items)
+                ? items
+                : []
+            )
+                .map(requested => {
+                    const product =
+                        YCP_PRODUCTS_BY_ID[
+                            String(
+                                requested?.id ||
+                                ''
+                            )
+                        ];
+
+                    if (!product) {
+                        return null;
+                    }
+
+                    return {
+                        id:
+                            product.id,
+
+                        regular_price:
+                            product.price,
+
+                        final_price:
+                            product.price,
+
+                        warehouses: [
+                            {
+                                id:
+                                    YCP_WAREHOUSE_ID,
+
+                                available_quantity:
+                                    ycpStockForProduct(
+                                        product
+                                    )
+                            }
+                        ]
+                    };
+                })
+                .filter(Boolean)
+    };
+}
+
+function validateYcpCheckoutItems(items) {
+    if (
+        !Array.isArray(items) ||
+        !items.length
+    ) {
+        return {
+            ok: false,
+            status: 400,
+            error: 'Корзина пуста'
+        };
+    }
+
+    for (const requested of items) {
+        const id =
+            String(
+                requested?.id ||
+                ''
+            );
+
+        const product =
+            YCP_PRODUCTS_BY_ID[id];
+
+        if (!product) {
+            return {
+                ok: false,
+                status: 404,
+                error:
+                    `Товар ${id} не найден`
+            };
+        }
+
+        const quantity =
+            Number(
+                requested?.quantity
+            );
+
+        if (
+            !Number.isInteger(quantity) ||
+            quantity < 1
+        ) {
+            return {
+                ok: false,
+                status: 400,
+                error:
+                    `Некорректное количество для ${id}`
+            };
+        }
+
+        const regularPrice =
+            Number(
+                requested?.regular_price
+            );
+
+        const finalPrice =
+            Number(
+                requested?.final_price
+            );
+
+        const stock =
+            ycpStockForProduct(
+                product
+            );
+
+        if (
+            regularPrice !== product.price ||
+            finalPrice !== product.price ||
+            quantity > stock
+        ) {
+            return {
+                ok: false,
+                status: 409,
+                error:
+                    'Цены изменились или товары закончились',
+
+                actual_inventory:
+                    ycpActualInventory(
+                        items
+                    )
+            };
+        }
+    }
+
+    return {
+        ok: true
+    };
+}
+
+function ycpMerchantOrderNumber(
+    sessionId
+) {
+    const suffix =
+        String(sessionId || '')
+            .replace(
+                /[^a-zA-Z0-9]/g,
+                ''
+            )
+            .slice(-8)
+            .toUpperCase();
+
+    return (
+        `RTN-YCP-${suffix || Date.now()}`
+    );
+}
+
+// 1. Получить список складов и магазинов
+app.get(
+    '/api/v1/warehouses',
+    requireYcpAuth,
+    (req, res) => {
+        const offset =
+            Math.max(
+                0,
+                Number(req.query.offset || 0) || 0
+            );
+
+        const limit =
+            Math.max(
+                1,
+                Math.min(
+                    100,
+                    Number(req.query.limit || 100) || 100
+                )
+            );
+
+        const warehouses = [
+            {
+                id:
+                    YCP_WAREHOUSE_ID,
+
+                title:
+                    YCP_WAREHOUSE_TITLE,
+
+                address:
+                    YCP_WAREHOUSE_ADDRESS,
+
+                description:
+                    'Основная точка отгрузки RTN.PRO',
+
+                // Самовывоз на сайте RTN есть,
+                // но для YCP не включаем его до внесения
+                // реального графика работы.
+                self_pickup_options: {
+                    enabled:
+                        false
+                },
+
+                ycp_delivery_options: {
+                    enabled:
+                        true
+                }
+            }
+        ];
+
+        return res.json({
+            warehouses:
+                warehouses.slice(
+                    offset,
+                    offset + limit
+                ),
+
+            total_count:
+                warehouses.length
+        });
+    }
+);
+
+// 2. Проверить текущую корзину
+app.post(
+    '/api/v1/checkout/basket/check',
+    requireYcpAuth,
+    (req, res) => {
+        const items =
+            Array.isArray(req.body?.items)
+                ? req.body.items
+                : [];
+
+        if (!items.length) {
+            return res.status(400).json({
+                error:
+                    'Корзина пуста'
+            });
+        }
+
+        const result = [];
+
+        for (const requested of items) {
+            const id =
+                String(
+                    requested?.id ||
+                    ''
+                );
+
+            const product =
+                YCP_PRODUCTS_BY_ID[id];
+
+            if (!product) {
+                return res.status(404).json({
+                    error:
+                        `Товар ${id} не найден`
+                });
+            }
+
+            result.push(
+                buildYcpBasketItem(
+                    product,
+                    true
+                )
+            );
+        }
+
+        return res.json({
+            items:
+                result
+        });
+    }
+);
+
+// 3. Создать новую сессию чекаута
+app.post(
+    '/api/v1/checkout',
+    requireYcpAuth,
+    (req, res) => {
+        cleanupYcpSessions();
+
+        const sessionId =
+            String(
+                req.body?.session_id ||
+                ''
+            ).trim();
+
+        if (!sessionId) {
+            return res.status(400).json({
+                error:
+                    'Не указан session_id'
+            });
+        }
+
+        const existing =
+            ycpSessions.get(
+                sessionId
+            );
+
+        if (existing) {
+            if (existing.canceled) {
+                return res.status(409).json({
+                    error:
+                        'Сессия уже отменена',
+
+                    checkout_canceled:
+                        true,
+
+                    actual_inventory:
+                        ycpActualInventory(
+                            req.body?.items
+                        )
+                });
+            }
+
+            return res.status(200).json({
+                order_number:
+                    existing.orderNumber
+            });
+        }
+
+        if (
+            String(
+                req.body?.warehouse_id ||
+                ''
+            ) !== YCP_WAREHOUSE_ID
+        ) {
+            return res.status(400).json({
+                error:
+                    'Неизвестный склад'
+            });
+        }
+
+        const validation =
+            validateYcpCheckoutItems(
+                req.body?.items
+            );
+
+        if (!validation.ok) {
+            return res
+                .status(validation.status)
+                .json({
+                    error:
+                        validation.error,
+
+                    ...(
+                        validation.actual_inventory
+                            ? {
+                                actual_inventory:
+                                    validation.actual_inventory
+                            }
+                            : {}
+                    )
+                });
+        }
+
+        const orderNumber =
+            ycpMerchantOrderNumber(
+                sessionId
+            );
+
+        ycpSessions.set(
+            sessionId,
+            {
+                sessionId,
+                orderNumber,
+                warehouseId:
+                    YCP_WAREHOUSE_ID,
+                items:
+                    req.body.items,
+                customer:
+                    req.body?.customer || {},
+                delivery:
+                    req.body?.delivery || {},
+                canceled:
+                    false,
+                placed:
+                    false,
+                createdAt:
+                    Date.now()
+            }
+        );
+
+        console.log(
+            `YCP checkout created: session=${sessionId}, order=${orderNumber}`
+        );
+
+        return res.status(201).json({
+            order_number:
+                orderNumber
+        });
+    }
+);
+
+// 4. Оформить заказ
+app.post(
+    '/api/v1/checkout/placed',
+    requireYcpAuth,
+    async (req, res) => {
+        cleanupYcpSessions();
+
+        const sessionId =
+            String(
+                req.body?.session_id ||
+                req.query?.session_id ||
+                ''
+            ).trim();
+
+        const orderId =
+            String(
+                req.body?.order_id ||
+                req.query?.order_id ||
+                ''
+            ).trim();
+
+        const paymentMethod =
+            String(
+                req.body?.payment_method ||
+                req.query?.payment_method ||
+                ''
+            ).trim();
+
+        const onlinePaymentMethod =
+            String(
+                req.body?.online_payment_method ||
+                ''
+            ).trim();
+
+        const orderNumber =
+            String(
+                req.body?.order_number ||
+                ''
+            ).trim();
+
+        if (
+            !sessionId ||
+            !orderId ||
+            !['online', 'on_delivery']
+                .includes(paymentMethod)
+        ) {
+            return res.status(400).json({
+                error:
+                    'Некорректные данные заказа'
+            });
+        }
+
+        const session =
+            ycpSessions.get(
+                sessionId
+            );
+
+        if (!session) {
+            return res.status(404).json({
+                error:
+                    'Сессия не найдена'
+            });
+        }
+
+        if (session.canceled) {
+            return res.status(409).json({
+                error:
+                    'Сессия уже отменена'
+            });
+        }
+
+        const existingOrder =
+            ycpOrders.get(
+                orderId
+            );
+
+        if (
+            existingOrder?.canceled
+        ) {
+            return res.status(409).json({
+                error:
+                    'Заказ уже отменен'
+            });
+        }
+
+        session.placed =
+            true;
+
+        session.orderId =
+            orderId;
+
+        session.paymentMethod =
+            paymentMethod;
+
+        ycpOrders.set(
+            orderId,
+            {
+                orderId,
+                sessionId,
+                orderNumber:
+                    orderNumber ||
+                    session.orderNumber,
+                paymentMethod,
+                onlinePaymentMethod,
+                customer:
+                    session.customer,
+                delivery:
+                    session.delivery,
+                items:
+                    session.items,
+                canceled:
+                    false,
+                createdAt:
+                    Date.now()
+            }
+        );
+
+        try {
+            const customer =
+                session.customer || {};
+
+            const delivery =
+                session.delivery || {};
+
+            const paymentText =
+                paymentMethod === 'online'
+                    ? `ОПЛАЧЕН ОНЛАЙН${onlinePaymentMethod ? ` (${onlinePaymentMethod})` : ''}`
+                    : 'ОПЛАТА ПРИ ПОЛУЧЕНИИ';
+
+            const total =
+                session.items.reduce(
+                    (sum, item) =>
+                        sum +
+                        (
+                            Number(item.final_price) *
+                            Number(item.quantity)
+                        ),
+                    0
+                ) +
+                Number(
+                    delivery?.price ||
+                    0
+                );
+
+            await sendTelegramText(
+                [
+                    '🟡 RTN.PRO — ЗАКАЗ ЧЕРЕЗ YCP',
+                    '',
+                    `Заказ: ${compactTelegramValue(orderNumber || session.orderNumber)}`,
+                    `YCP order: ${compactTelegramValue(orderId)}`,
+                    `Статус: ${paymentText}`,
+                    `Сумма: ${formatTelegramMoney(total)}`,
+                    `Имя: ${compactTelegramValue(customer?.full_name)}`,
+                    `Телефон: ${compactTelegramValue(customer?.phone)}`,
+                    `Email: ${compactTelegramValue(customer?.email)}`,
+                    `Доставка: ${compactTelegramValue(delivery?.service_display_name || delivery?.delivery_method)}`,
+                    `Адрес: ${compactTelegramValue(delivery?.address?.address || delivery?.address?.locality)}`,
+                    '',
+                    'Товары:',
+                    session.items
+                        .map(
+                            (item, index) => {
+                                const product =
+                                    YCP_PRODUCTS_BY_ID[
+                                        String(
+                                            item.id
+                                        )
+                                    ];
+
+                                return `${index + 1}. ${compactTelegramValue(product?.name || item.id)} × ${Number(item.quantity) || 1}`;
+                            }
+                        )
+                        .join('\n')
+                ].join('\n')
+            );
+        } catch (error) {
+            console.error(
+                'YCP order Telegram error:',
+                error.response?.data ||
+                error.message
+            );
+        }
+
+        console.log(
+            `YCP checkout placed: session=${sessionId}, order=${orderId}, payment=${paymentMethod}`
+        );
+
+        return res.status(200).end();
+    }
+);
+
+// 5. Отменить сессию
+app.post(
+    '/api/v1/checkout/cancel',
+    requireYcpAuth,
+    (req, res) => {
+        cleanupYcpSessions();
+
+        const sessionId =
+            String(
+                req.query?.session_id ||
+                req.body?.session_id ||
+                ''
+            ).trim();
+
+        if (!sessionId) {
+            return res.status(400).json({
+                error:
+                    'Не указан session_id'
+            });
+        }
+
+        const session =
+            ycpSessions.get(
+                sessionId
+            );
+
+        if (!session) {
+            return res.status(404).json({
+                error:
+                    'Сессия не найдена'
+            });
+        }
+
+        session.canceled =
+            true;
+
+        console.log(
+            `YCP checkout canceled: session=${sessionId}`
+        );
+
+        return res.status(200).end();
+    }
+);
+
+// 6. Отменить заказ
+app.post(
+    '/api/v1/order/cancel',
+    requireYcpAuth,
+    (req, res) => {
+        const orderId =
+            String(
+                req.query?.order_id ||
+                req.body?.order_id ||
+                ''
+            ).trim();
+
+        if (!orderId) {
+            return res.status(400).json({
+                error:
+                    'Не указан order_id'
+            });
+        }
+
+        const order =
+            ycpOrders.get(
+                orderId
+            );
+
+        if (!order) {
+            return res.status(404).json({
+                error:
+                    'Заказ не найден'
+            });
+        }
+
+        order.canceled =
+            true;
+
+        console.log(
+            `YCP order canceled: order=${orderId}`
+        );
+
+        return res.status(200).end();
+    }
+);
+
 
 // ============================================================
 // 404
