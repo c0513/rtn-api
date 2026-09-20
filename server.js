@@ -2626,6 +2626,8 @@ app.post('/api/yookassa/webhook', async (req, res) => {
 
         // Сначала Telegram. Подтверждение уже перепроверено через API ЮKassa,
         // поэтому сообщение означает реальную успешную оплату.
+        let telegramDeliveryError = null;
+
         try {
             const sent =
                 await sendPaidOrderToTelegram(
@@ -2638,7 +2640,7 @@ app.post('/api/yookassa/webhook', async (req, res) => {
                 );
             }
         } catch (telegramError) {
-            // Telegram не должен заставлять ЮKassa повторять webhook бесконечно.
+            telegramDeliveryError = telegramError;
             console.error(
                 'RTN paid order Telegram error:',
                 telegramError.response?.data ||
@@ -2687,6 +2689,16 @@ app.post('/api/yookassa/webhook', async (req, res) => {
                 bitrixError.response?.data ||
                 bitrixError.message
             );
+        }
+
+        // Если Telegram временно недоступен, не подтверждаем webhook как
+        // обработанный: ЮKassa повторит доставку, и оплаченный заказ не потеряется.
+        if (telegramDeliveryError) {
+            return res.status(502).json({
+                ok: false,
+                retry: true,
+                error: 'Telegram notification delivery failed'
+            });
         }
 
         return res.status(200).json({
@@ -4105,6 +4117,8 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
             payment?.status === 'succeeded' &&
             payment?.paid === true;
 
+        let notificationSent = true;
+
         if (succeeded) {
             try {
                 const sent =
@@ -4118,6 +4132,7 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                     );
                 }
             } catch (telegramError) {
+                notificationSent = false;
                 console.error(
                     'RTN paid order Telegram fallback error:',
                     telegramError.response?.data ||
@@ -4135,6 +4150,7 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
             paid:
                 payment?.paid === true,
             succeeded,
+            notificationSent,
             orderId:
                 payment?.metadata?.orderId || ''
         });
@@ -4151,6 +4167,32 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
             error:
                 'Не удалось проверить статус платежа'
         });
+    }
+});
+
+app.post('/api/contact', async (req, res) => {
+    try {
+        const name = compactTelegramValue(req.body?.name, '—');
+        const email = compactTelegramValue(req.body?.email, '—');
+        const message = compactTelegramValue(req.body?.message, '—').slice(0, 2000);
+
+        if (name === '—' || email === '—' || message === '—') {
+            return res.status(400).json({ ok: false, error: 'Заполните все поля' });
+        }
+
+        await sendTelegramText([
+            '📨 RTN.PRO — ОБРАТНАЯ СВЯЗЬ',
+            '',
+            `Имя: ${name}`,
+            `Email: ${email}`,
+            '',
+            `Сообщение: ${message}`
+        ].join('\n'));
+
+        return res.json({ ok: true });
+    } catch (error) {
+        console.error('RTN contact Telegram error:', error.response?.data || error.message);
+        return res.status(503).json({ ok: false, error: 'Не удалось отправить сообщение' });
     }
 });
 
