@@ -108,6 +108,12 @@ function normalizeAttributionTouch(input = {}) {
                 300
             ),
 
+        yclid:
+            normalizeAttributionValue(
+                input?.yclid,
+                300
+            ),
+
         capturedAt:
             normalizeAttributionValue(
                 input?.capturedAt,
@@ -128,15 +134,32 @@ function normalizeAttribution(input = {}) {
         input ||
         {};
 
+    const firstTouch =
+        normalizeAttributionTouch(
+            firstRaw
+        );
+
+    const lastTouch =
+        normalizeAttributionTouch(
+            lastRaw
+        );
+
     return {
-        firstTouch:
-            normalizeAttributionTouch(
-                firstRaw
+        firstTouch,
+        lastTouch,
+
+        metrikaClientId:
+            normalizeAttributionValue(
+                input?.metrikaClientId,
+                120
             ),
 
-        lastTouch:
-            normalizeAttributionTouch(
-                lastRaw
+        yclid:
+            normalizeAttributionValue(
+                input?.yclid ||
+                lastTouch.yclid ||
+                firstTouch.yclid,
+                300
             )
     };
 }
@@ -273,6 +296,24 @@ const TELEGRAM_CHAT_ID =
     );
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
+
+const YANDEX_METRIKA_COUNTER_ID =
+    normalizeEnvValue(
+        process.env.YANDEX_METRIKA_COUNTER_ID ||
+        '109277400'
+    );
+
+const YANDEX_METRIKA_OAUTH_TOKEN =
+    normalizeEnvValue(
+        process.env.YANDEX_METRIKA_OAUTH_TOKEN ||
+        ''
+    );
+
+const YANDEX_METRIKA_PAID_GOAL =
+    normalizeEnvValue(
+        process.env.YANDEX_METRIKA_PAID_GOAL ||
+        'order_paid'
+    );
 
 const BITRIX_WEBHOOK_URL =
     (process.env.BITRIX_WEBHOOK_URL || '').replace(/\/+$/, '');
@@ -3160,6 +3201,217 @@ async function getYooKassaPayment(paymentId) {
     return response.data;
 }
 
+// ============================================================
+// YANDEX METRIKA: OFFLINE PAID CONVERSION
+// payment.succeeded -> order_paid
+// ============================================================
+
+const metrikaPaidConversions = new Map();
+const METRIKA_PAID_DEDUPE_TTL = 7 * 24 * 60 * 60 * 1000;
+
+function cleanupMetrikaPaidConversions() {
+    const now = Date.now();
+
+    for (const [paymentId, timestamp] of metrikaPaidConversions.entries()) {
+        if (now - Number(timestamp || 0) > METRIKA_PAID_DEDUPE_TTL) {
+            metrikaPaidConversions.delete(paymentId);
+        }
+    }
+}
+
+function csvCell(value) {
+    return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function isRetryableMetrikaError(error) {
+    const status = Number(error?.response?.status || 0);
+
+    return (
+        error?.code === 'ECONNABORTED' ||
+        error?.code === 'ECONNRESET' ||
+        error?.code === 'ETIMEDOUT' ||
+        status === 429 ||
+        status >= 500
+    );
+}
+
+async function sendPaidConversionToMetrika(payment) {
+    const paymentId =
+        normalizeAttributionValue(
+            payment?.id,
+            120
+        );
+
+    cleanupMetrikaPaidConversions();
+
+    if (
+        paymentId &&
+        metrikaPaidConversions.has(paymentId)
+    ) {
+        return {
+            ok: true,
+            deduped: true
+        };
+    }
+
+    if (
+        !YANDEX_METRIKA_COUNTER_ID ||
+        !YANDEX_METRIKA_OAUTH_TOKEN
+    ) {
+        console.warn(
+            'Yandex Metrika offline conversion skipped: YANDEX_METRIKA_COUNTER_ID or YANDEX_METRIKA_OAUTH_TOKEN is not configured'
+        );
+
+        return {
+            ok: false,
+            skipped: true,
+            reason: 'not_configured'
+        };
+    }
+
+    const metadata =
+        payment?.metadata || {};
+
+    const clientId =
+        normalizeAttributionValue(
+            metadata.metrikaClientId,
+            120
+        );
+
+    const yclid =
+        normalizeAttributionValue(
+            metadata.yclid,
+            300
+        );
+
+    const purchaseId =
+        normalizeAttributionValue(
+            metadata.orderId || paymentId,
+            180
+        );
+
+    if (!clientId && !yclid && !purchaseId) {
+        console.warn(
+            `Yandex Metrika offline conversion skipped for payment ${paymentId || 'UNKNOWN'}: no ClientId, Yclid or PurchaseId`
+        );
+
+        return {
+            ok: false,
+            skipped: true,
+            reason: 'no_identifier'
+        };
+    }
+
+    const amount =
+        Number(payment?.amount?.value || 0);
+
+    const currency =
+        normalizeAttributionValue(
+            payment?.amount?.currency || 'RUB',
+            3
+        ).toUpperCase() || 'RUB';
+
+    const rawDate =
+        payment?.captured_at ||
+        payment?.created_at ||
+        '';
+
+    const parsedTime =
+        rawDate
+            ? Math.floor(new Date(rawDate).getTime() / 1000)
+            : 0;
+
+    // Метрика не принимает DateTime из будущего. Оставляем минимум 1 секунду запаса.
+    const nowSeconds =
+        Math.floor(Date.now() / 1000) - 1;
+
+    const dateTime =
+        Number.isFinite(parsedTime) && parsedTime > 0
+            ? Math.min(parsedTime, nowSeconds)
+            : nowSeconds;
+
+    const csv = [
+        'ClientId,Yclid,PurchaseId,Target,DateTime,Price,Currency',
+        [
+            clientId,
+            yclid,
+            purchaseId,
+            YANDEX_METRIKA_PAID_GOAL,
+            dateTime,
+            amount > 0 ? amount.toFixed(2) : '',
+            currency
+        ].map(csvCell).join(',')
+    ].join('\n');
+
+    const boundary =
+        `----RTNMetrika${crypto.randomBytes(12).toString('hex')}`;
+
+    const multipartBody =
+        Buffer.concat([
+            Buffer.from(
+                `--${boundary}\r\n` +
+                'Content-Disposition: form-data; name="file"; filename="offline-conversions.csv"\r\n' +
+                'Content-Type: text/csv; charset=UTF-8\r\n\r\n',
+                'utf8'
+            ),
+            Buffer.from(csv, 'utf8'),
+            Buffer.from(
+                `\r\n--${boundary}--\r\n`,
+                'utf8'
+            )
+        ]);
+
+    try {
+        const response =
+            await axios.post(
+                `https://api-metrika.yandex.net/management/v1/counter/${encodeURIComponent(YANDEX_METRIKA_COUNTER_ID)}/offline_conversions/upload`,
+                multipartBody,
+                {
+                    headers: {
+                        Authorization:
+                            `OAuth ${YANDEX_METRIKA_OAUTH_TOKEN}`,
+                        'Content-Type':
+                            `multipart/form-data; boundary=${boundary}`
+                    },
+                    timeout: 15000,
+                    maxBodyLength: Infinity
+                }
+            );
+
+        if (paymentId) {
+            metrikaPaidConversions.set(
+                paymentId,
+                Date.now()
+            );
+        }
+
+        const uploadId =
+            response?.data?.uploading?.id ||
+            response?.data?.id ||
+            null;
+
+        console.log(
+            `Yandex Metrika order_paid uploaded: payment=${paymentId || 'UNKNOWN'}, order=${purchaseId || 'UNKNOWN'}, clientId=${clientId ? 'yes' : 'no'}, yclid=${yclid ? 'yes' : 'no'}, upload=${uploadId || 'UNKNOWN'}`
+        );
+
+        return {
+            ok: true,
+            uploadId
+        };
+    } catch (error) {
+        error.metrikaRetryable =
+            isRetryableMetrikaError(error);
+
+        console.error(
+            'Yandex Metrika offline conversion error:',
+            error.response?.data ||
+            error.message
+        );
+
+        throw error;
+    }
+}
+
 async function moveBitrixDealToPaid({ dealId, payment }) {
     if (!dealId) {
         throw new Error('Не удалось определить сделку Bitrix24');
@@ -3312,6 +3564,19 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             );
         }
 
+        // Фиксируем реальную оплату как офлайн-конверсию order_paid.
+        // Так цель попадёт в Метрику даже если покупатель закрыл ЮKassa
+        // и не вернулся на rtn.pro.
+        let metrikaDeliveryError = null;
+
+        try {
+            await sendPaidConversionToMetrika(
+                payment
+            );
+        } catch (metrikaError) {
+            metrikaDeliveryError = metrikaError;
+        }
+
         // Bitrix24 сейчас может быть недоступен по тарифу.
         // CRM-синхронизацию оставляем best-effort и не ломаем webhook.
         try {
@@ -3353,6 +3618,16 @@ app.post('/api/yookassa/webhook', async (req, res) => {
                 bitrixError.response?.data ||
                 bitrixError.message
             );
+        }
+
+        // При временной ошибке API Метрики просим ЮKassa повторить webhook.
+        // 4xx (например, неверный OAuth) логируем, но не запускаем бесконечные повторы.
+        if (metrikaDeliveryError?.metrikaRetryable) {
+            return res.status(502).json({
+                ok: false,
+                retry: true,
+                error: 'Yandex Metrika offline conversion delivery failed'
+            });
         }
 
         // Если Telegram временно недоступен, не подтверждаем webhook как
@@ -5094,6 +5369,18 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                     telegramError.message
                 );
             }
+
+            try {
+                await sendPaidConversionToMetrika(
+                    payment
+                );
+            } catch (metrikaError) {
+                console.error(
+                    'Yandex Metrika paid conversion fallback error:',
+                    metrikaError.response?.data ||
+                    metrikaError.message
+                );
+            }
         }
 
         return res.json({
@@ -5423,7 +5710,13 @@ app.post('/api/create-payment', async (req, res) => {
                 normalizedAttribution.firstTouch.source,
 
             firstTrafficMedium:
-                normalizedAttribution.firstTouch.medium
+                normalizedAttribution.firstTouch.medium,
+
+            metrikaClientId:
+                normalizedAttribution.metrikaClientId,
+
+            yclid:
+                normalizedAttribution.yclid
         };
 
         // В metadata отправляем только непустые строки и ограничиваем размер
