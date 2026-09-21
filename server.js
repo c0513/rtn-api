@@ -3212,7 +3212,10 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             `YooKassa webhook received: event=${event || 'UNKNOWN'}, payment=${notifiedPayment?.id || 'NO_ID'}`
         );
 
-        if (event !== 'payment.succeeded') {
+        if (
+            event !== 'payment.succeeded' &&
+            event !== 'payment.canceled'
+        ) {
             return res.status(200).json({
                 ok: true,
                 ignored: true
@@ -3231,6 +3234,50 @@ app.post('/api/yookassa/webhook', async (req, res) => {
         // а не доверяем одному только телу webhook.
         const payment =
             await getYooKassaPayment(paymentId);
+
+        if (event === 'payment.canceled') {
+            if (payment?.status !== 'canceled') {
+                return res.status(409).json({
+                    error: 'Статус отмены платежа не подтвержден ЮKassa'
+                });
+            }
+
+            let telegramDeliveryError = null;
+
+            try {
+                const sent =
+                    await sendCanceledOrderToTelegram(
+                        payment
+                    );
+
+                if (sent) {
+                    console.log(
+                        `YooKassa payment ${paymentId}: canceled notification sent to Telegram`
+                    );
+                }
+            } catch (telegramError) {
+                telegramDeliveryError = telegramError;
+                console.error(
+                    'RTN canceled payment Telegram error:',
+                    telegramError.response?.data ||
+                    telegramError.message
+                );
+            }
+
+            // Если Telegram временно недоступен, просим ЮKassa повторить webhook.
+            if (telegramDeliveryError) {
+                return res.status(502).json({
+                    ok: false,
+                    retry: true,
+                    error: 'Telegram canceled notification delivery failed'
+                });
+            }
+
+            return res.status(200).json({
+                ok: true,
+                canceled: true
+            });
+        }
 
         if (
             payment?.status !== 'succeeded' ||
@@ -3835,6 +3882,179 @@ async function sendOrderAttemptToTelegramOnce({
             orderAttemptTelegramInFlight.delete(key);
         }
     }
+}
+
+
+const canceledTelegramNotifications =
+    new Map();
+
+const CANCELED_TELEGRAM_TTL =
+    7 * 24 * 60 * 60 * 1000;
+
+function cleanupCanceledTelegramNotifications() {
+    const now = Date.now();
+
+    for (
+        const [paymentId, timestamp]
+        of canceledTelegramNotifications.entries()
+    ) {
+        if (
+            now - timestamp >
+            CANCELED_TELEGRAM_TTL
+        ) {
+            canceledTelegramNotifications.delete(
+                paymentId
+            );
+        }
+    }
+}
+
+function describeYooKassaCancellationParty(value) {
+    const party =
+        String(value || '').trim();
+
+    const labels = {
+        merchant: 'Магазин RTN.PRO',
+        yoo_money: 'ЮKassa',
+        payment_network: 'Банк / платёжная сеть'
+    };
+
+    return labels[party] || party || 'Не указан';
+}
+
+function describeYooKassaCancellationReason(value) {
+    const reason =
+        String(value || '').trim();
+
+    const labels = {
+        '3d_secure_failed': 'Не пройдена проверка 3-D Secure',
+        call_issuer: 'Банк отклонил оплату; клиенту нужно обратиться в банк',
+        canceled_by_merchant: 'Платёж отменён магазином',
+        card_expired: 'Истёк срок действия банковской карты',
+        country_forbidden: 'Оплата картой из этой страны запрещена',
+        deal_expired: 'Истёк срок действия сделки',
+        expired_on_capture: 'Истёк срок подтверждения списания',
+        expired_on_confirmation: 'Истёк срок оплаты; клиент не завершил платёж',
+        fraud_suspected: 'Платёж отклонён из-за подозрения в мошенничестве',
+        general_decline: 'Платёж отклонён без уточнения причины',
+        identification_required: 'Для способа оплаты требуется идентификация',
+        insufficient_funds: 'Недостаточно средств',
+        internal_timeout: 'Технический таймаут на стороне ЮKassa',
+        invalid_card_number: 'Неверно указан номер карты',
+        invalid_csc: 'Неверно указан CVV/CVC',
+        issuer_unavailable: 'Банк-эмитент временно недоступен',
+        loan_application_expired: 'Истёк срок заполнения заявки на кредит/рассрочку',
+        loan_declined: 'Банк отклонил заявку на кредит/рассрочку',
+        loan_declined_by_payer: 'Клиент отказался от кредита/рассрочки',
+        payment_method_limit_exceeded: 'Превышен лимит для способа оплаты',
+        payment_method_restricted: 'Операции этим платёжным средством ограничены',
+        permission_revoked: 'Отозвано разрешение на безакцептное списание',
+        unsupported_mobile_operator: 'Мобильный оператор не поддерживается'
+    };
+
+    return labels[reason] || reason || 'ЮKassa не передала детальную причину';
+}
+
+async function sendCanceledOrderToTelegram(payment) {
+    const paymentId =
+        compactTelegramValue(
+            payment?.id
+        );
+
+    cleanupCanceledTelegramNotifications();
+
+    if (
+        paymentId !== '—' &&
+        canceledTelegramNotifications.has(
+            paymentId
+        )
+    ) {
+        return false;
+    }
+
+    const metadata =
+        payment?.metadata || {};
+
+    const details =
+        payment?.cancellation_details || {};
+
+    const reasonCode =
+        String(details.reason || '').trim();
+
+    const partyCode =
+        String(details.party || '').trim();
+
+    const deliveryAddress = [
+        metadata.deliveryCity,
+        metadata.deliveryAddress
+    ]
+        .filter(Boolean)
+        .join(', ');
+
+    const attributionLines = [
+        metadata.trafficSource || metadata.trafficMedium
+            ? `Источник: ${[
+                metadata.trafficSource,
+                metadata.trafficMedium
+            ].filter(Boolean).join(' / ')}`
+            : null,
+
+        metadata.trafficCampaign
+            ? `Кампания: ${metadata.trafficCampaign}`
+            : null,
+
+        metadata.trafficContent
+            ? `Контент: ${metadata.trafficContent}`
+            : null,
+
+        metadata.telegramStart
+            ? `Telegram start: ${metadata.telegramStart}`
+            : null,
+
+        metadata.trafficPlatform
+            ? `Платформа: ${metadata.trafficPlatform}`
+            : null
+    ].filter(Boolean);
+
+    const paymentMethod =
+        compactTelegramValue(
+            payment?.payment_method?.type
+        );
+
+    const text = [
+        '🔴 RTN.PRO — ОПЛАТА НЕ СОСТОЯЛАСЬ',
+        '',
+        `Заказ: ${compactTelegramValue(metadata.orderId)}`,
+        `Платёж: ${paymentId}`,
+        `Сумма: ${formatTelegramMoney(payment?.amount?.value)}`,
+        `Имя: ${compactTelegramValue(metadata.customerName)}`,
+        `Телефон: ${compactTelegramValue(metadata.customerPhone)}`,
+        `Email: ${compactTelegramValue(metadata.customerEmail)}`,
+        `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
+        `Адрес: ${compactTelegramValue(deliveryAddress)}`,
+        `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
+        '',
+        `Причина: ${describeYooKassaCancellationReason(reasonCode)}`,
+        `Код причины: ${reasonCode || 'не указан'}`,
+        `Инициатор: ${describeYooKassaCancellationParty(partyCode)}${partyCode ? ` (${partyCode})` : ''}`,
+        `Способ оплаты: ${paymentMethod}`,
+        ...(attributionLines.length
+            ? ['', ...attributionLines]
+            : []),
+        '',
+        'Статус ЮKassa: ОТМЕНЁН ✗'
+    ].join('\n');
+
+    await sendTelegramText(text);
+
+    if (paymentId !== '—') {
+        canceledTelegramNotifications.set(
+            paymentId,
+            Date.now()
+        );
+    }
+
+    return true;
 }
 
 
