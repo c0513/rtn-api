@@ -3764,6 +3764,80 @@ async function sendOrderAttemptToTelegram({
     await sendTelegramText(text);
 }
 
+
+const orderAttemptTelegramNotifications =
+    new Map();
+
+const orderAttemptTelegramInFlight =
+    new Set();
+
+const ORDER_ATTEMPT_TELEGRAM_TTL =
+    6 * 60 * 60 * 1000;
+
+function cleanupOrderAttemptTelegramNotifications() {
+    const now = Date.now();
+
+    for (
+        const [key, timestamp]
+        of orderAttemptTelegramNotifications.entries()
+    ) {
+        if (
+            now - timestamp >
+            ORDER_ATTEMPT_TELEGRAM_TTL
+        ) {
+            orderAttemptTelegramNotifications.delete(
+                key
+            );
+        }
+    }
+}
+
+async function sendOrderAttemptToTelegramOnce({
+    paymentId,
+    ...payload
+}) {
+    cleanupOrderAttemptTelegramNotifications();
+
+    const key =
+        compactTelegramValue(
+            paymentId || payload?.orderId
+        );
+
+    if (
+        key !== '—' &&
+        (
+            orderAttemptTelegramNotifications.has(key) ||
+            orderAttemptTelegramInFlight.has(key)
+        )
+    ) {
+        return false;
+    }
+
+    if (key !== '—') {
+        orderAttemptTelegramInFlight.add(key);
+    }
+
+    try {
+        await sendOrderAttemptToTelegram(
+            payload
+        );
+
+        if (key !== '—') {
+            orderAttemptTelegramNotifications.set(
+                key,
+                Date.now()
+            );
+        }
+
+        return true;
+    } finally {
+        if (key !== '—') {
+            orderAttemptTelegramInFlight.delete(key);
+        }
+    }
+}
+
+
 const paidTelegramNotifications =
     new Map();
 
@@ -4957,26 +5031,6 @@ app.post('/api/create-payment', async (req, res) => {
             `YooKassa receipt prepared: order=${String(orderId || 'NO_ID')}, email=yes, phone=yes, items=${receiptItems.length}`
         );
 
-        // Сразу фиксируем попытку заказа в Telegram.
-        // Ошибка Telegram НЕ должна ломать оплату.
-        sendOrderAttemptToTelegram({
-            amount: paymentAmount,
-            items,
-            customer,
-            delivery,
-            orderId,
-            promoCode,
-            comment,
-            attribution:
-                normalizedAttribution
-        }).catch(error => {
-            console.error(
-                'RTN order attempt Telegram error:',
-                error.response?.data ||
-                error.message
-            );
-        });
-
         // Сначала фиксируем заказ в Bitrix24.
         // Даже если ЮKassa временно не работает, заявка не потеряется.
         let bitrixDealId = null;
@@ -5099,8 +5153,18 @@ app.post('/api/create-payment', async (req, res) => {
             }
         };
 
+        // Один orderId = одна операция создания платежа.
+        // Повторный запрос (двойной клик, повтор submit, сетевой дубль)
+        // должен вернуть тот же платеж ЮKassa, а не создать новый.
         const idempotenceKey =
-            crypto.randomUUID();
+            orderId
+                ? crypto
+                    .createHash('sha256')
+                    .update(
+                        `rtn:create-payment:${String(orderId)}`
+                    )
+                    .digest('hex')
+                : crypto.randomUUID();
 
         const response =
             await axios.post(
@@ -5145,6 +5209,31 @@ app.post('/api/create-payment', async (req, res) => {
                     'ЮKassa не вернула ссылку на оплату'
             });
         }
+
+        // Уведомляем о попытке только после того, как ЮKassa
+        // реально создала платеж и вернула confirmation_url.
+        // Дедупликация идёт по paymentId, поэтому повторный запрос
+        // с тем же orderId не создаст несколько сообщений.
+        sendOrderAttemptToTelegramOnce({
+            paymentId:
+                response.data.id,
+            amount:
+                paymentAmount,
+            items,
+            customer,
+            delivery,
+            orderId,
+            promoCode,
+            comment,
+            attribution:
+                normalizedAttribution
+        }).catch(error => {
+            console.error(
+                'RTN order attempt Telegram error:',
+                error.response?.data ||
+                error.message
+            );
+        });
 
         if (bitrixDealId) {
             markBitrixPaymentCreated(
