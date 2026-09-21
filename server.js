@@ -3800,7 +3800,7 @@ async function sendOrderAttemptToTelegramOnce({
 
     const key =
         compactTelegramValue(
-            paymentId || payload?.orderId
+            payload?.orderId || paymentId
         );
 
     if (
@@ -4931,6 +4931,97 @@ app.post('/api/contact', async (req, res) => {
     }
 });
 
+const paymentCreationInFlight = new Map();
+const paymentCreationCache = new Map();
+const PAYMENT_CREATION_CACHE_TTL = 30 * 60 * 1000;
+
+function cleanupPaymentCreationCache() {
+    const now = Date.now();
+
+    for (const [key, entry] of paymentCreationCache.entries()) {
+        if (
+            !entry ||
+            now - Number(entry.createdAt || 0) > PAYMENT_CREATION_CACHE_TTL
+        ) {
+            paymentCreationCache.delete(key);
+        }
+    }
+}
+
+async function createYooKassaPaymentOnce(orderId, paymentData) {
+    cleanupPaymentCreationCache();
+
+    const orderKey =
+        String(orderId || '')
+            .trim()
+            .slice(0, 120);
+
+    if (orderKey) {
+        const cached = paymentCreationCache.get(orderKey);
+        if (cached?.data) {
+            console.log(
+                `YooKassa create-payment dedupe: cached order=${orderKey}, payment=${cached.data?.id || 'NO_ID'}`
+            );
+            return cached.data;
+        }
+
+        const inFlight = paymentCreationInFlight.get(orderKey);
+        if (inFlight) {
+            console.log(
+                `YooKassa create-payment dedupe: waiting for in-flight order=${orderKey}`
+            );
+            return inFlight;
+        }
+    }
+
+    const createPromise = (async () => {
+        // ЮKassa рекомендует UUID v4 для каждого реально нового запроса.
+        // Дубли одного orderId объединяем на нашей стороне, поэтому не
+        // переиспользуем один Idempotence-Key для потенциально изменившегося тела.
+        const idempotenceKey = crypto.randomUUID();
+
+        const response = await axios.post(
+            'https://api.yookassa.ru/v3/payments',
+            paymentData,
+            {
+                auth: {
+                    username: YOOKASSA_SHOP_ID,
+                    password: YOOKASSA_SECRET_KEY
+                },
+                headers: {
+                    'Idempotence-Key': idempotenceKey,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000
+            }
+        );
+
+        return response.data;
+    })();
+
+    if (orderKey) {
+        paymentCreationInFlight.set(orderKey, createPromise);
+    }
+
+    try {
+        const data = await createPromise;
+
+        if (orderKey && data?.id) {
+            paymentCreationCache.set(orderKey, {
+                data,
+                createdAt: Date.now()
+            });
+        }
+
+        return data;
+    } finally {
+        if (orderKey) {
+            paymentCreationInFlight.delete(orderKey);
+        }
+    }
+}
+
+
 function buildPaymentDescription({ orderId, customerName, items }) {
     const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
     const shorten = (value, max) => value.length <= max ? value : value.slice(0, max - 1) + '…';
@@ -5057,6 +5148,80 @@ app.post('/api/create-payment', async (req, res) => {
             );
         }
 
+        const rawPaymentMetadata = {
+            customerName:
+                customer?.name || '',
+
+            customerPhone:
+                normalizedPhone,
+
+            customerEmail:
+                normalizedEmail,
+
+            deliveryMethod:
+                delivery?.method || '',
+
+            deliveryCity:
+                delivery?.city || '',
+
+            deliveryAddress:
+                delivery?.address || '',
+
+            orderId:
+                String(orderId || ''),
+
+            bitrixDealId:
+                bitrixDealId
+                    ? String(bitrixDealId)
+                    : '',
+
+            promoCode:
+                normalizePromoCode(promoCode),
+
+            trafficSource:
+                normalizedAttribution.lastTouch.source,
+
+            trafficMedium:
+                normalizedAttribution.lastTouch.medium,
+
+            trafficCampaign:
+                normalizedAttribution.lastTouch.campaign,
+
+            trafficContent:
+                normalizedAttribution.lastTouch.content,
+
+            telegramStart:
+                normalizedAttribution.lastTouch.startParam,
+
+            trafficPlatform:
+                normalizedAttribution.lastTouch.platform,
+
+            telegramChatType:
+                normalizedAttribution.lastTouch.chatType,
+
+            firstTrafficSource:
+                normalizedAttribution.firstTouch.source,
+
+            firstTrafficMedium:
+                normalizedAttribution.firstTouch.medium
+        };
+
+        // В metadata отправляем только непустые строки и ограничиваем размер
+        // служебных значений. Это снижает риск отклонения всего платежа из-за
+        // необязательного аналитического поля.
+        const paymentMetadata =
+            Object.fromEntries(
+                Object.entries(rawPaymentMetadata)
+                    .map(([key, value]) => [
+                        key,
+                        String(value ?? '')
+                            .replace(/\s+/g, ' ')
+                            .trim()
+                            .slice(0, 500)
+                    ])
+                    .filter(([, value]) => Boolean(value))
+            );
+
         const paymentData = {
             amount: {
                 value:
@@ -5078,63 +5243,8 @@ app.post('/api/create-payment', async (req, res) => {
                 items
             }),
 
-            metadata: {
-                customerName:
-                    customer?.name || '',
-
-                customerPhone:
-                    normalizedPhone,
-
-                customerEmail:
-                    normalizedEmail,
-
-                deliveryMethod:
-                    delivery?.method || '',
-
-                deliveryCity:
-                    delivery?.city || '',
-
-                deliveryAddress:
-                    delivery?.address || '',
-
-                orderId:
-                    String(orderId || ''),
-
-                bitrixDealId:
-                    bitrixDealId
-                        ? String(bitrixDealId)
-                        : '',
-
-                promoCode:
-                    normalizePromoCode(promoCode),
-
-                trafficSource:
-                    normalizedAttribution.lastTouch.source,
-
-                trafficMedium:
-                    normalizedAttribution.lastTouch.medium,
-
-                trafficCampaign:
-                    normalizedAttribution.lastTouch.campaign,
-
-                trafficContent:
-                    normalizedAttribution.lastTouch.content,
-
-                telegramStart:
-                    normalizedAttribution.lastTouch.startParam,
-
-                trafficPlatform:
-                    normalizedAttribution.lastTouch.platform,
-
-                telegramChatType:
-                    normalizedAttribution.lastTouch.chatType,
-
-                firstTrafficSource:
-                    normalizedAttribution.firstTouch.source,
-
-                firstTrafficMedium:
-                    normalizedAttribution.firstTouch.medium
-            },
+            metadata:
+                paymentMetadata,
 
             receipt: {
                 customer: {
@@ -5153,55 +5263,21 @@ app.post('/api/create-payment', async (req, res) => {
             }
         };
 
-        // Один orderId = одна операция создания платежа.
-        // Повторный запрос (двойной клик, повтор submit, сетевой дубль)
-        // должен вернуть тот же платеж ЮKassa, а не создать новый.
-        const idempotenceKey =
-            orderId
-                ? crypto
-                    .createHash('sha256')
-                    .update(
-                        `rtn:create-payment:${String(orderId)}`
-                    )
-                    .digest('hex')
-                : crypto.randomUUID();
-
-        const response =
-            await axios.post(
-                'https://api.yookassa.ru/v3/payments',
-
-                paymentData,
-
-                {
-                    auth: {
-                        username:
-                            YOOKASSA_SHOP_ID,
-
-                        password:
-                            YOOKASSA_SECRET_KEY
-                    },
-
-                    headers: {
-                        'Idempotence-Key':
-                            idempotenceKey,
-
-                        'Content-Type':
-                            'application/json'
-                    },
-
-                    timeout: 15000
-                }
+        const yooPayment =
+            await createYooKassaPaymentOnce(
+                orderId,
+                paymentData
             );
 
         const confirmationUrl =
-            response.data
+            yooPayment
                 ?.confirmation
                 ?.confirmation_url;
 
         if (!confirmationUrl) {
             console.error(
                 'YooKassa did not return confirmation_url:',
-                response.data
+                yooPayment
             );
 
             return res.status(500).json({
@@ -5212,11 +5288,11 @@ app.post('/api/create-payment', async (req, res) => {
 
         // Уведомляем о попытке только после того, как ЮKassa
         // реально создала платеж и вернула confirmation_url.
-        // Дедупликация идёт по paymentId, поэтому повторный запрос
-        // с тем же orderId не создаст несколько сообщений.
+        // Дедупликация идёт прежде всего по orderId, поэтому повторный запрос
+        // одного заказа не создаст несколько сообщений.
         sendOrderAttemptToTelegramOnce({
             paymentId:
-                response.data.id,
+                yooPayment.id,
             amount:
                 paymentAmount,
             items,
@@ -5238,7 +5314,7 @@ app.post('/api/create-payment', async (req, res) => {
         if (bitrixDealId) {
             markBitrixPaymentCreated(
                 bitrixDealId,
-                response.data
+                yooPayment
             ).catch(error => {
                 console.error(
                     'Bitrix24 payment update error:',
@@ -5250,15 +5326,15 @@ app.post('/api/create-payment', async (req, res) => {
 
         res.json({
             id:
-                response.data.id,
+                yooPayment.id,
 
             status:
-                response.data.status,
+                yooPayment.status,
 
             confirmationUrl,
 
             confirmation:
-                response.data.confirmation,
+                yooPayment.confirmation,
 
             bitrixDealId
         });
@@ -5277,11 +5353,19 @@ app.post('/api/create-payment', async (req, res) => {
             error.response?.status ||
             500;
 
+        const parameter =
+            yooError?.parameter ||
+            '';
+
         const description =
             yooError?.description ||
-            yooError?.parameter ||
             error.message ||
             'Неизвестная ошибка';
+
+        const diagnosticDescription =
+            parameter
+                ? `${description} (parameter: ${parameter})`
+                : description;
 
         if (
             statusCode === 401 ||
@@ -5296,7 +5380,7 @@ app.post('/api/create-payment', async (req, res) => {
                         yooError?.code ||
                         'invalid_credentials',
 
-                    description,
+                    description: diagnosticDescription,
 
                     shopIdMasked:
                         YOOKASSA_SHOP_ID
@@ -5309,7 +5393,7 @@ app.post('/api/create-payment', async (req, res) => {
         res.status(statusCode).json({
             error:
                 'Ошибка создания платежа: ' +
-                description,
+                diagnosticDescription,
 
             details:
                 yooError ||
