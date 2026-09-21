@@ -5700,18 +5700,9 @@ app.post('/api/create-payment', async (req, res) => {
             telegramStart:
                 normalizedAttribution.lastTouch.startParam,
 
-            trafficPlatform:
-                normalizedAttribution.lastTouch.platform,
-
-            telegramChatType:
-                normalizedAttribution.lastTouch.chatType,
-
-            firstTrafficSource:
-                normalizedAttribution.firstTouch.source,
-
-            firstTrafficMedium:
-                normalizedAttribution.firstTouch.medium,
-
+            // В metadata ЮKassa допускается не более 16 пар ключ-значение.
+            // Оставляем только поля, которые реально нужны после оплаты:
+            // данные заказа, атрибуция и идентификаторы Метрики.
             metrikaClientId:
                 normalizedAttribution.metrikaClientId,
 
@@ -5719,21 +5710,29 @@ app.post('/api/create-payment', async (req, res) => {
                 normalizedAttribution.yclid
         };
 
-        // В metadata отправляем только непустые строки и ограничиваем размер
-        // служебных значений. Это снижает риск отклонения всего платежа из-за
-        // необязательного аналитического поля.
+        const paymentMetadataEntries =
+            Object.entries(rawPaymentMetadata)
+                .map(([key, value]) => [
+                    key,
+                    String(value ?? '')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                        .slice(0, 500)
+                ])
+                .filter(([, value]) => Boolean(value));
+
+        // Жёсткая страховка от invalid_request по metadata:
+        // максимум 16 ключей по требованиям ЮKassa.
         const paymentMetadata =
             Object.fromEntries(
-                Object.entries(rawPaymentMetadata)
-                    .map(([key, value]) => [
-                        key,
-                        String(value ?? '')
-                            .replace(/\s+/g, ' ')
-                            .trim()
-                            .slice(0, 500)
-                    ])
-                    .filter(([, value]) => Boolean(value))
+                paymentMetadataEntries.slice(0, 16)
             );
+
+        if (paymentMetadataEntries.length > 16) {
+            console.warn(
+                `YooKassa metadata trimmed: ${paymentMetadataEntries.length} -> 16 fields, order=${String(orderId || 'NO_ID')}`
+            );
+        }
 
         const paymentData = {
             amount: {
