@@ -33,6 +33,208 @@ function normalizeEnvValue(value) {
     return result;
 }
 
+function normalizeAttributionValue(value, maxLength = 180) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, maxLength);
+}
+
+function normalizeAttributionTouch(input = {}) {
+    return {
+        source:
+            normalizeAttributionValue(
+                input?.source,
+                80
+            ) || 'direct',
+
+        medium:
+            normalizeAttributionValue(
+                input?.medium,
+                80
+            ) || 'direct',
+
+        campaign:
+            normalizeAttributionValue(
+                input?.campaign,
+                120
+            ),
+
+        content:
+            normalizeAttributionValue(
+                input?.content,
+                120
+            ),
+
+        term:
+            normalizeAttributionValue(
+                input?.term,
+                120
+            ),
+
+        startParam:
+            normalizeAttributionValue(
+                input?.startParam,
+                120
+            ),
+
+        platform:
+            normalizeAttributionValue(
+                input?.platform,
+                40
+            ),
+
+        chatType:
+            normalizeAttributionValue(
+                input?.chatType,
+                40
+            ),
+
+        referrer:
+            normalizeAttributionValue(
+                input?.referrer,
+                220
+            ),
+
+        landingPath:
+            normalizeAttributionValue(
+                input?.landingPath,
+                260
+            ),
+
+        fbclid:
+            normalizeAttributionValue(
+                input?.fbclid,
+                300
+            ),
+
+        capturedAt:
+            normalizeAttributionValue(
+                input?.capturedAt,
+                40
+            )
+    };
+}
+
+function normalizeAttribution(input = {}) {
+    const firstRaw =
+        input?.firstTouch ||
+        input ||
+        {};
+
+    const lastRaw =
+        input?.lastTouch ||
+        input?.firstTouch ||
+        input ||
+        {};
+
+    return {
+        firstTouch:
+            normalizeAttributionTouch(
+                firstRaw
+            ),
+
+        lastTouch:
+            normalizeAttributionTouch(
+                lastRaw
+            )
+    };
+}
+
+function getPrimaryAttributionTouch(attribution) {
+    return normalizeAttribution(
+        attribution
+    ).lastTouch;
+}
+
+function buildAttributionLines(attribution) {
+    const normalized =
+        normalizeAttribution(
+            attribution
+        );
+
+    const current =
+        normalized.lastTouch;
+
+    const first =
+        normalized.firstTouch;
+
+    const source = [
+        current.source,
+        current.medium
+    ]
+        .filter(Boolean)
+        .join(' / ');
+
+    const firstSource = [
+        first.source,
+        first.medium
+    ]
+        .filter(Boolean)
+        .join(' / ');
+
+    return [
+        source
+            ? `Источник: ${source}`
+            : null,
+
+        current.campaign
+            ? `Кампания: ${current.campaign}`
+            : null,
+
+        current.content
+            ? `Контент: ${current.content}`
+            : null,
+
+        current.startParam
+            ? `Telegram start: ${current.startParam}`
+            : null,
+
+        current.platform
+            ? `Платформа: ${current.platform}`
+            : null,
+
+        current.chatType
+            ? `Telegram context: ${current.chatType}`
+            : null,
+
+        current.referrer
+            ? `Referrer: ${current.referrer}`
+            : null,
+
+        (
+            firstSource &&
+            firstSource !== source
+        )
+            ? `Первый источник: ${firstSource}`
+            : null
+    ]
+        .filter(Boolean);
+}
+
+function buildBitrixSourceDescription(attribution) {
+    const current =
+        getPrimaryAttributionTouch(
+            attribution
+        );
+
+    const parts = [
+        current.source,
+        current.medium,
+        current.startParam,
+        current.campaign,
+        current.content
+    ]
+        .filter(Boolean);
+
+    return normalizeAttributionValue(
+        parts.length
+            ? `RTN.PRO · ${parts.join(' · ')}`
+            : 'Интернет-магазин RTN.PRO',
+        250
+    );
+}
+
 const RAW_YOOKASSA_SHOP_ID =
     process.env.YOOKASSA_SHOP_ID ||
     process.env.SHOP_ID ||
@@ -135,6 +337,16 @@ const {
     YCP_PRODUCTS,
     YCP_PRODUCTS_BY_ID
 } = require('./ycp-catalog');
+
+const {
+    RTN_BITRIX_PRODUCTS_BY_ID
+} = require('./rtn-bitrix-catalog');
+
+const BITRIX_SYNC_PRODUCT_IMAGES =
+    String(process.env.BITRIX_SYNC_PRODUCT_IMAGES || '1') !== '0';
+
+const BITRIX_FORCE_PRODUCT_IMAGES =
+    String(process.env.BITRIX_FORCE_PRODUCT_IMAGES || '') === '1';
 
 
 // ============================================================
@@ -430,7 +642,7 @@ async function findBitrixCatalogProductByExternalId(externalId, iblockId) {
     const result = await bitrixCall(
         'catalog.product.list',
         {
-            select: ['id', 'iblockId', 'name', 'xmlId'],
+            select: ['id', 'iblockId', 'name', 'xmlId', 'previewPicture', 'detailPicture'],
             filter: {
                 iblockId,
                 xmlId: productXmlId(externalId)
@@ -442,6 +654,356 @@ async function findBitrixCatalogProductByExternalId(externalId, iblockId) {
 
     const products = result?.products || [];
     return products[0] || null;
+}
+
+const RTN_BITRIX_PRODUCT_PROPERTY_DEFS = [
+    {
+        key: 'category',
+        code: 'RTN_CATEGORY',
+        name: 'RTN: категория',
+        propertyType: 'S',
+        rowCount: 1,
+        searchable: 'Y',
+        filtrable: 'Y'
+    },
+    {
+        key: 'flavor',
+        code: 'RTN_FLAVOR',
+        name: 'RTN: вкус / вариант',
+        propertyType: 'S',
+        rowCount: 1,
+        searchable: 'Y',
+        filtrable: 'Y'
+    },
+    {
+        key: 'labelTitle',
+        code: 'RTN_LABEL_TITLE',
+        name: 'RTN: официальное наименование с этикетки',
+        propertyType: 'S',
+        rowCount: 3,
+        searchable: 'Y',
+        filtrable: 'N'
+    },
+    {
+        key: 'form',
+        code: 'RTN_FORM',
+        name: 'RTN: форма выпуска',
+        propertyType: 'S',
+        rowCount: 2,
+        searchable: 'Y',
+        filtrable: 'N'
+    },
+    {
+        key: 'servingSize',
+        code: 'RTN_SERVING_SIZE',
+        name: 'RTN: размер порции',
+        propertyType: 'S',
+        rowCount: 1,
+        searchable: 'N',
+        filtrable: 'Y'
+    },
+    {
+        key: 'servings',
+        code: 'RTN_SERVINGS',
+        name: 'RTN: количество порций',
+        propertyType: 'N',
+        rowCount: 1,
+        searchable: 'N',
+        filtrable: 'Y'
+    },
+    {
+        key: 'shelfLife',
+        code: 'RTN_SHELF_LIFE',
+        name: 'RTN: срок годности',
+        propertyType: 'S',
+        rowCount: 1,
+        searchable: 'N',
+        filtrable: 'Y'
+    },
+    {
+        key: 'packageInfo',
+        code: 'RTN_PACKAGE',
+        name: 'RTN: упаковка',
+        propertyType: 'S',
+        rowCount: 1,
+        searchable: 'N',
+        filtrable: 'Y'
+    }
+];
+
+let bitrixCatalogPropertyIds = null;
+let bitrixCatalogPropertySyncPromise = null;
+const bitrixAssetCache = new Map();
+
+function getRtnBitrixMeta(externalId) {
+    return RTN_BITRIX_PRODUCTS_BY_ID[String(externalId || '').trim()] || null;
+}
+
+function joinBitrixProductDetailSections(meta) {
+    if (!meta) return '';
+
+    const sections = [
+        ['ОФИЦИАЛЬНОЕ НАИМЕНОВАНИЕ', meta.labelTitle],
+        ['ФОРМА ВЫПУСКА', meta.form],
+        ['ОБЛАСТЬ ПРИМЕНЕНИЯ', meta.application],
+        ['СОСТАВ', meta.composition],
+        ['ПИЩЕВАЯ ЦЕННОСТЬ / АКТИВНЫЕ ВЕЩЕСТВА', meta.nutrition],
+        ['РЕКОМЕНДАЦИИ ПО ПРИМЕНЕНИЮ', meta.usage],
+        ['ПРОДОЛЖИТЕЛЬНОСТЬ ПРИЕМА', meta.duration],
+        ['ПРОТИВОПОКАЗАНИЯ', meta.contraindications],
+        ['УСЛОВИЯ ХРАНЕНИЯ', meta.storage],
+        ['СРОК ГОДНОСТИ', meta.shelfLife]
+    ].filter(([, value]) => String(value || '').trim());
+
+    return sections
+        .map(([title, value]) => `${title}\n${String(value).trim()}`)
+        .join('\n\n');
+}
+
+function getRtnBitrixPreviewText(meta) {
+    if (!meta) return '';
+
+    return [
+        meta.category,
+        meta.flavor,
+        meta.servingSize ? `Порция: ${meta.servingSize}` : '',
+        Number.isFinite(Number(meta.servings)) ? `Порций: ${meta.servings}` : '',
+        meta.packageInfo || ''
+    ]
+        .filter(Boolean)
+        .join(' · ');
+}
+
+async function ensureRtnBitrixCatalogProperties(iblockId) {
+    if (bitrixCatalogPropertyIds) {
+        return bitrixCatalogPropertyIds;
+    }
+
+    if (bitrixCatalogPropertySyncPromise) {
+        return bitrixCatalogPropertySyncPromise;
+    }
+
+    bitrixCatalogPropertySyncPromise = (async () => {
+        const result = await bitrixCall(
+            'catalog.productProperty.list',
+            {
+                select: [
+                    'id',
+                    'iblockId',
+                    'name',
+                    'code',
+                    'propertyType',
+                    'userType',
+                    'multiple'
+                ],
+                filter: { iblockId },
+                order: { id: 'asc' },
+                start: 0
+            }
+        );
+
+        const existing = result?.productProperties || [];
+        const byCode = new Map(
+            existing
+                .filter(item => item?.code)
+                .map(item => [String(item.code).toUpperCase(), item])
+        );
+
+        const ids = {};
+
+        for (let index = 0; index < RTN_BITRIX_PRODUCT_PROPERTY_DEFS.length; index += 1) {
+            const definition = RTN_BITRIX_PRODUCT_PROPERTY_DEFS[index];
+            const found = byCode.get(definition.code);
+
+            if (found?.id) {
+                ids[definition.key] = Number(found.id);
+                continue;
+            }
+
+            const added = await bitrixCall(
+                'catalog.productProperty.add',
+                {
+                    fields: {
+                        iblockId,
+                        name: definition.name,
+                        code: definition.code,
+                        propertyType: definition.propertyType,
+                        multiple: 'N',
+                        isRequired: 'N',
+                        active: 'Y',
+                        sort: 7000 + index * 10,
+                        rowCount: definition.rowCount || 1,
+                        colCount: 60,
+                        searchable: definition.searchable || 'N',
+                        filtrable: definition.filtrable || 'N'
+                    }
+                }
+            );
+
+            const propertyId = Number(
+                added?.productProperty?.id ||
+                0
+            );
+
+            if (!propertyId) {
+                throw new Error(
+                    `Bitrix24 не вернул ID свойства ${definition.code}`
+                );
+            }
+
+            ids[definition.key] = propertyId;
+            await sleep(180);
+        }
+
+        bitrixCatalogPropertyIds = ids;
+        return ids;
+    })().finally(() => {
+        bitrixCatalogPropertySyncPromise = null;
+    });
+
+    return bitrixCatalogPropertySyncPromise;
+}
+
+function buildRtnBitrixPropertyFields(meta, propertyIds) {
+    const fields = {};
+    if (!meta || !propertyIds) return fields;
+
+    for (const definition of RTN_BITRIX_PRODUCT_PROPERTY_DEFS) {
+        const propertyId = propertyIds[definition.key];
+        if (!propertyId) continue;
+
+        const rawValue = meta[definition.key];
+        if (rawValue === undefined || rawValue === null || rawValue === '') {
+            continue;
+        }
+
+        const value = definition.propertyType === 'N'
+            ? Number(rawValue)
+            : String(rawValue);
+
+        if (definition.propertyType === 'N' && !Number.isFinite(value)) {
+            continue;
+        }
+
+        // catalog.product.update ожидает объект { value } для пользовательских свойств.
+        fields[`property${propertyId}`] = { value };
+    }
+
+    return fields;
+}
+
+function getAssetFileName(assetPath) {
+    try {
+        return decodeURIComponent(
+            new URL(assetPath, FRONTEND_URL).pathname.split('/').pop() || 'image.jpg'
+        );
+    } catch {
+        return String(assetPath || 'image.jpg').split('/').pop() || 'image.jpg';
+    }
+}
+
+async function loadRtnAssetFileData(assetPath) {
+    if (!assetPath) return null;
+
+    const url = new URL(assetPath, `${FRONTEND_URL.replace(/\/+$/, '')}/`).toString();
+
+    if (bitrixAssetCache.has(url)) {
+        return bitrixAssetCache.get(url);
+    }
+
+    const response = await axios.get(
+        url,
+        {
+            responseType: 'arraybuffer',
+            timeout: 20000,
+            maxContentLength: 12 * 1024 * 1024,
+            maxBodyLength: 12 * 1024 * 1024
+        }
+    );
+
+    const fileData = [
+        getAssetFileName(assetPath),
+        Buffer.from(response.data).toString('base64')
+    ];
+
+    bitrixAssetCache.set(url, fileData);
+    return fileData;
+}
+
+async function syncRtnBitrixProductImages({ productId, existingProduct, meta }) {
+    if (!BITRIX_SYNC_PRODUCT_IMAGES || !meta || !productId) {
+        return;
+    }
+
+    const mainImageFields = {};
+    const needPreview = BITRIX_FORCE_PRODUCT_IMAGES || !existingProduct?.previewPicture;
+    const needDetail = BITRIX_FORCE_PRODUCT_IMAGES || !existingProduct?.detailPicture;
+
+    if (meta.imageUrl && (needPreview || needDetail)) {
+        const fileData = await loadRtnAssetFileData(meta.imageUrl);
+
+        if (fileData) {
+            if (needPreview) {
+                mainImageFields.previewPicture = { fileData };
+            }
+
+            if (needDetail) {
+                mainImageFields.detailPicture = { fileData };
+            }
+        }
+    }
+
+    if (Object.keys(mainImageFields).length) {
+        await bitrixCall(
+            'catalog.product.update',
+            {
+                id: productId,
+                fields: mainImageFields
+            }
+        );
+    }
+
+    if (!meta.labelImageUrl) {
+        return;
+    }
+
+    const imageListResult = await bitrixCall(
+        'catalog.productImage.list',
+        {
+            productId,
+            select: [
+                'id',
+                'name',
+                'productId',
+                'type'
+            ],
+            start: 0
+        }
+    );
+
+    const expectedName = getAssetFileName(meta.labelImageUrl).toLowerCase();
+    const existingImages = imageListResult?.productImages || [];
+    const labelAlreadyUploaded = existingImages.some(image =>
+        String(image?.type || '').toUpperCase() === 'MORE_PHOTO' &&
+        String(image?.name || '').toLowerCase() === expectedName
+    );
+
+    if (!labelAlreadyUploaded) {
+        const fileContent = await loadRtnAssetFileData(meta.labelImageUrl);
+
+        if (fileContent) {
+            await bitrixCall(
+                'catalog.productImage.add',
+                {
+                    fields: {
+                        productId,
+                        type: 'MORE_PHOTO'
+                    },
+                    fileContent
+                }
+            );
+        }
+    }
 }
 
 async function upsertBitrixProductPrice({ productId, catalogGroupId, price }) {
@@ -495,6 +1057,12 @@ async function ensureBitrixCatalogProduct(rtnProduct) {
     const { iblockId, catalogGroupId } =
         await getBitrixCatalogContext();
 
+    const meta =
+        getRtnBitrixMeta(rtnProduct.externalId);
+
+    const propertyIds =
+        await ensureRtnBitrixCatalogProperties(iblockId);
+
     const existing =
         await findBitrixCatalogProductByExternalId(
             rtnProduct.externalId,
@@ -503,15 +1071,22 @@ async function ensureBitrixCatalogProduct(rtnProduct) {
 
     let productId = existing?.id ? Number(existing.id) : 0;
 
+    const detailText =
+        meta
+            ? joinBitrixProductDetailSections(meta)
+            : `Товар интернет-магазина RTN.PRO. ${rtnProduct.name}, вариант: ${rtnProduct.flavor}.`;
+
     const fields = {
         name: productDisplayName(rtnProduct),
         active: 'Y',
         code: productCode(rtnProduct.externalId),
         xmlId: productXmlId(rtnProduct.externalId),
         canBuyZero: 'Y',
-        detailText:
-            `Товар интернет-магазина RTN.PRO. ${rtnProduct.name}, вариант: ${rtnProduct.flavor}.`,
-        detailTextType: 'text'
+        previewText: meta ? getRtnBitrixPreviewText(meta) : '',
+        previewTextType: 'text',
+        detailText,
+        detailTextType: 'text',
+        ...buildRtnBitrixPropertyFields(meta, propertyIds)
     };
 
     if (productId) {
@@ -551,6 +1126,22 @@ async function ensureBitrixCatalogProduct(rtnProduct) {
         catalogGroupId,
         price: rtnProduct.price
     });
+
+    if (meta) {
+        try {
+            await syncRtnBitrixProductImages({
+                productId,
+                existingProduct: existing,
+                meta
+            });
+        } catch (error) {
+            // Ошибка картинки не должна ломать товар или заказ.
+            console.error(
+                `Bitrix24 image sync failed [${rtnProduct.externalId}]:`,
+                error.response?.data || error.message
+            );
+        }
+    }
 
     bitrixProductIdCache.set(rtnProduct.externalId, productId);
     return productId;
@@ -1537,7 +2128,8 @@ async function applyOrderFieldsToBitrixDeal({
     amount,
     items,
     delivery,
-    comment
+    comment,
+    attribution
 }) {
     if (!dealId) {
         return;
@@ -1595,8 +2187,14 @@ async function applyOrderFieldsToBitrixDeal({
 
         COMMENTS:
             buildBitrixDealComment({
-                items
+                items,
+                attribution
             }),
+
+        SOURCE_DESCRIPTION:
+            buildBitrixSourceDescription(
+                attribution
+            ),
 
         OPPORTUNITY:
             financials.finalAmount,
@@ -2022,7 +2620,8 @@ async function findExistingBitrixDeal(orderId) {
 }
 
 function buildBitrixDealComment({
-    items
+    items,
+    attribution
 }) {
     const lines = [
         'Состав заказа:'
@@ -2050,9 +2649,21 @@ function buildBitrixDealComment({
             }
         );
 
+    const attributionLines =
+        buildAttributionLines(
+            attribution
+        );
+
+    if (attributionLines.length) {
+        lines.push(
+            '',
+            'Источник заказа:',
+            ...attributionLines
+        );
+    }
+
     return lines.join('\n');
 }
-
 
 async function buildBitrixProductRows(
     items,
@@ -2247,7 +2858,8 @@ async function syncOrderToBitrix({
     customer,
     delivery,
     comment,
-    promoCode
+    promoCode,
+    attribution
 }) {
     if (!isBitrixConfigured()) {
         console.warn(
@@ -2304,7 +2916,8 @@ async function syncOrderToBitrix({
                 amount,
                 items,
                 delivery,
-                comment
+                comment,
+                attribution
             });
         } catch (error) {
             console.error(
@@ -2371,7 +2984,9 @@ async function syncOrderToBitrix({
             'WEB',
 
         sourceDescription:
-            'Интернет-магазин RTN.PRO',
+            buildBitrixSourceDescription(
+                attribution
+            ),
 
         originatorId:
             'RTN.PRO',
@@ -2381,7 +2996,8 @@ async function syncOrderToBitrix({
 
         comments:
             buildBitrixDealComment({
-                items
+                items,
+                attribution
             })
     };
 
@@ -2438,7 +3054,8 @@ async function syncOrderToBitrix({
             amount,
             items,
             delivery,
-            comment
+            comment,
+            attribution
         });
     } catch (error) {
         console.error(
@@ -2915,6 +3532,9 @@ app.get('/api/health', (req, res) => {
         bitrixStageNew: BITRIX_STAGE_NEW,
         bitrixStagePaid: BITRIX_STAGE_PAID,
         bitrixProductsCached: bitrixProductIdCache.size,
+        bitrixCatalogMetadataSku: Object.keys(RTN_BITRIX_PRODUCTS_BY_ID).length,
+        bitrixCatalogPropertiesReady: Boolean(bitrixCatalogPropertyIds),
+        bitrixProductImagesSync: BITRIX_SYNC_PRODUCT_IMAGES,
         bitrixPromoTracking: bitrixPromoFieldsReady,
         bitrixOrderFieldsReady: bitrixOrderFieldsReady,
         launchNotifyConfigured: Boolean(
@@ -3103,12 +3723,18 @@ async function sendOrderAttemptToTelegram({
     delivery,
     orderId,
     promoCode,
-    comment
+    comment,
+    attribution
 }) {
     const deliveryAddress =
         compactTelegramValue(
             delivery?.address ||
             delivery?.city
+        );
+
+    const attributionLines =
+        buildAttributionLines(
+            attribution
         );
 
     const text = [
@@ -3125,6 +3751,9 @@ async function sendOrderAttemptToTelegram({
         comment
             ? `Комментарий: ${compactTelegramValue(comment)}`
             : null,
+        ...(attributionLines.length
+            ? ['', 'Источник:', ...attributionLines]
+            : []),
         '',
         'Товары:',
         buildTelegramItemsSummary(items)
@@ -3186,6 +3815,35 @@ async function sendPaidOrderToTelegram(payment) {
         .filter(Boolean)
         .join(', ');
 
+    const paidAttributionLines = [
+        metadata.trafficSource || metadata.trafficMedium
+            ? `Источник: ${[
+                metadata.trafficSource,
+                metadata.trafficMedium
+            ].filter(Boolean).join(' / ')}`
+            : null,
+
+        metadata.trafficCampaign
+            ? `Кампания: ${metadata.trafficCampaign}`
+            : null,
+
+        metadata.trafficContent
+            ? `Контент: ${metadata.trafficContent}`
+            : null,
+
+        metadata.telegramStart
+            ? `Telegram start: ${metadata.telegramStart}`
+            : null,
+
+        metadata.trafficPlatform
+            ? `Платформа: ${metadata.trafficPlatform}`
+            : null,
+
+        metadata.telegramChatType
+            ? `Telegram context: ${metadata.telegramChatType}`
+            : null
+    ].filter(Boolean);
+
     const text = [
         '✅ RTN.PRO — ЗАКАЗ ОПЛАЧЕН',
         '',
@@ -3198,6 +3856,9 @@ async function sendPaidOrderToTelegram(payment) {
         `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
         `Адрес: ${compactTelegramValue(deliveryAddress)}`,
         `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
+        ...(paidAttributionLines.length
+            ? ['', ...paidAttributionLines]
+            : []),
         '',
         'Статус ЮKassa: ОПЛАЧЕН ✓'
     ].join('\n');
@@ -4223,8 +4884,14 @@ app.post('/api/create-payment', async (req, res) => {
             delivery,
             orderId,
             comment,
-            promoCode
+            promoCode,
+            attribution
         } = req.body;
+
+        const normalizedAttribution =
+            normalizeAttribution(
+                attribution
+            );
 
         // Проверяем сумму
         const paymentAmount =
@@ -4299,7 +4966,9 @@ app.post('/api/create-payment', async (req, res) => {
             delivery,
             orderId,
             promoCode,
-            comment
+            comment,
+            attribution:
+                normalizedAttribution
         }).catch(error => {
             console.error(
                 'RTN order attempt Telegram error:',
@@ -4321,7 +4990,9 @@ app.post('/api/create-payment', async (req, res) => {
                     customer,
                     delivery,
                     comment,
-                    promoCode
+                    promoCode,
+                    attribution:
+                        normalizedAttribution
                 });
         } catch (bitrixError) {
             // Ошибка CRM не должна блокировать оплату.
@@ -4381,7 +5052,34 @@ app.post('/api/create-payment', async (req, res) => {
                         : '',
 
                 promoCode:
-                    normalizePromoCode(promoCode)
+                    normalizePromoCode(promoCode),
+
+                trafficSource:
+                    normalizedAttribution.lastTouch.source,
+
+                trafficMedium:
+                    normalizedAttribution.lastTouch.medium,
+
+                trafficCampaign:
+                    normalizedAttribution.lastTouch.campaign,
+
+                trafficContent:
+                    normalizedAttribution.lastTouch.content,
+
+                telegramStart:
+                    normalizedAttribution.lastTouch.startParam,
+
+                trafficPlatform:
+                    normalizedAttribution.lastTouch.platform,
+
+                telegramChatType:
+                    normalizedAttribution.lastTouch.chatType,
+
+                firstTrafficSource:
+                    normalizedAttribution.firstTouch.source,
+
+                firstTrafficMedium:
+                    normalizedAttribution.firstTouch.medium
             },
 
             receipt: {
