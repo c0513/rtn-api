@@ -72,6 +72,18 @@ const TELEGRAM_CHAT_ID =
         ''
     );
 
+const PLENOSHNAYA_TG_BOT_TOKEN =
+    normalizeEnvValue(
+        process.env.PLENOSHNAYA_TG_BOT_TOKEN ||
+        ''
+    );
+
+const PLENOSHNAYA_TG_CHAT_ID =
+    normalizeEnvValue(
+        process.env.PLENOSHNAYA_TG_CHAT_ID ||
+        ''
+    );
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
 const PUBLIC_API_URL = (process.env.PUBLIC_API_URL || 'https://rhino-api-yrfq.onrender.com').replace(/\/$/, '');
 
@@ -3659,6 +3671,260 @@ app.post(
         }
     }
 );
+
+// ============================================================
+// ПЛЁНОШНАЯ — ЛИДЫ С САЙТА
+// ============================================================
+
+const PLENOSHNAYA_ALLOWED_ORIGINS = new Set([
+    'https://plenoshnaya.ru',
+    'https://www.plenoshnaya.ru'
+]);
+
+function cleanPlenoshnayaLeadValue(value, max = 1000) {
+    return String(value ?? '')
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, max);
+}
+
+function isPlenoshnayaOriginAllowed(req) {
+    const origin = String(req.get('origin') || '')
+        .trim()
+        .replace(/\/$/, '');
+
+    // No Origin is allowed for server-side/manual diagnostics.
+    return !origin || PLENOSHNAYA_ALLOWED_ORIGINS.has(origin);
+}
+
+app.get('/api/plenoshnaya/health', (req, res) => {
+    return res.json({
+        ok: true,
+        service: 'plenoshnaya-leads',
+        telegramConfigured: Boolean(
+            PLENOSHNAYA_TG_BOT_TOKEN &&
+            PLENOSHNAYA_TG_CHAT_ID
+        )
+    });
+});
+
+app.post('/api/plenoshnaya/lead', async (req, res) => {
+    if (!isPlenoshnayaOriginAllowed(req)) {
+        return res.status(403).json({
+            ok: false,
+            error: 'Origin not allowed'
+        });
+    }
+
+    if (
+        !PLENOSHNAYA_TG_BOT_TOKEN ||
+        !PLENOSHNAYA_TG_CHAT_ID
+    ) {
+        console.error(
+            'Plenoshnaya Telegram is not configured'
+        );
+
+        return res.status(503).json({
+            ok: false,
+            error: 'Telegram is not configured'
+        });
+    }
+
+    const body = req.body || {};
+
+    // Honeypot: real users never fill this field.
+    if (cleanPlenoshnayaLeadValue(body.website, 200)) {
+        return res.json({ ok: true });
+    }
+
+    const name =
+        cleanPlenoshnayaLeadValue(
+            body.name,
+            160
+        );
+
+    const phone =
+        cleanPlenoshnayaLeadValue(
+            body.phone,
+            60
+        );
+
+    const phoneDigits =
+        phone.replace(/\D/g, '');
+
+    if (
+        !name ||
+        phoneDigits.length < 10 ||
+        phoneDigits.length > 15
+    ) {
+        return res.status(400).json({
+            ok: false,
+            error: 'Введите имя и корректный телефон'
+        });
+    }
+
+    const service =
+        cleanPlenoshnayaLeadValue(
+            body.service,
+            1200
+        ) || 'Не указана';
+
+    const page =
+        cleanPlenoshnayaLeadValue(
+            body.page,
+            1000
+        );
+
+    const pageTitle =
+        cleanPlenoshnayaLeadValue(
+            body.page_title ||
+            body.pageTitle,
+            300
+        );
+
+    const referrer =
+        cleanPlenoshnayaLeadValue(
+            body.referrer,
+            1000
+        );
+
+    const utmSource =
+        cleanPlenoshnayaLeadValue(
+            body.utm_source,
+            200
+        );
+
+    const utmMedium =
+        cleanPlenoshnayaLeadValue(
+            body.utm_medium,
+            200
+        );
+
+    const utmCampaign =
+        cleanPlenoshnayaLeadValue(
+            body.utm_campaign,
+            300
+        );
+
+    const utmContent =
+        cleanPlenoshnayaLeadValue(
+            body.utm_content,
+            300
+        );
+
+    const utmTerm =
+        cleanPlenoshnayaLeadValue(
+            body.utm_term,
+            300
+        );
+
+    const yclid =
+        cleanPlenoshnayaLeadValue(
+            body.yclid,
+            500
+        );
+
+    const leadId =
+        cleanPlenoshnayaLeadValue(
+            body.lead_id ||
+            body.leadId,
+            100
+        );
+
+    const source =
+        [utmSource, utmMedium]
+            .filter(Boolean)
+            .join(' / ');
+
+    const text = [
+        '🔥 ПЛЁНОШНАЯ — НОВАЯ ЗАЯВКА',
+        '',
+        `👤 Имя: ${name}`,
+        `📞 Телефон: ${phone}`,
+        `🚘 Услуга: ${service}`,
+        '',
+        pageTitle
+            ? `📄 Страница: ${pageTitle}`
+            : null,
+        page
+            ? `🔗 ${page}`
+            : null,
+        referrer
+            ? `↩️ Referrer: ${referrer}`
+            : null,
+        source
+            ? `📣 Источник: ${source}`
+            : null,
+        utmCampaign
+            ? `🎯 Кампания: ${utmCampaign}`
+            : null,
+        utmContent
+            ? `🧩 UTM content: ${utmContent}`
+            : null,
+        utmTerm
+            ? `🔎 UTM term: ${utmTerm}`
+            : null,
+        yclid
+            ? `🟡 yclid: ${yclid}`
+            : null,
+        leadId
+            ? `🆔 Lead ID: ${leadId}`
+            : null
+    ]
+        .filter(Boolean)
+        .join('\n')
+        .slice(0, 3900);
+
+    try {
+        const telegramResponse =
+            await axios.post(
+                `https://api.telegram.org/bot${PLENOSHNAYA_TG_BOT_TOKEN}/sendMessage`,
+                {
+                    chat_id:
+                        PLENOSHNAYA_TG_CHAT_ID,
+
+                    text,
+
+                    disable_web_page_preview:
+                        true
+                },
+                {
+                    timeout:
+                        10000
+                }
+            );
+
+        if (!telegramResponse.data?.ok) {
+            throw new Error(
+                telegramResponse.data?.description ||
+                'Telegram returned ok=false'
+            );
+        }
+
+        console.log(
+            `Plenoshnaya lead sent to Telegram: ${phoneDigits.slice(-4)}`
+        );
+
+        return res.json({
+            ok: true,
+            telegramSent: true
+        });
+
+    } catch (error) {
+        console.error(
+            'Plenoshnaya Telegram error:',
+            error.response?.data ||
+            error.message
+        );
+
+        return res.status(502).json({
+            ok: false,
+            error:
+                'Не удалось отправить заявку'
+        });
+    }
+});
 
 // ============================================================
 // 1. ПОИСК ГОРОДОВ CDEK
