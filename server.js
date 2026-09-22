@@ -84,6 +84,13 @@ const PLENOSHNAYA_TG_CHAT_ID =
         ''
     );
 
+const PLENOSHNAYA_IDENTITY_SECRET =
+    normalizeEnvValue(
+        process.env.PLENOSHNAYA_IDENTITY_SECRET ||
+        PLENOSHNAYA_TG_BOT_TOKEN ||
+        ''
+    );
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
 const PUBLIC_API_URL = (process.env.PUBLIC_API_URL || 'https://rhino-api-yrfq.onrender.com').replace(/\/$/, '');
 
@@ -3698,6 +3705,193 @@ function isPlenoshnayaOriginAllowed(req) {
     return !origin || PLENOSHNAYA_ALLOWED_ORIGINS.has(origin);
 }
 
+const PLENOSHNAYA_IDENTITY_TTL_MS =
+    365 * 24 * 60 * 60 * 1000;
+
+const plenoshnayaIdentifyRecent =
+    new Map();
+
+function plenoshnayaIdentityKey() {
+    if (!PLENOSHNAYA_IDENTITY_SECRET) {
+        return null;
+    }
+
+    return crypto
+        .createHash('sha256')
+        .update(
+            PLENOSHNAYA_IDENTITY_SECRET,
+            'utf8'
+        )
+        .digest();
+}
+
+function sealPlenoshnayaIdentity(payload = {}) {
+    const key =
+        plenoshnayaIdentityKey();
+
+    if (!key) {
+        return '';
+    }
+
+    const iv =
+        crypto.randomBytes(12);
+
+    const cipher =
+        crypto.createCipheriv(
+            'aes-256-gcm',
+            key,
+            iv
+        );
+
+    const data =
+        Buffer.from(
+            JSON.stringify({
+                v: 1,
+                createdAt:
+                    Date.now(),
+                name:
+                    cleanPlenoshnayaLeadValue(
+                        payload.name,
+                        160
+                    ),
+                phone:
+                    cleanPlenoshnayaLeadValue(
+                        payload.phone,
+                        80
+                    ),
+                email:
+                    cleanPlenoshnayaLeadValue(
+                        payload.email,
+                        254
+                    )
+            }),
+            'utf8'
+        );
+
+    const encrypted =
+        Buffer.concat([
+            cipher.update(data),
+            cipher.final()
+        ]);
+
+    const tag =
+        cipher.getAuthTag();
+
+    return [
+        iv.toString('base64url'),
+        tag.toString('base64url'),
+        encrypted.toString('base64url')
+    ].join('.');
+}
+
+function openPlenoshnayaIdentity(token) {
+    const key =
+        plenoshnayaIdentityKey();
+
+    if (
+        !key ||
+        !token
+    ) {
+        return null;
+    }
+
+    try {
+        const parts =
+            String(token)
+                .split('.');
+
+        if (parts.length !== 3) {
+            return null;
+        }
+
+        const iv =
+            Buffer.from(
+                parts[0],
+                'base64url'
+            );
+
+        const tag =
+            Buffer.from(
+                parts[1],
+                'base64url'
+            );
+
+        const encrypted =
+            Buffer.from(
+                parts[2],
+                'base64url'
+            );
+
+        const decipher =
+            crypto.createDecipheriv(
+                'aes-256-gcm',
+                key,
+                iv
+            );
+
+        decipher.setAuthTag(tag);
+
+        const decoded =
+            Buffer.concat([
+                decipher.update(encrypted),
+                decipher.final()
+            ])
+                .toString('utf8');
+
+        const identity =
+            JSON.parse(decoded);
+
+        if (
+            !identity ||
+            identity.v !== 1 ||
+            !identity.createdAt ||
+            Date.now() -
+                Number(identity.createdAt) >
+                PLENOSHNAYA_IDENTITY_TTL_MS
+        ) {
+            return null;
+        }
+
+        return {
+            name:
+                cleanPlenoshnayaLeadValue(
+                    identity.name,
+                    160
+                ),
+            phone:
+                cleanPlenoshnayaLeadValue(
+                    identity.phone,
+                    80
+                ),
+            email:
+                cleanPlenoshnayaLeadValue(
+                    identity.email,
+                    254
+                )
+        };
+
+    } catch (error) {
+        return null;
+    }
+}
+
+function cleanupPlenoshnayaIdentifyRecent() {
+    const now =
+        Date.now();
+
+    for (
+        const [key, timestamp]
+        of plenoshnayaIdentifyRecent.entries()
+    ) {
+        if (
+            now - timestamp >
+            6 * 60 * 60 * 1000
+        ) {
+            plenoshnayaIdentifyRecent.delete(key);
+        }
+    }
+}
+
 app.get('/api/plenoshnaya/health', (req, res) => {
     return res.json({
         ok: true,
@@ -3705,6 +3899,9 @@ app.get('/api/plenoshnaya/health', (req, res) => {
         telegramConfigured: Boolean(
             PLENOSHNAYA_TG_BOT_TOKEN &&
             PLENOSHNAYA_TG_CHAT_ID
+        ),
+        identityConfigured: Boolean(
+            PLENOSHNAYA_IDENTITY_SECRET
         )
     });
 });
@@ -3906,9 +4103,22 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
             `Plenoshnaya lead sent to Telegram: ${phoneDigits.slice(-4)}`
         );
 
+        const identityToken =
+            sealPlenoshnayaIdentity({
+                name,
+                phone,
+                email:
+                    cleanPlenoshnayaLeadValue(
+                        body.email,
+                        254
+                    )
+            });
+
         return res.json({
             ok: true,
-            telegramSent: true
+            telegramSent: true,
+            identityToken:
+                identityToken || undefined
         });
 
     } catch (error) {
@@ -3924,6 +4134,288 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
                 'Не удалось отправить заявку'
         });
     }
+});
+
+// ============================================================
+// ПЛЁНОШНАЯ — FIRST-PARTY IDENTITY RESOLUTION
+// ============================================================
+
+app.post('/api/plenoshnaya/identify', async (req, res) => {
+    if (!isPlenoshnayaOriginAllowed(req)) {
+        return res.status(403).json({
+            ok: false,
+            error: 'Origin not allowed'
+        });
+    }
+
+    const body =
+        req.body || {};
+
+    const identity =
+        openPlenoshnayaIdentity(
+            cleanPlenoshnayaLeadValue(
+                body.identity_token ||
+                body.identityToken,
+                5000
+            )
+        );
+
+    if (!identity) {
+        return res.json({
+            ok: true,
+            identified: false
+        });
+    }
+
+    const visitorId =
+        cleanPlenoshnayaLeadValue(
+            body.visitor_id ||
+            body.visitorId,
+            120
+        );
+
+    const sessionId =
+        cleanPlenoshnayaLeadValue(
+            body.session_id ||
+            body.sessionId,
+            120
+        );
+
+    const visitCount =
+        cleanPlenoshnayaLeadValue(
+            body.visit_count ||
+            body.visitCount,
+            20
+        );
+
+    const page =
+        cleanPlenoshnayaLeadValue(
+            body.page,
+            1000
+        );
+
+    const pageTitle =
+        cleanPlenoshnayaLeadValue(
+            body.page_title ||
+            body.pageTitle,
+            300
+        );
+
+    const referrer =
+        cleanPlenoshnayaLeadValue(
+            body.referrer,
+            1000
+        );
+
+    const utmSource =
+        cleanPlenoshnayaLeadValue(
+            body.utm_source,
+            200
+        );
+
+    const utmMedium =
+        cleanPlenoshnayaLeadValue(
+            body.utm_medium,
+            200
+        );
+
+    const utmCampaign =
+        cleanPlenoshnayaLeadValue(
+            body.utm_campaign,
+            300
+        );
+
+    const yclid =
+        cleanPlenoshnayaLeadValue(
+            body.yclid,
+            500
+        );
+
+    const device =
+        cleanPlenoshnayaLeadValue(
+            body.device,
+            240
+        );
+
+    const browser =
+        cleanPlenoshnayaLeadValue(
+            body.browser,
+            240
+        );
+
+    const timezone =
+        cleanPlenoshnayaLeadValue(
+            body.timezone,
+            120
+        );
+
+    const screen =
+        cleanPlenoshnayaLeadValue(
+            body.screen,
+            80
+        );
+
+    const forwardedFor =
+        cleanPlenoshnayaLeadValue(
+            req.get('x-forwarded-for'),
+            300
+        );
+
+    const visitorIp =
+        cleanPlenoshnayaLeadValue(
+            (
+                forwardedFor
+                    ? forwardedFor.split(',')[0]
+                    : req.ip
+            ),
+            120
+        );
+
+    cleanupPlenoshnayaIdentifyRecent();
+
+    const dedupeKey =
+        [
+            sessionId ||
+                visitorId ||
+                visitorIp,
+            identity.phone ||
+                identity.email ||
+                identity.name
+        ]
+            .filter(Boolean)
+            .join('|');
+
+    if (
+        dedupeKey &&
+        plenoshnayaIdentifyRecent.has(
+            dedupeKey
+        )
+    ) {
+        return res.json({
+            ok: true,
+            identified: true,
+            duplicate: true
+        });
+    }
+
+    const source =
+        [utmSource, utmMedium]
+            .filter(Boolean)
+            .join(' / ');
+
+    const text = [
+        '🎯 ПЛЁНОШНАЯ — УЗНАН ПОВТОРНЫЙ ПОСЕТИТЕЛЬ',
+        '',
+        identity.name
+            ? `👤 Имя: ${identity.name}`
+            : null,
+        identity.phone
+            ? `📞 Телефон: ${identity.phone}`
+            : null,
+        identity.email
+            ? `✉️ Email: ${identity.email}`
+            : null,
+        visitCount
+            ? `🔁 Визит: ${visitCount}`
+            : null,
+        pageTitle
+            ? `📄 Страница: ${pageTitle}`
+            : null,
+        page
+            ? `🔗 ${page}`
+            : null,
+        referrer
+            ? `↩️ Referrer: ${referrer}`
+            : null,
+        source
+            ? `📣 Источник: ${source}`
+            : null,
+        utmCampaign
+            ? `🎯 Кампания: ${utmCampaign}`
+            : null,
+        yclid
+            ? `🟡 yclid: ${yclid}`
+            : null,
+        visitorId
+            ? `👣 Visitor ID: ${visitorId}`
+            : null,
+        sessionId
+            ? `🧭 Session ID: ${sessionId}`
+            : null,
+        visitorIp
+            ? `🌐 IP: ${visitorIp}`
+            : null,
+        device
+            ? `📱 Устройство: ${device}`
+            : null,
+        browser
+            ? `🌐 Браузер: ${browser}`
+            : null,
+        timezone
+            ? `🕒 Часовой пояс: ${timezone}`
+            : null,
+        screen
+            ? `🖥 Экран: ${screen}`
+            : null
+    ]
+        .filter(Boolean)
+        .join('\n')
+        .slice(0, 3900);
+
+    if (
+        PLENOSHNAYA_TG_BOT_TOKEN &&
+        PLENOSHNAYA_TG_CHAT_ID
+    ) {
+        try {
+            const telegramResponse =
+                await axios.post(
+                    `https://api.telegram.org/bot${PLENOSHNAYA_TG_BOT_TOKEN}/sendMessage`,
+                    {
+                        chat_id:
+                            PLENOSHNAYA_TG_CHAT_ID,
+                        text,
+                        disable_web_page_preview:
+                            true
+                    },
+                    {
+                        timeout:
+                            10000
+                    }
+                );
+
+            if (!telegramResponse.data?.ok) {
+                throw new Error(
+                    telegramResponse.data?.description ||
+                    'Telegram returned ok=false'
+                );
+            }
+
+        } catch (error) {
+            console.error(
+                'Plenoshnaya identity Telegram error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res.status(502).json({
+                ok: false,
+                error:
+                    'Не удалось отправить identity event'
+            });
+        }
+    }
+
+    if (dedupeKey) {
+        plenoshnayaIdentifyRecent.set(
+            dedupeKey,
+            Date.now()
+        );
+    }
+
+    return res.json({
+        ok: true,
+        identified: true
+    });
 });
 
 // ============================================================
