@@ -4052,6 +4052,702 @@ async function getPlenoshnayaIpInfo(ip) {
     }
 }
 
+// ============================================================
+// ПЛЁНОШНАЯ — LIVE-КАРТОЧКА ВИЗИТА В TELEGRAM
+// ============================================================
+
+const PLENOSHNAYA_VISIT_CARD_TTL_MS =
+    12 * 60 * 60 * 1000;
+
+const plenoshnayaVisitCards =
+    new Map();
+
+function cleanupPlenoshnayaVisitCards() {
+    const now =
+        Date.now();
+
+    for (
+        const [key, card]
+        of plenoshnayaVisitCards.entries()
+    ) {
+        if (
+            !card ||
+            now - Number(card.lastSeenAt || card.startedAt || 0) >
+                PLENOSHNAYA_VISIT_CARD_TTL_MS
+        ) {
+            plenoshnayaVisitCards.delete(key);
+        }
+    }
+}
+
+function formatPlenoshnayaMoscowTime(value) {
+    try {
+        return new Intl.DateTimeFormat(
+            'ru-RU',
+            {
+                timeZone: 'Europe/Moscow',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+            }
+        ).format(
+            new Date(value || Date.now())
+        );
+    } catch (error) {
+        return new Date(
+            value || Date.now()
+        ).toISOString().slice(11, 19);
+    }
+}
+
+function formatPlenoshnayaVisitDuration(startedAt, lastSeenAt) {
+    const seconds =
+        Math.max(
+            0,
+            Math.round(
+                (
+                    Number(lastSeenAt || Date.now()) -
+                    Number(startedAt || Date.now())
+                ) / 1000
+            )
+        );
+
+    const minutes =
+        Math.floor(seconds / 60);
+
+    const rest =
+        seconds % 60;
+
+    if (minutes >= 60) {
+        const hours =
+            Math.floor(minutes / 60);
+
+        const minuteRest =
+            minutes % 60;
+
+        return `${hours} ч ${minuteRest} мин`;
+    }
+
+    if (minutes > 0) {
+        return `${minutes} мин ${rest} сек`;
+    }
+
+    return `${rest} сек`;
+}
+
+function shortPlenoshnayaVisitId(value) {
+    const clean =
+        cleanPlenoshnayaLeadValue(
+            value,
+            120
+        );
+
+    if (!clean) {
+        return '—';
+    }
+
+    return clean
+        .replace(/[^a-z0-9]/gi, '')
+        .slice(-8)
+        .toUpperCase() || clean.slice(-8);
+}
+
+function getPlenoshnayaVisitCardKey(payload = {}) {
+    const sessionId =
+        cleanPlenoshnayaLeadValue(
+            payload.sessionId ||
+            payload.session_id,
+            120
+        );
+
+    if (sessionId) {
+        return `session:${sessionId}`;
+    }
+
+    const visitorId =
+        cleanPlenoshnayaLeadValue(
+            payload.visitorId ||
+            payload.visitor_id,
+            120
+        );
+
+    if (visitorId) {
+        return `visitor:${visitorId}`;
+    }
+
+    const visitorIp =
+        cleanPlenoshnayaLeadValue(
+            payload.visitorIp ||
+            payload.visitor_ip,
+            120
+        );
+
+    if (visitorIp) {
+        return `ip:${visitorIp}`;
+    }
+
+    return '';
+}
+
+function buildPlenoshnayaVisitEventLabel(
+    eventType,
+    payload = {}
+) {
+    const pageTitle =
+        cleanPlenoshnayaLeadValue(
+            payload.pageTitle ||
+            payload.page_title,
+            120
+        );
+
+    const page =
+        cleanPlenoshnayaLeadValue(
+            payload.page,
+            220
+        );
+
+    const placement =
+        cleanPlenoshnayaLeadValue(
+            payload.placement,
+            120
+        );
+
+    const calculatorSelection =
+        cleanPlenoshnayaLeadValue(
+            payload.calculatorSelection ||
+            payload.calculator_selection,
+            260
+        );
+
+    const labels = {
+        visit_start:
+            'зашёл на сайт',
+        page_view:
+            `открыл: ${pageTitle || page || 'страницу'}`,
+        visit_end:
+            'завершил визит',
+        form_open:
+            `открыл форму записи${placement ? ` · ${placement}` : ''}`,
+        phone_click:
+            'нажал на телефон',
+        whatsapp_click:
+            'открыл WhatsApp',
+        telegram_click:
+            'открыл Telegram',
+        contact_share:
+            'поделился контактами',
+        consent_accept:
+            'принял cookies',
+        consent_necessary:
+            'оставил только необходимые cookies',
+        calculator_action:
+            calculatorSelection
+                ? `калькулятор: ${calculatorSelection}`
+                : 'изменил расчёт в калькуляторе'
+    };
+
+    return cleanPlenoshnayaLeadValue(
+        labels[eventType] || eventType,
+        320
+    );
+}
+
+async function callPlenoshnayaTelegram(
+    method,
+    payload
+) {
+    if (
+        !PLENOSHNAYA_TG_BOT_TOKEN ||
+        !PLENOSHNAYA_TG_CHAT_ID
+    ) {
+        throw new Error(
+            'Plenoshnaya Telegram is not configured'
+        );
+    }
+
+    const response =
+        await axios.post(
+            `https://api.telegram.org/bot${PLENOSHNAYA_TG_BOT_TOKEN}/${method}`,
+            payload,
+            {
+                timeout:
+                    10000
+            }
+        );
+
+    if (!response.data?.ok) {
+        throw new Error(
+            response.data?.description ||
+            'Telegram returned ok=false'
+        );
+    }
+
+    return response.data.result;
+}
+
+function buildPlenoshnayaVisitCardText(card) {
+    const status =
+        card.hasLead
+            ? '🔥 ЗАЯВКА'
+            : (
+                card.ended
+                    ? '⚫ ВИЗИТ ЗАВЕРШЁН'
+                    : '🟢 НА САЙТЕ'
+            );
+
+    const source =
+        [
+            card.utmSource,
+            card.utmMedium
+        ]
+            .filter(Boolean)
+            .join(' / ');
+
+    const location =
+        [
+            card.city,
+            card.region,
+            card.country
+        ]
+            .filter(Boolean)
+            .join(', ');
+
+    const currentPage =
+        card.pageTitle ||
+        card.page ||
+        '—';
+
+    const actions =
+        Array.isArray(card.events)
+            ? card.events.slice(-8)
+            : [];
+
+    const lines = [
+        `👤 ПЛЁНОШНАЯ — ВИЗИТ #${shortPlenoshnayaVisitId(card.sessionId || card.visitorId || card.key)}`,
+        `Статус: ${status}`,
+        `⏱ На сайте: ${formatPlenoshnayaVisitDuration(card.startedAt, card.lastSeenAt)}`,
+        card.visitCount
+            ? `🔁 Визит пользователя: ${card.visitCount}`
+            : null,
+        card.pageCount
+            ? `📚 Страниц в сессии: ${card.pageCount}`
+            : null,
+        '',
+        card.hasLead && card.name
+            ? `👤 Имя: ${card.name}`
+            : null,
+        card.hasLead && card.phone
+            ? `📞 Телефон: ${card.phone}`
+            : null,
+        card.hasLead && card.service
+            ? `🚘 Заявка: ${card.service}`
+            : null,
+        `📍 Сейчас: ${currentPage}`,
+        source
+            ? `📣 Источник: ${source}`
+            : null,
+        card.utmCampaign
+            ? `🎯 Кампания: ${card.utmCampaign}`
+            : null,
+        card.searchPhrase
+            ? `🔍 Поиск: ${card.searchPhrase}`
+            : null,
+        card.yclid
+            ? `🟡 yclid: ${card.yclid}`
+            : null,
+        card.metrikaClientId
+            ? `📊 Метрика ClientID: ${card.metrikaClientId}`
+            : null,
+        card.referrer
+            ? `↩️ Referrer: ${card.referrer}`
+            : null,
+        location
+            ? `🌍 Гео по сети: ${location}`
+            : null,
+        card.device || card.browser
+            ? `📱 ${[card.device, card.browser].filter(Boolean).join(' · ')}`
+            : null,
+        card.calculatorSelection
+            ? `🧮 Калькулятор: ${card.calculatorSelection}`
+            : null,
+        card.pageHistory
+            ? `🧭 Маршрут: ${card.pageHistory}`
+            : null,
+        '',
+        actions.length
+            ? 'Последние действия:'
+            : null,
+        ...actions.map(
+            event =>
+                `${event.time} — ${event.label}`
+        )
+    ];
+
+    return lines
+        .filter(
+            value =>
+                value !== null &&
+                value !== undefined
+        )
+        .join('\n')
+        .slice(0, 3900);
+}
+
+async function upsertPlenoshnayaVisitCard(
+    payload = {}
+) {
+    const key =
+        getPlenoshnayaVisitCardKey(
+            payload
+        );
+
+    if (!key) {
+        return {
+            updated: false,
+            reason: 'no_visit_key'
+        };
+    }
+
+    cleanupPlenoshnayaVisitCards();
+
+    const now =
+        Date.now();
+
+    let card =
+        plenoshnayaVisitCards.get(key);
+
+    if (!card) {
+        card = {
+            key,
+            messageId: null,
+            startedAt: now,
+            lastSeenAt: now,
+            events: [],
+            hasLead: false,
+            ended: false
+        };
+    }
+
+    const assign = (
+        field,
+        value
+    ) => {
+        const clean =
+            cleanPlenoshnayaLeadValue(
+                value,
+                field === 'pageHistory' ||
+                field === 'calculatorSelection'
+                    ? 1400
+                    : 1000
+            );
+
+        if (clean) {
+            card[field] = clean;
+        }
+    };
+
+    assign(
+        'sessionId',
+        payload.sessionId ||
+        payload.session_id
+    );
+
+    assign(
+        'visitorId',
+        payload.visitorId ||
+        payload.visitor_id
+    );
+
+    assign(
+        'visitCount',
+        payload.visitCount ||
+        payload.visit_count
+    );
+
+    assign(
+        'page',
+        payload.page
+    );
+
+    assign(
+        'pageTitle',
+        payload.pageTitle ||
+        payload.page_title
+    );
+
+    assign(
+        'referrer',
+        payload.referrer
+    );
+
+    assign(
+        'utmSource',
+        payload.utmSource ||
+        payload.utm_source
+    );
+
+    assign(
+        'utmMedium',
+        payload.utmMedium ||
+        payload.utm_medium
+    );
+
+    assign(
+        'utmCampaign',
+        payload.utmCampaign ||
+        payload.utm_campaign
+    );
+
+    assign(
+        'searchPhrase',
+        payload.searchPhrase ||
+        payload.search_phrase
+    );
+
+    assign(
+        'yclid',
+        payload.yclid
+    );
+
+    assign(
+        'metrikaClientId',
+        payload.metrikaClientId ||
+        payload.metrika_client_id ||
+        payload.client_id
+    );
+
+    assign(
+        'device',
+        payload.device
+    );
+
+    assign(
+        'browser',
+        payload.browser
+    );
+
+    assign(
+        'pageCount',
+        payload.pageCount ||
+        payload.page_count
+    );
+
+    assign(
+        'pageHistory',
+        payload.pageHistory ||
+        payload.page_history
+    );
+
+    assign(
+        'calculatorSelection',
+        payload.calculatorSelection ||
+        payload.calculator_selection
+    );
+
+    assign(
+        'name',
+        payload.name
+    );
+
+    assign(
+        'phone',
+        payload.phone
+    );
+
+    assign(
+        'service',
+        payload.service
+    );
+
+    const ipInfo =
+        payload.ipInfo ||
+        payload.ip_info ||
+        null;
+
+    if (ipInfo) {
+        assign(
+            'city',
+            ipInfo.city
+        );
+        assign(
+            'region',
+            ipInfo.region
+        );
+        assign(
+            'country',
+            ipInfo.country
+        );
+    }
+
+    card.lastSeenAt =
+        now;
+
+    const eventType =
+        cleanPlenoshnayaLeadValue(
+            payload.eventType ||
+            payload.event_type ||
+            payload.type,
+            80
+        );
+
+    if (eventType === 'visit_end') {
+        card.ended = true;
+    } else if (
+        eventType &&
+        eventType !== 'heartbeat'
+    ) {
+        card.ended = false;
+    }
+
+    if (
+        payload.hasLead === true ||
+        payload.has_lead === true ||
+        eventType === 'lead'
+    ) {
+        card.hasLead = true;
+        card.ended = false;
+    }
+
+    if (
+        eventType &&
+        eventType !== 'heartbeat'
+    ) {
+        const label =
+            cleanPlenoshnayaLeadValue(
+                payload.eventLabel ||
+                payload.event_label,
+                320
+            ) ||
+            buildPlenoshnayaVisitEventLabel(
+                eventType,
+                payload
+            );
+
+        if (label) {
+            const previous =
+                card.events[
+                    card.events.length - 1
+                ];
+
+            if (
+                !previous ||
+                previous.label !== label ||
+                now - previous.at > 2500
+            ) {
+                card.events.push({
+                    at: now,
+                    time:
+                        formatPlenoshnayaMoscowTime(
+                            now
+                        ),
+                    label
+                });
+            }
+
+            if (card.events.length > 20) {
+                card.events =
+                    card.events.slice(-20);
+            }
+        }
+    }
+
+    const text =
+        buildPlenoshnayaVisitCardText(
+            card
+        );
+
+    if (card.messageId) {
+        try {
+            await callPlenoshnayaTelegram(
+                'editMessageText',
+                {
+                    chat_id:
+                        PLENOSHNAYA_TG_CHAT_ID,
+                    message_id:
+                        card.messageId,
+                    text,
+                    disable_web_page_preview:
+                        true
+                }
+            );
+
+            plenoshnayaVisitCards.set(
+                key,
+                card
+            );
+
+            return {
+                updated: true,
+                created: false,
+                messageId:
+                    card.messageId
+            };
+
+        } catch (error) {
+            const description =
+                String(
+                    error.response?.data?.description ||
+                    error.message ||
+                    ''
+                );
+
+            if (
+                /message is not modified/i
+                    .test(description)
+            ) {
+                plenoshnayaVisitCards.set(
+                    key,
+                    card
+                );
+
+                return {
+                    updated: true,
+                    created: false,
+                    messageId:
+                        card.messageId,
+                    unchanged: true
+                };
+            }
+
+            console.warn(
+                'Plenoshnaya visit card edit failed, creating a new card:',
+                description
+            );
+
+            card.messageId = null;
+        }
+    }
+
+    const result =
+        await callPlenoshnayaTelegram(
+            'sendMessage',
+            {
+                chat_id:
+                    PLENOSHNAYA_TG_CHAT_ID,
+                text,
+                disable_web_page_preview:
+                    true
+            }
+        );
+
+    card.messageId =
+        result?.message_id ||
+        null;
+
+    plenoshnayaVisitCards.set(
+        key,
+        card
+    );
+
+    return {
+        updated: true,
+        created: true,
+        messageId:
+            card.messageId
+    };
+}
+
 app.get('/api/plenoshnaya/health', (req, res) => {
     return res.json({
         ok: true,
@@ -4062,7 +4758,9 @@ app.get('/api/plenoshnaya/health', (req, res) => {
         ),
         identityConfigured: Boolean(
             PLENOSHNAYA_IDENTITY_SECRET
-        )
+        ),
+        liveVisitCards:
+            plenoshnayaVisitCards.size
     });
 });
 
@@ -4203,6 +4901,82 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
             100
         );
 
+    const visitorId =
+        cleanPlenoshnayaLeadValue(
+            body.visitor_id ||
+            body.visitorId,
+            120
+        );
+
+    const sessionId =
+        cleanPlenoshnayaLeadValue(
+            body.session_id ||
+            body.sessionId,
+            120
+        );
+
+    const visitCount =
+        cleanPlenoshnayaLeadValue(
+            body.visit_count ||
+            body.visitCount,
+            20
+        );
+
+    const pageCount =
+        cleanPlenoshnayaLeadValue(
+            body.page_count ||
+            body.pageCount,
+            40
+        );
+
+    const pageHistory =
+        cleanPlenoshnayaLeadValue(
+            body.page_history ||
+            body.pageHistory,
+            1400
+        );
+
+    const calculatorSelection =
+        cleanPlenoshnayaLeadValue(
+            body.calculator_selection ||
+            body.calculatorSelection,
+            1400
+        );
+
+    const metrikaClientId =
+        cleanPlenoshnayaLeadValue(
+            body.metrika_client_id ||
+            body.metrikaClientId ||
+            body.client_id,
+            120
+        );
+
+    const device =
+        cleanPlenoshnayaLeadValue(
+            body.device,
+            240
+        );
+
+    const browser =
+        cleanPlenoshnayaLeadValue(
+            body.browser,
+            240
+        );
+
+    const forwardedFor =
+        cleanPlenoshnayaLeadValue(
+            req.get('x-forwarded-for'),
+            300
+        );
+
+    const visitorIp =
+        cleanPlenoshnayaLeadValue(
+            forwardedFor
+                ? forwardedFor.split(',')[0]
+                : req.ip,
+            120
+        );
+
     const source =
         [utmSource, utmMedium]
             .filter(Boolean)
@@ -4282,6 +5056,48 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
         console.log(
             `Plenoshnaya lead sent to Telegram: ${phoneDigits.slice(-4)}`
         );
+
+        try {
+            const ipInfo =
+                await getPlenoshnayaIpInfo(
+                    visitorIp
+                );
+
+            await upsertPlenoshnayaVisitCard({
+                eventType: 'lead',
+                eventLabel:
+                    `🔥 отправил заявку: ${service}`,
+                hasLead: true,
+                name,
+                phone,
+                service,
+                visitorId,
+                sessionId,
+                visitCount,
+                pageCount,
+                pageHistory,
+                calculatorSelection,
+                metrikaClientId,
+                page,
+                pageTitle,
+                referrer,
+                utmSource,
+                utmMedium,
+                utmCampaign,
+                searchPhrase,
+                yclid,
+                device,
+                browser,
+                visitorIp,
+                ipInfo
+            });
+        } catch (visitCardError) {
+            console.warn(
+                'Plenoshnaya lead visit card update skipped:',
+                visitCardError.response?.data ||
+                visitCardError.message
+            );
+        }
 
         const identityToken =
             sealPlenoshnayaIdentity({
@@ -4684,6 +5500,11 @@ app.post(
             );
 
         const supportedEvents = new Set([
+            'visit_start',
+            'page_view',
+            'heartbeat',
+            'visit_end',
+            'form_open',
             'phone_click',
             'whatsapp_click',
             'telegram_click',
@@ -5055,6 +5876,21 @@ app.post(
                 1200
             );
 
+        const metrikaClientId =
+            cleanPlenoshnayaLeadValue(
+                body.metrika_client_id ||
+                body.metrikaClientId ||
+                body.client_id,
+                120
+            );
+
+        const eventLabel =
+            cleanPlenoshnayaLeadValue(
+                body.event_label ||
+                body.eventLabel,
+                320
+            );
+
         const ipInfo =
             await getPlenoshnayaIpInfo(
                 visitorIp
@@ -5064,6 +5900,68 @@ app.post(
             [utmSource, utmMedium]
                 .filter(Boolean)
                 .join(' / ');
+
+        let visitCardResult = null;
+
+        try {
+            visitCardResult =
+                await upsertPlenoshnayaVisitCard({
+                    eventType,
+                    eventLabel,
+                    visitorId,
+                    sessionId,
+                    visitCount,
+                    pageCount,
+                    pageHistory,
+                    calculatorSelection,
+                    metrikaClientId,
+                    page,
+                    pageTitle,
+                    referrer,
+                    utmSource,
+                    utmMedium,
+                    utmCampaign,
+                    searchPhrase,
+                    yclid,
+                    device,
+                    browser,
+                    placement,
+                    visitorIp,
+                    ipInfo,
+                    name,
+                    phone
+                });
+        } catch (visitCardError) {
+            console.warn(
+                'Plenoshnaya visit card update skipped:',
+                visitCardError.response?.data ||
+                visitCardError.message
+            );
+        }
+
+        const separateTelegramAlerts =
+            new Set([
+                'phone_click',
+                'whatsapp_click',
+                'telegram_click'
+            ]);
+
+        if (
+            !separateTelegramAlerts.has(
+                eventType
+            )
+        ) {
+            return res.json({
+                ok: true,
+                telegramSent: false,
+                visitCardUpdated:
+                    Boolean(
+                        visitCardResult?.updated
+                    ),
+                liveCard:
+                    true
+            });
+        }
 
         const titles = {
             phone_click:
