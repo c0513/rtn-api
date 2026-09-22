@@ -3927,6 +3927,215 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
 });
 
 // ============================================================
+// ПЛЁНОШНАЯ — СОБЫТИЯ С САЙТА
+// ============================================================
+
+app.post(
+    '/api/plenoshnaya/event',
+    express.text({
+        type: 'text/plain',
+        limit: '32kb'
+    }),
+    async (req, res) => {
+        if (!isPlenoshnayaOriginAllowed(req)) {
+            return res.status(403).json({
+                ok: false,
+                error: 'Origin not allowed'
+            });
+        }
+
+        if (
+            !PLENOSHNAYA_TG_BOT_TOKEN ||
+            !PLENOSHNAYA_TG_CHAT_ID
+        ) {
+            return res.status(503).json({
+                ok: false,
+                error: 'Telegram is not configured'
+            });
+        }
+
+        let body = req.body || {};
+
+        if (typeof body === 'string') {
+            try {
+                body = JSON.parse(body);
+            } catch (error) {
+                return res.status(400).json({
+                    ok: false,
+                    error: 'Invalid event payload'
+                });
+            }
+        }
+
+        const eventType =
+            cleanPlenoshnayaLeadValue(
+                body.type,
+                80
+            );
+
+        if (eventType !== 'phone_click') {
+            return res.status(400).json({
+                ok: false,
+                error: 'Unsupported event'
+            });
+        }
+
+        const phone =
+            cleanPlenoshnayaLeadValue(
+                body.phone,
+                80
+            ) || 'Не указан';
+
+        const placement =
+            cleanPlenoshnayaLeadValue(
+                body.placement,
+                120
+            ) || 'page';
+
+        const linkText =
+            cleanPlenoshnayaLeadValue(
+                body.link_text ||
+                body.linkText,
+                200
+            );
+
+        const page =
+            cleanPlenoshnayaLeadValue(
+                body.page,
+                1000
+            );
+
+        const pageTitle =
+            cleanPlenoshnayaLeadValue(
+                body.page_title ||
+                body.pageTitle,
+                300
+            );
+
+        const referrer =
+            cleanPlenoshnayaLeadValue(
+                body.referrer,
+                1000
+            );
+
+        const utmSource =
+            cleanPlenoshnayaLeadValue(
+                body.utm_source,
+                200
+            );
+
+        const utmMedium =
+            cleanPlenoshnayaLeadValue(
+                body.utm_medium,
+                200
+            );
+
+        const utmCampaign =
+            cleanPlenoshnayaLeadValue(
+                body.utm_campaign,
+                300
+            );
+
+        const yclid =
+            cleanPlenoshnayaLeadValue(
+                body.yclid,
+                500
+            );
+
+        const eventId =
+            cleanPlenoshnayaLeadValue(
+                body.event_id ||
+                body.eventId,
+                100
+            );
+
+        const source =
+            [utmSource, utmMedium]
+                .filter(Boolean)
+                .join(' / ');
+
+        const text = [
+            '📞 ПЛЁНОШНАЯ — КЛИК ПО ТЕЛЕФОНУ',
+            '',
+            `Номер: ${phone}`,
+            `Место: ${placement}`,
+            linkText
+                ? `Текст ссылки: ${linkText}`
+                : null,
+            pageTitle
+                ? `Страница: ${pageTitle}`
+                : null,
+            page
+                ? `🔗 ${page}`
+                : null,
+            referrer
+                ? `↩️ Referrer: ${referrer}`
+                : null,
+            source
+                ? `📣 Источник: ${source}`
+                : null,
+            utmCampaign
+                ? `🎯 Кампания: ${utmCampaign}`
+                : null,
+            yclid
+                ? `🟡 yclid: ${yclid}`
+                : null,
+            eventId
+                ? `🆔 Event ID: ${eventId}`
+                : null
+        ]
+            .filter(Boolean)
+            .join('\n')
+            .slice(0, 3900);
+
+        try {
+            const telegramResponse =
+                await axios.post(
+                    `https://api.telegram.org/bot${PLENOSHNAYA_TG_BOT_TOKEN}/sendMessage`,
+                    {
+                        chat_id:
+                            PLENOSHNAYA_TG_CHAT_ID,
+
+                        text,
+
+                        disable_web_page_preview:
+                            true
+                    },
+                    {
+                        timeout:
+                            10000
+                    }
+                );
+
+            if (!telegramResponse.data?.ok) {
+                throw new Error(
+                    telegramResponse.data?.description ||
+                    'Telegram returned ok=false'
+                );
+            }
+
+            return res.json({
+                ok: true,
+                telegramSent: true
+            });
+
+        } catch (error) {
+            console.error(
+                'Plenoshnaya phone click Telegram error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res.status(502).json({
+                ok: false,
+                error:
+                    'Не удалось отправить событие'
+            });
+        }
+    }
+);
+
+// ============================================================
 // 1. ПОИСК ГОРОДОВ CDEK
 // ============================================================
 
