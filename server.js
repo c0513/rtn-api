@@ -3973,7 +3973,14 @@ app.post(
                 80
             );
 
-        if (eventType !== 'phone_click') {
+        const supportedEvents = new Set([
+            'phone_click',
+            'consent_accept',
+            'consent_necessary',
+            'contact_share'
+        ]);
+
+        if (!supportedEvents.has(eventType)) {
             return res.status(400).json({
                 ok: false,
                 error: 'Unsupported event'
@@ -3984,7 +3991,19 @@ app.post(
             cleanPlenoshnayaLeadValue(
                 body.phone,
                 80
-            ) || 'Не указан';
+            );
+
+        const name =
+            cleanPlenoshnayaLeadValue(
+                body.name,
+                160
+            );
+
+        const email =
+            cleanPlenoshnayaLeadValue(
+                body.email,
+                254
+            );
 
         const placement =
             cleanPlenoshnayaLeadValue(
@@ -4049,15 +4068,92 @@ app.post(
                 100
             );
 
+        const visitorId =
+            cleanPlenoshnayaLeadValue(
+                body.visitor_id ||
+                body.visitorId,
+                120
+            );
+
+        const sessionId =
+            cleanPlenoshnayaLeadValue(
+                body.session_id ||
+                body.sessionId,
+                120
+            );
+
+        const visitCount =
+            cleanPlenoshnayaLeadValue(
+                body.visit_count ||
+                body.visitCount,
+                20
+            );
+
+        const device =
+            cleanPlenoshnayaLeadValue(
+                body.device,
+                240
+            );
+
+        const browser =
+            cleanPlenoshnayaLeadValue(
+                body.browser,
+                240
+            );
+
+        const language =
+            cleanPlenoshnayaLeadValue(
+                body.language,
+                80
+            );
+
+        const timezone =
+            cleanPlenoshnayaLeadValue(
+                body.timezone,
+                120
+            );
+
+        const screen =
+            cleanPlenoshnayaLeadValue(
+                body.screen,
+                80
+            );
+
+        const knownLead =
+            body.known_lead === true ||
+            String(body.known_lead || '').toLowerCase() === 'true';
+
         const source =
             [utmSource, utmMedium]
                 .filter(Boolean)
                 .join(' / ');
 
+        const titles = {
+            phone_click:
+                '📞 ПЛЁНОШНАЯ — КЛИК ПО ТЕЛЕФОНУ',
+            consent_accept:
+                '🍪 ПЛЁНОШНАЯ — COOKIE: ПРИНЯТО',
+            consent_necessary:
+                '🍪 ПЛЁНОШНАЯ — ТОЛЬКО НЕОБХОДИМЫЕ',
+            contact_share:
+                '👤 ПЛЁНОШНАЯ — ПОЛЬЗОВАТЕЛЬ ПОДЕЛИЛСЯ КОНТАКТОМ'
+        };
+
         const text = [
-            '📞 ПЛЁНОШНАЯ — КЛИК ПО ТЕЛЕФОНУ',
+            titles[eventType] || 'ПЛЁНОШНАЯ — СОБЫТИЕ',
             '',
-            `Номер: ${phone}`,
+            eventType === 'phone_click' && phone
+                ? `Номер: ${phone}`
+                : null,
+            eventType === 'contact_share' && name
+                ? `Имя: ${name}`
+                : null,
+            eventType === 'contact_share' && phone
+                ? `Телефон: ${phone}`
+                : null,
+            eventType === 'contact_share' && email
+                ? `Email: ${email}`
+                : null,
             `Место: ${placement}`,
             linkText
                 ? `Текст ссылки: ${linkText}`
@@ -4079,6 +4175,33 @@ app.post(
                 : null,
             yclid
                 ? `🟡 yclid: ${yclid}`
+                : null,
+            visitorId
+                ? `👣 Visitor ID: ${visitorId}`
+                : null,
+            sessionId
+                ? `🧭 Session ID: ${sessionId}`
+                : null,
+            visitCount
+                ? `🔁 Визит: ${visitCount}`
+                : null,
+            knownLead
+                ? '✅ Ранее оставлял заявку'
+                : null,
+            device
+                ? `📱 Устройство: ${device}`
+                : null,
+            browser
+                ? `🌐 Браузер: ${browser}`
+                : null,
+            language
+                ? `🗣 Язык: ${language}`
+                : null,
+            timezone
+                ? `🕒 Часовой пояс: ${timezone}`
+                : null,
+            screen
+                ? `🖥 Экран: ${screen}`
                 : null,
             eventId
                 ? `🆔 Event ID: ${eventId}`
@@ -4121,7 +4244,7 @@ app.post(
 
         } catch (error) {
             console.error(
-                'Plenoshnaya phone click Telegram error:',
+                `Plenoshnaya ${eventType} Telegram error:`,
                 error.response?.data ||
                 error.message
             );
