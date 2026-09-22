@@ -4123,6 +4123,97 @@ app.post(
             body.known_lead === true ||
             String(body.known_lead || '').toLowerCase() === 'true';
 
+        const userAgent =
+            cleanPlenoshnayaLeadValue(
+                req.get('user-agent'),
+                500
+            );
+
+        const acceptLanguage =
+            cleanPlenoshnayaLeadValue(
+                req.get('accept-language'),
+                240
+            );
+
+        const clientHints =
+            cleanPlenoshnayaLeadValue(
+                req.get('sec-ch-ua'),
+                300
+            );
+
+        const clientPlatform =
+            cleanPlenoshnayaLeadValue(
+                req.get('sec-ch-ua-platform'),
+                120
+            );
+
+        const forwardedFor =
+            cleanPlenoshnayaLeadValue(
+                req.get('x-forwarded-for'),
+                300
+            );
+
+        const visitorIp =
+            cleanPlenoshnayaLeadValue(
+                (forwardedFor
+                    ? forwardedFor.split(',')[0]
+                    : req.ip),
+                120
+            );
+
+        const countryHeader =
+            cleanPlenoshnayaLeadValue(
+                req.get('cf-ipcountry') ||
+                req.get('x-vercel-ip-country') ||
+                req.get('x-country-code'),
+                40
+            );
+
+        const deviceModel =
+            cleanPlenoshnayaLeadValue(
+                body.device_model ||
+                body.deviceModel,
+                160
+            );
+
+        const platformVersion =
+            cleanPlenoshnayaLeadValue(
+                body.platform_version ||
+                body.platformVersion,
+                160
+            );
+
+        const browserVersions =
+            cleanPlenoshnayaLeadValue(
+                body.browser_versions ||
+                body.browserVersions,
+                300
+            );
+
+        const cpu =
+            cleanPlenoshnayaLeadValue(
+                body.cpu,
+                80
+            );
+
+        const memory =
+            cleanPlenoshnayaLeadValue(
+                body.memory,
+                80
+            );
+
+        const connection =
+            cleanPlenoshnayaLeadValue(
+                body.connection,
+                160
+            );
+
+        const viewport =
+            cleanPlenoshnayaLeadValue(
+                body.viewport,
+                80
+            );
+
         const source =
             [utmSource, utmMedium]
                 .filter(Boolean)
@@ -4202,6 +4293,45 @@ app.post(
                 : null,
             screen
                 ? `🖥 Экран: ${screen}`
+                : null,
+            viewport
+                ? `📐 Viewport: ${viewport}`
+                : null,
+            deviceModel
+                ? `📲 Модель: ${deviceModel}`
+                : null,
+            platformVersion
+                ? `⚙️ ОС: ${platformVersion}`
+                : null,
+            browserVersions
+                ? `🧩 Версии браузера: ${browserVersions}`
+                : null,
+            cpu
+                ? `🧠 CPU/ядра: ${cpu}`
+                : null,
+            memory
+                ? `💾 Память: ${memory}`
+                : null,
+            connection
+                ? `📶 Соединение: ${connection}`
+                : null,
+            visitorIp
+                ? `🌐 IP: ${visitorIp}`
+                : null,
+            countryHeader
+                ? `🌍 Страна по сети: ${countryHeader}`
+                : null,
+            clientPlatform
+                ? `🖥 Client platform: ${clientPlatform}`
+                : null,
+            clientHints
+                ? `🧭 Client hints: ${clientHints}`
+                : null,
+            acceptLanguage
+                ? `🗣 Accept-Language: ${acceptLanguage}`
+                : null,
+            userAgent
+                ? `🔧 User-Agent: ${userAgent}`
                 : null,
             eventId
                 ? `🆔 Event ID: ${eventId}`
