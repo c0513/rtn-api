@@ -2,11 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '12mb' }));
 
 // ============================================================
 // НАСТРОЙКИ
@@ -31,231 +33,6 @@ function normalizeEnvValue(value) {
     }
 
     return result;
-}
-
-function normalizeAttributionValue(value, maxLength = 180) {
-    return String(value || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, maxLength);
-}
-
-function normalizeAttributionTouch(input = {}) {
-    return {
-        source:
-            normalizeAttributionValue(
-                input?.source,
-                80
-            ) || 'direct',
-
-        medium:
-            normalizeAttributionValue(
-                input?.medium,
-                80
-            ) || 'direct',
-
-        campaign:
-            normalizeAttributionValue(
-                input?.campaign,
-                120
-            ),
-
-        content:
-            normalizeAttributionValue(
-                input?.content,
-                120
-            ),
-
-        term:
-            normalizeAttributionValue(
-                input?.term,
-                120
-            ),
-
-        startParam:
-            normalizeAttributionValue(
-                input?.startParam,
-                120
-            ),
-
-        platform:
-            normalizeAttributionValue(
-                input?.platform,
-                40
-            ),
-
-        chatType:
-            normalizeAttributionValue(
-                input?.chatType,
-                40
-            ),
-
-        referrer:
-            normalizeAttributionValue(
-                input?.referrer,
-                220
-            ),
-
-        landingPath:
-            normalizeAttributionValue(
-                input?.landingPath,
-                260
-            ),
-
-        fbclid:
-            normalizeAttributionValue(
-                input?.fbclid,
-                300
-            ),
-
-        yclid:
-            normalizeAttributionValue(
-                input?.yclid,
-                300
-            ),
-
-        capturedAt:
-            normalizeAttributionValue(
-                input?.capturedAt,
-                40
-            )
-    };
-}
-
-function normalizeAttribution(input = {}) {
-    const firstRaw =
-        input?.firstTouch ||
-        input ||
-        {};
-
-    const lastRaw =
-        input?.lastTouch ||
-        input?.firstTouch ||
-        input ||
-        {};
-
-    const firstTouch =
-        normalizeAttributionTouch(
-            firstRaw
-        );
-
-    const lastTouch =
-        normalizeAttributionTouch(
-            lastRaw
-        );
-
-    return {
-        firstTouch,
-        lastTouch,
-
-        metrikaClientId:
-            normalizeAttributionValue(
-                input?.metrikaClientId,
-                120
-            ),
-
-        yclid:
-            normalizeAttributionValue(
-                input?.yclid ||
-                lastTouch.yclid ||
-                firstTouch.yclid,
-                300
-            )
-    };
-}
-
-function getPrimaryAttributionTouch(attribution) {
-    return normalizeAttribution(
-        attribution
-    ).lastTouch;
-}
-
-function buildAttributionLines(attribution) {
-    const normalized =
-        normalizeAttribution(
-            attribution
-        );
-
-    const current =
-        normalized.lastTouch;
-
-    const first =
-        normalized.firstTouch;
-
-    const source = [
-        current.source,
-        current.medium
-    ]
-        .filter(Boolean)
-        .join(' / ');
-
-    const firstSource = [
-        first.source,
-        first.medium
-    ]
-        .filter(Boolean)
-        .join(' / ');
-
-    return [
-        source
-            ? `Источник: ${source}`
-            : null,
-
-        current.campaign
-            ? `Кампания: ${current.campaign}`
-            : null,
-
-        current.content
-            ? `Контент: ${current.content}`
-            : null,
-
-        current.startParam
-            ? `Telegram start: ${current.startParam}`
-            : null,
-
-        current.platform
-            ? `Платформа: ${current.platform}`
-            : null,
-
-        current.chatType
-            ? `Telegram context: ${current.chatType}`
-            : null,
-
-        current.referrer
-            ? `Referrer: ${current.referrer}`
-            : null,
-
-        (
-            firstSource &&
-            firstSource !== source
-        )
-            ? `Первый источник: ${firstSource}`
-            : null
-    ]
-        .filter(Boolean);
-}
-
-function buildBitrixSourceDescription(attribution) {
-    const current =
-        getPrimaryAttributionTouch(
-            attribution
-        );
-
-    const parts = [
-        current.source,
-        current.medium,
-        current.startParam,
-        current.campaign,
-        current.content
-    ]
-        .filter(Boolean);
-
-    return normalizeAttributionValue(
-        parts.length
-            ? `RTN.PRO · ${parts.join(' · ')}`
-            : 'Интернет-магазин RTN.PRO',
-        250
-    );
 }
 
 const RAW_YOOKASSA_SHOP_ID =
@@ -296,24 +73,7 @@ const TELEGRAM_CHAT_ID =
     );
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
-
-const YANDEX_METRIKA_COUNTER_ID =
-    normalizeEnvValue(
-        process.env.YANDEX_METRIKA_COUNTER_ID ||
-        '109277400'
-    );
-
-const YANDEX_METRIKA_OAUTH_TOKEN =
-    normalizeEnvValue(
-        process.env.YANDEX_METRIKA_OAUTH_TOKEN ||
-        ''
-    );
-
-const YANDEX_METRIKA_PAID_GOAL =
-    normalizeEnvValue(
-        process.env.YANDEX_METRIKA_PAID_GOAL ||
-        'order_paid'
-    );
+const PUBLIC_API_URL = (process.env.PUBLIC_API_URL || 'https://rhino-api-yrfq.onrender.com').replace(/\/$/, '');
 
 const BITRIX_WEBHOOK_URL =
     (process.env.BITRIX_WEBHOOK_URL || '').replace(/\/+$/, '');
@@ -340,6 +100,77 @@ const YCP_ACCESS_TOKEN =
         process.env.YCP_ACCESS_TOKEN ||
         ''
     );
+
+const BLOG_ADMIN_TOKEN = normalizeEnvValue(process.env.BLOG_ADMIN_TOKEN || '');
+const BLOG_DATA_FILE = process.env.BLOG_DATA_FILE || path.join(__dirname, 'data', 'articles.json');
+
+function readBlogArticles() {
+    try {
+        if (!fs.existsSync(BLOG_DATA_FILE)) return [];
+        const parsed = JSON.parse(fs.readFileSync(BLOG_DATA_FILE, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+        console.error('Blog articles read error:', error.message);
+        return [];
+    }
+}
+
+function writeBlogArticles(articles) {
+    fs.mkdirSync(path.dirname(BLOG_DATA_FILE), { recursive: true });
+    const temporaryFile = `${BLOG_DATA_FILE}.tmp`;
+    fs.writeFileSync(temporaryFile, JSON.stringify(articles, null, 2), 'utf8');
+    fs.renameSync(temporaryFile, BLOG_DATA_FILE);
+}
+
+function requireBlogAdmin(req, res, next) {
+    if (!BLOG_ADMIN_TOKEN) {
+        return res.status(503).json({ error: 'BLOG_ADMIN_TOKEN не настроен на сервере' });
+    }
+    const supplied = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+    const expected = Buffer.from(BLOG_ADMIN_TOKEN);
+    const actual = Buffer.from(supplied);
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+        return res.status(401).json({ error: 'Неверный ключ администратора' });
+    }
+    next();
+}
+
+function normalizeBlogArticle(input, existing = {}) {
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const slug = clean(input.slug).toLowerCase();
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+        throw new Error('Slug должен состоять из латинских букв, цифр и дефисов');
+    }
+    const title = clean(input.title);
+    const excerpt = clean(input.excerpt);
+    const imageUrl = clean(input.imageUrl);
+    const content = (Array.isArray(input.content) ? input.content : [])
+        .map(item => clean(item))
+        .filter(Boolean);
+    if (!title || !excerpt || !imageUrl || content.length === 0) {
+        throw new Error('Заполните заголовок, описание, изображение и текст статьи');
+    }
+    const now = new Date().toISOString();
+    const status = input.status === 'published' ? 'published' : 'draft';
+    return {
+        ...existing,
+        id: existing.id || `article-${Date.now()}`,
+        slug,
+        category: clean(input.category) || 'НОВОСТИ',
+        categoryColor: /^#[0-9a-f]{6}$/i.test(input.categoryColor || '') ? input.categoryColor : '#00F0FF',
+        title,
+        excerpt,
+        readTime: clean(input.readTime) || `${Math.max(1, Math.ceil(content.join(' ').split(/\s+/).length / 180))} МИН`,
+        date: clean(input.date) || new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Europe/Moscow' }).format(new Date()).toUpperCase(),
+        datePublished: existing.datePublished || (status === 'published' ? now : ''),
+        dateModified: now,
+        imageUrl,
+        tags: (Array.isArray(input.tags) ? input.tags : String(input.tags || '').split(','))
+            .map(item => clean(item).toUpperCase()).filter(Boolean).slice(0, 10),
+        content,
+        status
+    };
+}
 
 const YCP_API_TOKEN =
     normalizeEnvValue(
@@ -378,16 +209,6 @@ const {
     YCP_PRODUCTS,
     YCP_PRODUCTS_BY_ID
 } = require('./ycp-catalog');
-
-const {
-    RTN_BITRIX_PRODUCTS_BY_ID
-} = require('./rtn-bitrix-catalog');
-
-const BITRIX_SYNC_PRODUCT_IMAGES =
-    String(process.env.BITRIX_SYNC_PRODUCT_IMAGES || '1') !== '0';
-
-const BITRIX_FORCE_PRODUCT_IMAGES =
-    String(process.env.BITRIX_FORCE_PRODUCT_IMAGES || '') === '1';
 
 
 // ============================================================
@@ -683,7 +504,7 @@ async function findBitrixCatalogProductByExternalId(externalId, iblockId) {
     const result = await bitrixCall(
         'catalog.product.list',
         {
-            select: ['id', 'iblockId', 'name', 'xmlId', 'previewPicture', 'detailPicture'],
+            select: ['id', 'iblockId', 'name', 'xmlId'],
             filter: {
                 iblockId,
                 xmlId: productXmlId(externalId)
@@ -695,356 +516,6 @@ async function findBitrixCatalogProductByExternalId(externalId, iblockId) {
 
     const products = result?.products || [];
     return products[0] || null;
-}
-
-const RTN_BITRIX_PRODUCT_PROPERTY_DEFS = [
-    {
-        key: 'category',
-        code: 'RTN_CATEGORY',
-        name: 'RTN: категория',
-        propertyType: 'S',
-        rowCount: 1,
-        searchable: 'Y',
-        filtrable: 'Y'
-    },
-    {
-        key: 'flavor',
-        code: 'RTN_FLAVOR',
-        name: 'RTN: вкус / вариант',
-        propertyType: 'S',
-        rowCount: 1,
-        searchable: 'Y',
-        filtrable: 'Y'
-    },
-    {
-        key: 'labelTitle',
-        code: 'RTN_LABEL_TITLE',
-        name: 'RTN: официальное наименование с этикетки',
-        propertyType: 'S',
-        rowCount: 3,
-        searchable: 'Y',
-        filtrable: 'N'
-    },
-    {
-        key: 'form',
-        code: 'RTN_FORM',
-        name: 'RTN: форма выпуска',
-        propertyType: 'S',
-        rowCount: 2,
-        searchable: 'Y',
-        filtrable: 'N'
-    },
-    {
-        key: 'servingSize',
-        code: 'RTN_SERVING_SIZE',
-        name: 'RTN: размер порции',
-        propertyType: 'S',
-        rowCount: 1,
-        searchable: 'N',
-        filtrable: 'Y'
-    },
-    {
-        key: 'servings',
-        code: 'RTN_SERVINGS',
-        name: 'RTN: количество порций',
-        propertyType: 'N',
-        rowCount: 1,
-        searchable: 'N',
-        filtrable: 'Y'
-    },
-    {
-        key: 'shelfLife',
-        code: 'RTN_SHELF_LIFE',
-        name: 'RTN: срок годности',
-        propertyType: 'S',
-        rowCount: 1,
-        searchable: 'N',
-        filtrable: 'Y'
-    },
-    {
-        key: 'packageInfo',
-        code: 'RTN_PACKAGE',
-        name: 'RTN: упаковка',
-        propertyType: 'S',
-        rowCount: 1,
-        searchable: 'N',
-        filtrable: 'Y'
-    }
-];
-
-let bitrixCatalogPropertyIds = null;
-let bitrixCatalogPropertySyncPromise = null;
-const bitrixAssetCache = new Map();
-
-function getRtnBitrixMeta(externalId) {
-    return RTN_BITRIX_PRODUCTS_BY_ID[String(externalId || '').trim()] || null;
-}
-
-function joinBitrixProductDetailSections(meta) {
-    if (!meta) return '';
-
-    const sections = [
-        ['ОФИЦИАЛЬНОЕ НАИМЕНОВАНИЕ', meta.labelTitle],
-        ['ФОРМА ВЫПУСКА', meta.form],
-        ['ОБЛАСТЬ ПРИМЕНЕНИЯ', meta.application],
-        ['СОСТАВ', meta.composition],
-        ['ПИЩЕВАЯ ЦЕННОСТЬ / АКТИВНЫЕ ВЕЩЕСТВА', meta.nutrition],
-        ['РЕКОМЕНДАЦИИ ПО ПРИМЕНЕНИЮ', meta.usage],
-        ['ПРОДОЛЖИТЕЛЬНОСТЬ ПРИЕМА', meta.duration],
-        ['ПРОТИВОПОКАЗАНИЯ', meta.contraindications],
-        ['УСЛОВИЯ ХРАНЕНИЯ', meta.storage],
-        ['СРОК ГОДНОСТИ', meta.shelfLife]
-    ].filter(([, value]) => String(value || '').trim());
-
-    return sections
-        .map(([title, value]) => `${title}\n${String(value).trim()}`)
-        .join('\n\n');
-}
-
-function getRtnBitrixPreviewText(meta) {
-    if (!meta) return '';
-
-    return [
-        meta.category,
-        meta.flavor,
-        meta.servingSize ? `Порция: ${meta.servingSize}` : '',
-        Number.isFinite(Number(meta.servings)) ? `Порций: ${meta.servings}` : '',
-        meta.packageInfo || ''
-    ]
-        .filter(Boolean)
-        .join(' · ');
-}
-
-async function ensureRtnBitrixCatalogProperties(iblockId) {
-    if (bitrixCatalogPropertyIds) {
-        return bitrixCatalogPropertyIds;
-    }
-
-    if (bitrixCatalogPropertySyncPromise) {
-        return bitrixCatalogPropertySyncPromise;
-    }
-
-    bitrixCatalogPropertySyncPromise = (async () => {
-        const result = await bitrixCall(
-            'catalog.productProperty.list',
-            {
-                select: [
-                    'id',
-                    'iblockId',
-                    'name',
-                    'code',
-                    'propertyType',
-                    'userType',
-                    'multiple'
-                ],
-                filter: { iblockId },
-                order: { id: 'asc' },
-                start: 0
-            }
-        );
-
-        const existing = result?.productProperties || [];
-        const byCode = new Map(
-            existing
-                .filter(item => item?.code)
-                .map(item => [String(item.code).toUpperCase(), item])
-        );
-
-        const ids = {};
-
-        for (let index = 0; index < RTN_BITRIX_PRODUCT_PROPERTY_DEFS.length; index += 1) {
-            const definition = RTN_BITRIX_PRODUCT_PROPERTY_DEFS[index];
-            const found = byCode.get(definition.code);
-
-            if (found?.id) {
-                ids[definition.key] = Number(found.id);
-                continue;
-            }
-
-            const added = await bitrixCall(
-                'catalog.productProperty.add',
-                {
-                    fields: {
-                        iblockId,
-                        name: definition.name,
-                        code: definition.code,
-                        propertyType: definition.propertyType,
-                        multiple: 'N',
-                        isRequired: 'N',
-                        active: 'Y',
-                        sort: 7000 + index * 10,
-                        rowCount: definition.rowCount || 1,
-                        colCount: 60,
-                        searchable: definition.searchable || 'N',
-                        filtrable: definition.filtrable || 'N'
-                    }
-                }
-            );
-
-            const propertyId = Number(
-                added?.productProperty?.id ||
-                0
-            );
-
-            if (!propertyId) {
-                throw new Error(
-                    `Bitrix24 не вернул ID свойства ${definition.code}`
-                );
-            }
-
-            ids[definition.key] = propertyId;
-            await sleep(180);
-        }
-
-        bitrixCatalogPropertyIds = ids;
-        return ids;
-    })().finally(() => {
-        bitrixCatalogPropertySyncPromise = null;
-    });
-
-    return bitrixCatalogPropertySyncPromise;
-}
-
-function buildRtnBitrixPropertyFields(meta, propertyIds) {
-    const fields = {};
-    if (!meta || !propertyIds) return fields;
-
-    for (const definition of RTN_BITRIX_PRODUCT_PROPERTY_DEFS) {
-        const propertyId = propertyIds[definition.key];
-        if (!propertyId) continue;
-
-        const rawValue = meta[definition.key];
-        if (rawValue === undefined || rawValue === null || rawValue === '') {
-            continue;
-        }
-
-        const value = definition.propertyType === 'N'
-            ? Number(rawValue)
-            : String(rawValue);
-
-        if (definition.propertyType === 'N' && !Number.isFinite(value)) {
-            continue;
-        }
-
-        // catalog.product.update ожидает объект { value } для пользовательских свойств.
-        fields[`property${propertyId}`] = { value };
-    }
-
-    return fields;
-}
-
-function getAssetFileName(assetPath) {
-    try {
-        return decodeURIComponent(
-            new URL(assetPath, FRONTEND_URL).pathname.split('/').pop() || 'image.jpg'
-        );
-    } catch {
-        return String(assetPath || 'image.jpg').split('/').pop() || 'image.jpg';
-    }
-}
-
-async function loadRtnAssetFileData(assetPath) {
-    if (!assetPath) return null;
-
-    const url = new URL(assetPath, `${FRONTEND_URL.replace(/\/+$/, '')}/`).toString();
-
-    if (bitrixAssetCache.has(url)) {
-        return bitrixAssetCache.get(url);
-    }
-
-    const response = await axios.get(
-        url,
-        {
-            responseType: 'arraybuffer',
-            timeout: 20000,
-            maxContentLength: 12 * 1024 * 1024,
-            maxBodyLength: 12 * 1024 * 1024
-        }
-    );
-
-    const fileData = [
-        getAssetFileName(assetPath),
-        Buffer.from(response.data).toString('base64')
-    ];
-
-    bitrixAssetCache.set(url, fileData);
-    return fileData;
-}
-
-async function syncRtnBitrixProductImages({ productId, existingProduct, meta }) {
-    if (!BITRIX_SYNC_PRODUCT_IMAGES || !meta || !productId) {
-        return;
-    }
-
-    const mainImageFields = {};
-    const needPreview = BITRIX_FORCE_PRODUCT_IMAGES || !existingProduct?.previewPicture;
-    const needDetail = BITRIX_FORCE_PRODUCT_IMAGES || !existingProduct?.detailPicture;
-
-    if (meta.imageUrl && (needPreview || needDetail)) {
-        const fileData = await loadRtnAssetFileData(meta.imageUrl);
-
-        if (fileData) {
-            if (needPreview) {
-                mainImageFields.previewPicture = { fileData };
-            }
-
-            if (needDetail) {
-                mainImageFields.detailPicture = { fileData };
-            }
-        }
-    }
-
-    if (Object.keys(mainImageFields).length) {
-        await bitrixCall(
-            'catalog.product.update',
-            {
-                id: productId,
-                fields: mainImageFields
-            }
-        );
-    }
-
-    if (!meta.labelImageUrl) {
-        return;
-    }
-
-    const imageListResult = await bitrixCall(
-        'catalog.productImage.list',
-        {
-            productId,
-            select: [
-                'id',
-                'name',
-                'productId',
-                'type'
-            ],
-            start: 0
-        }
-    );
-
-    const expectedName = getAssetFileName(meta.labelImageUrl).toLowerCase();
-    const existingImages = imageListResult?.productImages || [];
-    const labelAlreadyUploaded = existingImages.some(image =>
-        String(image?.type || '').toUpperCase() === 'MORE_PHOTO' &&
-        String(image?.name || '').toLowerCase() === expectedName
-    );
-
-    if (!labelAlreadyUploaded) {
-        const fileContent = await loadRtnAssetFileData(meta.labelImageUrl);
-
-        if (fileContent) {
-            await bitrixCall(
-                'catalog.productImage.add',
-                {
-                    fields: {
-                        productId,
-                        type: 'MORE_PHOTO'
-                    },
-                    fileContent
-                }
-            );
-        }
-    }
 }
 
 async function upsertBitrixProductPrice({ productId, catalogGroupId, price }) {
@@ -1098,12 +569,6 @@ async function ensureBitrixCatalogProduct(rtnProduct) {
     const { iblockId, catalogGroupId } =
         await getBitrixCatalogContext();
 
-    const meta =
-        getRtnBitrixMeta(rtnProduct.externalId);
-
-    const propertyIds =
-        await ensureRtnBitrixCatalogProperties(iblockId);
-
     const existing =
         await findBitrixCatalogProductByExternalId(
             rtnProduct.externalId,
@@ -1112,22 +577,15 @@ async function ensureBitrixCatalogProduct(rtnProduct) {
 
     let productId = existing?.id ? Number(existing.id) : 0;
 
-    const detailText =
-        meta
-            ? joinBitrixProductDetailSections(meta)
-            : `Товар интернет-магазина RTN.PRO. ${rtnProduct.name}, вариант: ${rtnProduct.flavor}.`;
-
     const fields = {
         name: productDisplayName(rtnProduct),
         active: 'Y',
         code: productCode(rtnProduct.externalId),
         xmlId: productXmlId(rtnProduct.externalId),
         canBuyZero: 'Y',
-        previewText: meta ? getRtnBitrixPreviewText(meta) : '',
-        previewTextType: 'text',
-        detailText,
-        detailTextType: 'text',
-        ...buildRtnBitrixPropertyFields(meta, propertyIds)
+        detailText:
+            `Товар интернет-магазина RTN.PRO. ${rtnProduct.name}, вариант: ${rtnProduct.flavor}.`,
+        detailTextType: 'text'
     };
 
     if (productId) {
@@ -1167,22 +625,6 @@ async function ensureBitrixCatalogProduct(rtnProduct) {
         catalogGroupId,
         price: rtnProduct.price
     });
-
-    if (meta) {
-        try {
-            await syncRtnBitrixProductImages({
-                productId,
-                existingProduct: existing,
-                meta
-            });
-        } catch (error) {
-            // Ошибка картинки не должна ломать товар или заказ.
-            console.error(
-                `Bitrix24 image sync failed [${rtnProduct.externalId}]:`,
-                error.response?.data || error.message
-            );
-        }
-    }
 
     bitrixProductIdCache.set(rtnProduct.externalId, productId);
     return productId;
@@ -1268,7 +710,9 @@ const RTN_PROMO_AMBASSADORS = {
     RHINO: 'Роман Халиулин — Носорог',
     BIGGY: 'Вячеслав Коростелев — Бегемот',
     BATR: 'Александр Батраков — Сибирский Медведь',
-    DOC: 'Богдан Душин — Доктор'
+    DOC: 'Богдан Душин — Доктор',
+    VEPR: 'Протокол Вепрь',
+    SJ10: 'Протокол SJ'
 };
 
 const RTN_KNOWN_PROMO_CODES = [
@@ -1276,7 +720,12 @@ const RTN_KNOWN_PROMO_CODES = [
     'RHINO',
     'BIGGY',
     'BATR',
-    'DOC'
+    'DOC',
+    'TOPLIVO10',
+    'LION',
+    'PANTERA',
+    'VEPR',
+    'SJ10'
 ];
 
 const bitrixEnumOptionPromises = new Map();
@@ -2169,8 +1618,7 @@ async function applyOrderFieldsToBitrixDeal({
     amount,
     items,
     delivery,
-    comment,
-    attribution
+    comment
 }) {
     if (!dealId) {
         return;
@@ -2228,14 +1676,8 @@ async function applyOrderFieldsToBitrixDeal({
 
         COMMENTS:
             buildBitrixDealComment({
-                items,
-                attribution
+                items
             }),
-
-        SOURCE_DESCRIPTION:
-            buildBitrixSourceDescription(
-                attribution
-            ),
 
         OPPORTUNITY:
             financials.finalAmount,
@@ -2661,8 +2103,7 @@ async function findExistingBitrixDeal(orderId) {
 }
 
 function buildBitrixDealComment({
-    items,
-    attribution
+    items
 }) {
     const lines = [
         'Состав заказа:'
@@ -2690,21 +2131,9 @@ function buildBitrixDealComment({
             }
         );
 
-    const attributionLines =
-        buildAttributionLines(
-            attribution
-        );
-
-    if (attributionLines.length) {
-        lines.push(
-            '',
-            'Источник заказа:',
-            ...attributionLines
-        );
-    }
-
     return lines.join('\n');
 }
+
 
 async function buildBitrixProductRows(
     items,
@@ -2899,8 +2328,7 @@ async function syncOrderToBitrix({
     customer,
     delivery,
     comment,
-    promoCode,
-    attribution
+    promoCode
 }) {
     if (!isBitrixConfigured()) {
         console.warn(
@@ -2957,8 +2385,7 @@ async function syncOrderToBitrix({
                 amount,
                 items,
                 delivery,
-                comment,
-                attribution
+                comment
             });
         } catch (error) {
             console.error(
@@ -3025,9 +2452,7 @@ async function syncOrderToBitrix({
             'WEB',
 
         sourceDescription:
-            buildBitrixSourceDescription(
-                attribution
-            ),
+            'Интернет-магазин RTN.PRO',
 
         originatorId:
             'RTN.PRO',
@@ -3037,8 +2462,7 @@ async function syncOrderToBitrix({
 
         comments:
             buildBitrixDealComment({
-                items,
-                attribution
+                items
             })
     };
 
@@ -3095,8 +2519,7 @@ async function syncOrderToBitrix({
             amount,
             items,
             delivery,
-            comment,
-            attribution
+            comment
         });
     } catch (error) {
         console.error(
@@ -3201,217 +2624,6 @@ async function getYooKassaPayment(paymentId) {
     return response.data;
 }
 
-// ============================================================
-// YANDEX METRIKA: OFFLINE PAID CONVERSION
-// payment.succeeded -> order_paid
-// ============================================================
-
-const metrikaPaidConversions = new Map();
-const METRIKA_PAID_DEDUPE_TTL = 7 * 24 * 60 * 60 * 1000;
-
-function cleanupMetrikaPaidConversions() {
-    const now = Date.now();
-
-    for (const [paymentId, timestamp] of metrikaPaidConversions.entries()) {
-        if (now - Number(timestamp || 0) > METRIKA_PAID_DEDUPE_TTL) {
-            metrikaPaidConversions.delete(paymentId);
-        }
-    }
-}
-
-function csvCell(value) {
-    return `"${String(value ?? '').replace(/"/g, '""')}"`;
-}
-
-function isRetryableMetrikaError(error) {
-    const status = Number(error?.response?.status || 0);
-
-    return (
-        error?.code === 'ECONNABORTED' ||
-        error?.code === 'ECONNRESET' ||
-        error?.code === 'ETIMEDOUT' ||
-        status === 429 ||
-        status >= 500
-    );
-}
-
-async function sendPaidConversionToMetrika(payment) {
-    const paymentId =
-        normalizeAttributionValue(
-            payment?.id,
-            120
-        );
-
-    cleanupMetrikaPaidConversions();
-
-    if (
-        paymentId &&
-        metrikaPaidConversions.has(paymentId)
-    ) {
-        return {
-            ok: true,
-            deduped: true
-        };
-    }
-
-    if (
-        !YANDEX_METRIKA_COUNTER_ID ||
-        !YANDEX_METRIKA_OAUTH_TOKEN
-    ) {
-        console.warn(
-            'Yandex Metrika offline conversion skipped: YANDEX_METRIKA_COUNTER_ID or YANDEX_METRIKA_OAUTH_TOKEN is not configured'
-        );
-
-        return {
-            ok: false,
-            skipped: true,
-            reason: 'not_configured'
-        };
-    }
-
-    const metadata =
-        payment?.metadata || {};
-
-    const clientId =
-        normalizeAttributionValue(
-            metadata.metrikaClientId,
-            120
-        );
-
-    const yclid =
-        normalizeAttributionValue(
-            metadata.yclid,
-            300
-        );
-
-    const purchaseId =
-        normalizeAttributionValue(
-            metadata.orderId || paymentId,
-            180
-        );
-
-    if (!clientId && !yclid && !purchaseId) {
-        console.warn(
-            `Yandex Metrika offline conversion skipped for payment ${paymentId || 'UNKNOWN'}: no ClientId, Yclid or PurchaseId`
-        );
-
-        return {
-            ok: false,
-            skipped: true,
-            reason: 'no_identifier'
-        };
-    }
-
-    const amount =
-        Number(payment?.amount?.value || 0);
-
-    const currency =
-        normalizeAttributionValue(
-            payment?.amount?.currency || 'RUB',
-            3
-        ).toUpperCase() || 'RUB';
-
-    const rawDate =
-        payment?.captured_at ||
-        payment?.created_at ||
-        '';
-
-    const parsedTime =
-        rawDate
-            ? Math.floor(new Date(rawDate).getTime() / 1000)
-            : 0;
-
-    // Метрика не принимает DateTime из будущего. Оставляем минимум 1 секунду запаса.
-    const nowSeconds =
-        Math.floor(Date.now() / 1000) - 1;
-
-    const dateTime =
-        Number.isFinite(parsedTime) && parsedTime > 0
-            ? Math.min(parsedTime, nowSeconds)
-            : nowSeconds;
-
-    const csv = [
-        'ClientId,Yclid,PurchaseId,Target,DateTime,Price,Currency',
-        [
-            clientId,
-            yclid,
-            purchaseId,
-            YANDEX_METRIKA_PAID_GOAL,
-            dateTime,
-            amount > 0 ? amount.toFixed(2) : '',
-            currency
-        ].map(csvCell).join(',')
-    ].join('\n');
-
-    const boundary =
-        `----RTNMetrika${crypto.randomBytes(12).toString('hex')}`;
-
-    const multipartBody =
-        Buffer.concat([
-            Buffer.from(
-                `--${boundary}\r\n` +
-                'Content-Disposition: form-data; name="file"; filename="offline-conversions.csv"\r\n' +
-                'Content-Type: text/csv; charset=UTF-8\r\n\r\n',
-                'utf8'
-            ),
-            Buffer.from(csv, 'utf8'),
-            Buffer.from(
-                `\r\n--${boundary}--\r\n`,
-                'utf8'
-            )
-        ]);
-
-    try {
-        const response =
-            await axios.post(
-                `https://api-metrika.yandex.net/management/v1/counter/${encodeURIComponent(YANDEX_METRIKA_COUNTER_ID)}/offline_conversions/upload`,
-                multipartBody,
-                {
-                    headers: {
-                        Authorization:
-                            `OAuth ${YANDEX_METRIKA_OAUTH_TOKEN}`,
-                        'Content-Type':
-                            `multipart/form-data; boundary=${boundary}`
-                    },
-                    timeout: 15000,
-                    maxBodyLength: Infinity
-                }
-            );
-
-        if (paymentId) {
-            metrikaPaidConversions.set(
-                paymentId,
-                Date.now()
-            );
-        }
-
-        const uploadId =
-            response?.data?.uploading?.id ||
-            response?.data?.id ||
-            null;
-
-        console.log(
-            `Yandex Metrika order_paid uploaded: payment=${paymentId || 'UNKNOWN'}, order=${purchaseId || 'UNKNOWN'}, clientId=${clientId ? 'yes' : 'no'}, yclid=${yclid ? 'yes' : 'no'}, upload=${uploadId || 'UNKNOWN'}`
-        );
-
-        return {
-            ok: true,
-            uploadId
-        };
-    } catch (error) {
-        error.metrikaRetryable =
-            isRetryableMetrikaError(error);
-
-        console.error(
-            'Yandex Metrika offline conversion error:',
-            error.response?.data ||
-            error.message
-        );
-
-        throw error;
-    }
-}
-
 async function moveBitrixDealToPaid({ dealId, payment }) {
     if (!dealId) {
         throw new Error('Не удалось определить сделку Bitrix24');
@@ -3464,10 +2676,7 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             `YooKassa webhook received: event=${event || 'UNKNOWN'}, payment=${notifiedPayment?.id || 'NO_ID'}`
         );
 
-        if (
-            event !== 'payment.succeeded' &&
-            event !== 'payment.canceled'
-        ) {
+        if (event !== 'payment.succeeded') {
             return res.status(200).json({
                 ok: true,
                 ignored: true
@@ -3486,50 +2695,6 @@ app.post('/api/yookassa/webhook', async (req, res) => {
         // а не доверяем одному только телу webhook.
         const payment =
             await getYooKassaPayment(paymentId);
-
-        if (event === 'payment.canceled') {
-            if (payment?.status !== 'canceled') {
-                return res.status(409).json({
-                    error: 'Статус отмены платежа не подтвержден ЮKassa'
-                });
-            }
-
-            let telegramDeliveryError = null;
-
-            try {
-                const sent =
-                    await sendCanceledOrderToTelegram(
-                        payment
-                    );
-
-                if (sent) {
-                    console.log(
-                        `YooKassa payment ${paymentId}: canceled notification sent to Telegram`
-                    );
-                }
-            } catch (telegramError) {
-                telegramDeliveryError = telegramError;
-                console.error(
-                    'RTN canceled payment Telegram error:',
-                    telegramError.response?.data ||
-                    telegramError.message
-                );
-            }
-
-            // Если Telegram временно недоступен, просим ЮKassa повторить webhook.
-            if (telegramDeliveryError) {
-                return res.status(502).json({
-                    ok: false,
-                    retry: true,
-                    error: 'Telegram canceled notification delivery failed'
-                });
-            }
-
-            return res.status(200).json({
-                ok: true,
-                canceled: true
-            });
-        }
 
         if (
             payment?.status !== 'succeeded' ||
@@ -3562,19 +2727,6 @@ app.post('/api/yookassa/webhook', async (req, res) => {
                 telegramError.response?.data ||
                 telegramError.message
             );
-        }
-
-        // Фиксируем реальную оплату как офлайн-конверсию order_paid.
-        // Так цель попадёт в Метрику даже если покупатель закрыл ЮKassa
-        // и не вернулся на rtn.pro.
-        let metrikaDeliveryError = null;
-
-        try {
-            await sendPaidConversionToMetrika(
-                payment
-            );
-        } catch (metrikaError) {
-            metrikaDeliveryError = metrikaError;
         }
 
         // Bitrix24 сейчас может быть недоступен по тарифу.
@@ -3618,16 +2770,6 @@ app.post('/api/yookassa/webhook', async (req, res) => {
                 bitrixError.response?.data ||
                 bitrixError.message
             );
-        }
-
-        // При временной ошибке API Метрики просим ЮKassa повторить webhook.
-        // 4xx (например, неверный OAuth) логируем, но не запускаем бесконечные повторы.
-        if (metrikaDeliveryError?.metrikaRetryable) {
-            return res.status(502).json({
-                ok: false,
-                retry: true,
-                error: 'Yandex Metrika offline conversion delivery failed'
-            });
         }
 
         // Если Telegram временно недоступен, не подтверждаем webhook как
@@ -3836,6 +2978,96 @@ function setDeliveryCached(key, data) {
 // HEALTH
 // ============================================================
 
+app.get('/api/articles', (req, res) => {
+    const articles = readBlogArticles()
+        .filter(article => article.status === 'published')
+        .sort((a, b) => String(b.datePublished).localeCompare(String(a.datePublished)));
+    res.json(articles);
+});
+
+app.get('/api/articles/:slug', (req, res) => {
+    const article = readBlogArticles().find(item =>
+        item.status === 'published' && item.slug === String(req.params.slug || '').toLowerCase()
+    );
+    if (!article) return res.status(404).json({ error: 'Статья не найдена' });
+    res.json(article);
+});
+
+app.get('/api/admin/articles', requireBlogAdmin, (req, res) => {
+    res.json(readBlogArticles().sort((a, b) => String(b.dateModified).localeCompare(String(a.dateModified))));
+});
+
+app.get('/api/blog-images/:filename', (req, res) => {
+    const filename = path.basename(String(req.params.filename || ''));
+    if (!/^[a-z0-9-]+\.(?:jpg|jpeg|png|webp)$/i.test(filename)) {
+        return res.status(400).json({ error: 'Некорректное имя файла' });
+    }
+    const file = path.join(path.dirname(BLOG_DATA_FILE), 'images', filename);
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'Изображение не найдено' });
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(file);
+});
+
+app.post('/api/admin/article-images', requireBlogAdmin, (req, res) => {
+    try {
+        const match = String(req.body?.dataUrl || '').match(/^data:image\/(jpeg|png|webp);base64,([a-z0-9+/=]+)$/i);
+        if (!match) return res.status(400).json({ error: 'Поддерживаются JPG, PNG и WEBP' });
+        const buffer = Buffer.from(match[2], 'base64');
+        if (!buffer.length || buffer.length > 8 * 1024 * 1024) {
+            return res.status(400).json({ error: 'Размер изображения должен быть не больше 8 МБ' });
+        }
+        const extension = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+        const filename = `${Date.now()}-${crypto.randomBytes(5).toString('hex')}.${extension}`;
+        const directory = path.join(path.dirname(BLOG_DATA_FILE), 'images');
+        fs.mkdirSync(directory, { recursive: true });
+        fs.writeFileSync(path.join(directory, filename), buffer);
+        res.status(201).json({ url: `${PUBLIC_API_URL}/api/blog-images/${filename}` });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+app.post('/api/admin/articles', requireBlogAdmin, (req, res) => {
+    try {
+        const articles = readBlogArticles();
+        const article = normalizeBlogArticle(req.body || {});
+        if (articles.some(item => item.slug === article.slug)) {
+            return res.status(409).json({ error: 'Статья с таким slug уже существует' });
+        }
+        articles.push(article);
+        writeBlogArticles(articles);
+        res.status(201).json(article);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+app.put('/api/admin/articles/:id', requireBlogAdmin, (req, res) => {
+    try {
+        const articles = readBlogArticles();
+        const index = articles.findIndex(item => String(item.id) === String(req.params.id));
+        if (index < 0) return res.status(404).json({ error: 'Статья не найдена' });
+        const article = normalizeBlogArticle(req.body || {}, articles[index]);
+        if (articles.some((item, itemIndex) => itemIndex !== index && item.slug === article.slug)) {
+            return res.status(409).json({ error: 'Статья с таким slug уже существует' });
+        }
+        if (article.status === 'published' && !article.datePublished) article.datePublished = new Date().toISOString();
+        articles[index] = article;
+        writeBlogArticles(articles);
+        res.json(article);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+app.delete('/api/admin/articles/:id', requireBlogAdmin, (req, res) => {
+    const articles = readBlogArticles();
+    const filtered = articles.filter(item => String(item.id) !== String(req.params.id));
+    if (filtered.length === articles.length) return res.status(404).json({ error: 'Статья не найдена' });
+    writeBlogArticles(filtered);
+    res.json({ ok: true });
+});
+
 app.get('/api/health', (req, res) => {
     // Возвращаем health сразу, а токен СДЭК прогреваем параллельно.
     // Поэтому открытие checkout будит Render и заодно готовит СДЭК к поиску.
@@ -3854,9 +3086,6 @@ app.get('/api/health', (req, res) => {
         bitrixStageNew: BITRIX_STAGE_NEW,
         bitrixStagePaid: BITRIX_STAGE_PAID,
         bitrixProductsCached: bitrixProductIdCache.size,
-        bitrixCatalogMetadataSku: Object.keys(RTN_BITRIX_PRODUCTS_BY_ID).length,
-        bitrixCatalogPropertiesReady: Boolean(bitrixCatalogPropertyIds),
-        bitrixProductImagesSync: BITRIX_SYNC_PRODUCT_IMAGES,
         bitrixPromoTracking: bitrixPromoFieldsReady,
         bitrixOrderFieldsReady: bitrixOrderFieldsReady,
         launchNotifyConfigured: Boolean(
@@ -4045,18 +3274,12 @@ async function sendOrderAttemptToTelegram({
     delivery,
     orderId,
     promoCode,
-    comment,
-    attribution
+    comment
 }) {
     const deliveryAddress =
         compactTelegramValue(
             delivery?.address ||
             delivery?.city
-        );
-
-    const attributionLines =
-        buildAttributionLines(
-            attribution
         );
 
     const text = [
@@ -4073,9 +3296,6 @@ async function sendOrderAttemptToTelegram({
         comment
             ? `Комментарий: ${compactTelegramValue(comment)}`
             : null,
-        ...(attributionLines.length
-            ? ['', 'Источник:', ...attributionLines]
-            : []),
         '',
         'Товары:',
         buildTelegramItemsSummary(items)
@@ -4085,253 +3305,6 @@ async function sendOrderAttemptToTelegram({
 
     await sendTelegramText(text);
 }
-
-
-const orderAttemptTelegramNotifications =
-    new Map();
-
-const orderAttemptTelegramInFlight =
-    new Set();
-
-const ORDER_ATTEMPT_TELEGRAM_TTL =
-    6 * 60 * 60 * 1000;
-
-function cleanupOrderAttemptTelegramNotifications() {
-    const now = Date.now();
-
-    for (
-        const [key, timestamp]
-        of orderAttemptTelegramNotifications.entries()
-    ) {
-        if (
-            now - timestamp >
-            ORDER_ATTEMPT_TELEGRAM_TTL
-        ) {
-            orderAttemptTelegramNotifications.delete(
-                key
-            );
-        }
-    }
-}
-
-async function sendOrderAttemptToTelegramOnce({
-    paymentId,
-    ...payload
-}) {
-    cleanupOrderAttemptTelegramNotifications();
-
-    const key =
-        compactTelegramValue(
-            payload?.orderId || paymentId
-        );
-
-    if (
-        key !== '—' &&
-        (
-            orderAttemptTelegramNotifications.has(key) ||
-            orderAttemptTelegramInFlight.has(key)
-        )
-    ) {
-        return false;
-    }
-
-    if (key !== '—') {
-        orderAttemptTelegramInFlight.add(key);
-    }
-
-    try {
-        await sendOrderAttemptToTelegram(
-            payload
-        );
-
-        if (key !== '—') {
-            orderAttemptTelegramNotifications.set(
-                key,
-                Date.now()
-            );
-        }
-
-        return true;
-    } finally {
-        if (key !== '—') {
-            orderAttemptTelegramInFlight.delete(key);
-        }
-    }
-}
-
-
-const canceledTelegramNotifications =
-    new Map();
-
-const CANCELED_TELEGRAM_TTL =
-    7 * 24 * 60 * 60 * 1000;
-
-function cleanupCanceledTelegramNotifications() {
-    const now = Date.now();
-
-    for (
-        const [paymentId, timestamp]
-        of canceledTelegramNotifications.entries()
-    ) {
-        if (
-            now - timestamp >
-            CANCELED_TELEGRAM_TTL
-        ) {
-            canceledTelegramNotifications.delete(
-                paymentId
-            );
-        }
-    }
-}
-
-function describeYooKassaCancellationParty(value) {
-    const party =
-        String(value || '').trim();
-
-    const labels = {
-        merchant: 'Магазин RTN.PRO',
-        yoo_money: 'ЮKassa',
-        payment_network: 'Банк / платёжная сеть'
-    };
-
-    return labels[party] || party || 'Не указан';
-}
-
-function describeYooKassaCancellationReason(value) {
-    const reason =
-        String(value || '').trim();
-
-    const labels = {
-        '3d_secure_failed': 'Не пройдена проверка 3-D Secure',
-        call_issuer: 'Банк отклонил оплату; клиенту нужно обратиться в банк',
-        canceled_by_merchant: 'Платёж отменён магазином',
-        card_expired: 'Истёк срок действия банковской карты',
-        country_forbidden: 'Оплата картой из этой страны запрещена',
-        deal_expired: 'Истёк срок действия сделки',
-        expired_on_capture: 'Истёк срок подтверждения списания',
-        expired_on_confirmation: 'Истёк срок оплаты; клиент не завершил платёж',
-        fraud_suspected: 'Платёж отклонён из-за подозрения в мошенничестве',
-        general_decline: 'Платёж отклонён без уточнения причины',
-        identification_required: 'Для способа оплаты требуется идентификация',
-        insufficient_funds: 'Недостаточно средств',
-        internal_timeout: 'Технический таймаут на стороне ЮKassa',
-        invalid_card_number: 'Неверно указан номер карты',
-        invalid_csc: 'Неверно указан CVV/CVC',
-        issuer_unavailable: 'Банк-эмитент временно недоступен',
-        loan_application_expired: 'Истёк срок заполнения заявки на кредит/рассрочку',
-        loan_declined: 'Банк отклонил заявку на кредит/рассрочку',
-        loan_declined_by_payer: 'Клиент отказался от кредита/рассрочки',
-        payment_method_limit_exceeded: 'Превышен лимит для способа оплаты',
-        payment_method_restricted: 'Операции этим платёжным средством ограничены',
-        permission_revoked: 'Отозвано разрешение на безакцептное списание',
-        unsupported_mobile_operator: 'Мобильный оператор не поддерживается'
-    };
-
-    return labels[reason] || reason || 'ЮKassa не передала детальную причину';
-}
-
-async function sendCanceledOrderToTelegram(payment) {
-    const paymentId =
-        compactTelegramValue(
-            payment?.id
-        );
-
-    cleanupCanceledTelegramNotifications();
-
-    if (
-        paymentId !== '—' &&
-        canceledTelegramNotifications.has(
-            paymentId
-        )
-    ) {
-        return false;
-    }
-
-    const metadata =
-        payment?.metadata || {};
-
-    const details =
-        payment?.cancellation_details || {};
-
-    const reasonCode =
-        String(details.reason || '').trim();
-
-    const partyCode =
-        String(details.party || '').trim();
-
-    const deliveryAddress = [
-        metadata.deliveryCity,
-        metadata.deliveryAddress
-    ]
-        .filter(Boolean)
-        .join(', ');
-
-    const attributionLines = [
-        metadata.trafficSource || metadata.trafficMedium
-            ? `Источник: ${[
-                metadata.trafficSource,
-                metadata.trafficMedium
-            ].filter(Boolean).join(' / ')}`
-            : null,
-
-        metadata.trafficCampaign
-            ? `Кампания: ${metadata.trafficCampaign}`
-            : null,
-
-        metadata.trafficContent
-            ? `Контент: ${metadata.trafficContent}`
-            : null,
-
-        metadata.telegramStart
-            ? `Telegram start: ${metadata.telegramStart}`
-            : null,
-
-        metadata.trafficPlatform
-            ? `Платформа: ${metadata.trafficPlatform}`
-            : null
-    ].filter(Boolean);
-
-    const paymentMethod =
-        compactTelegramValue(
-            payment?.payment_method?.type
-        );
-
-    const text = [
-        '🔴 RTN.PRO — ОПЛАТА НЕ СОСТОЯЛАСЬ',
-        '',
-        `Заказ: ${compactTelegramValue(metadata.orderId)}`,
-        `Платёж: ${paymentId}`,
-        `Сумма: ${formatTelegramMoney(payment?.amount?.value)}`,
-        `Имя: ${compactTelegramValue(metadata.customerName)}`,
-        `Телефон: ${compactTelegramValue(metadata.customerPhone)}`,
-        `Email: ${compactTelegramValue(metadata.customerEmail)}`,
-        `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
-        `Адрес: ${compactTelegramValue(deliveryAddress)}`,
-        `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
-        '',
-        `Причина: ${describeYooKassaCancellationReason(reasonCode)}`,
-        `Код причины: ${reasonCode || 'не указан'}`,
-        `Инициатор: ${describeYooKassaCancellationParty(partyCode)}${partyCode ? ` (${partyCode})` : ''}`,
-        `Способ оплаты: ${paymentMethod}`,
-        ...(attributionLines.length
-            ? ['', ...attributionLines]
-            : []),
-        '',
-        'Статус ЮKassa: ОТМЕНЁН ✗'
-    ].join('\n');
-
-    await sendTelegramText(text);
-
-    if (paymentId !== '—') {
-        canceledTelegramNotifications.set(
-            paymentId,
-            Date.now()
-        );
-    }
-
-    return true;
-}
-
 
 const paidTelegramNotifications =
     new Map();
@@ -4384,35 +3357,6 @@ async function sendPaidOrderToTelegram(payment) {
         .filter(Boolean)
         .join(', ');
 
-    const paidAttributionLines = [
-        metadata.trafficSource || metadata.trafficMedium
-            ? `Источник: ${[
-                metadata.trafficSource,
-                metadata.trafficMedium
-            ].filter(Boolean).join(' / ')}`
-            : null,
-
-        metadata.trafficCampaign
-            ? `Кампания: ${metadata.trafficCampaign}`
-            : null,
-
-        metadata.trafficContent
-            ? `Контент: ${metadata.trafficContent}`
-            : null,
-
-        metadata.telegramStart
-            ? `Telegram start: ${metadata.telegramStart}`
-            : null,
-
-        metadata.trafficPlatform
-            ? `Платформа: ${metadata.trafficPlatform}`
-            : null,
-
-        metadata.telegramChatType
-            ? `Telegram context: ${metadata.telegramChatType}`
-            : null
-    ].filter(Boolean);
-
     const text = [
         '✅ RTN.PRO — ЗАКАЗ ОПЛАЧЕН',
         '',
@@ -4425,9 +3369,6 @@ async function sendPaidOrderToTelegram(payment) {
         `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
         `Адрес: ${compactTelegramValue(deliveryAddress)}`,
         `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
-        ...(paidAttributionLines.length
-            ? ['', ...paidAttributionLines]
-            : []),
         '',
         'Статус ЮKassa: ОПЛАЧЕН ✓'
     ].join('\n');
@@ -5369,18 +4310,6 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                     telegramError.message
                 );
             }
-
-            try {
-                await sendPaidConversionToMetrika(
-                    payment
-                );
-            } catch (metrikaError) {
-                console.error(
-                    'Yandex Metrika paid conversion fallback error:',
-                    metrikaError.response?.data ||
-                    metrikaError.message
-                );
-            }
         }
 
         return res.json({
@@ -5438,97 +4367,6 @@ app.post('/api/contact', async (req, res) => {
     }
 });
 
-const paymentCreationInFlight = new Map();
-const paymentCreationCache = new Map();
-const PAYMENT_CREATION_CACHE_TTL = 30 * 60 * 1000;
-
-function cleanupPaymentCreationCache() {
-    const now = Date.now();
-
-    for (const [key, entry] of paymentCreationCache.entries()) {
-        if (
-            !entry ||
-            now - Number(entry.createdAt || 0) > PAYMENT_CREATION_CACHE_TTL
-        ) {
-            paymentCreationCache.delete(key);
-        }
-    }
-}
-
-async function createYooKassaPaymentOnce(orderId, paymentData) {
-    cleanupPaymentCreationCache();
-
-    const orderKey =
-        String(orderId || '')
-            .trim()
-            .slice(0, 120);
-
-    if (orderKey) {
-        const cached = paymentCreationCache.get(orderKey);
-        if (cached?.data) {
-            console.log(
-                `YooKassa create-payment dedupe: cached order=${orderKey}, payment=${cached.data?.id || 'NO_ID'}`
-            );
-            return cached.data;
-        }
-
-        const inFlight = paymentCreationInFlight.get(orderKey);
-        if (inFlight) {
-            console.log(
-                `YooKassa create-payment dedupe: waiting for in-flight order=${orderKey}`
-            );
-            return inFlight;
-        }
-    }
-
-    const createPromise = (async () => {
-        // ЮKassa рекомендует UUID v4 для каждого реально нового запроса.
-        // Дубли одного orderId объединяем на нашей стороне, поэтому не
-        // переиспользуем один Idempotence-Key для потенциально изменившегося тела.
-        const idempotenceKey = crypto.randomUUID();
-
-        const response = await axios.post(
-            'https://api.yookassa.ru/v3/payments',
-            paymentData,
-            {
-                auth: {
-                    username: YOOKASSA_SHOP_ID,
-                    password: YOOKASSA_SECRET_KEY
-                },
-                headers: {
-                    'Idempotence-Key': idempotenceKey,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 15000
-            }
-        );
-
-        return response.data;
-    })();
-
-    if (orderKey) {
-        paymentCreationInFlight.set(orderKey, createPromise);
-    }
-
-    try {
-        const data = await createPromise;
-
-        if (orderKey && data?.id) {
-            paymentCreationCache.set(orderKey, {
-                data,
-                createdAt: Date.now()
-            });
-        }
-
-        return data;
-    } finally {
-        if (orderKey) {
-            paymentCreationInFlight.delete(orderKey);
-        }
-    }
-}
-
-
 function buildPaymentDescription({ orderId, customerName, items }) {
     const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
     const shorten = (value, max) => value.length <= max ? value : value.slice(0, max - 1) + '…';
@@ -5556,14 +4394,8 @@ app.post('/api/create-payment', async (req, res) => {
             delivery,
             orderId,
             comment,
-            promoCode,
-            attribution
+            promoCode
         } = req.body;
-
-        const normalizedAttribution =
-            normalizeAttribution(
-                attribution
-            );
 
         // Проверяем сумму
         const paymentAmount =
@@ -5629,6 +4461,24 @@ app.post('/api/create-payment', async (req, res) => {
             `YooKassa receipt prepared: order=${String(orderId || 'NO_ID')}, email=yes, phone=yes, items=${receiptItems.length}`
         );
 
+        // Сразу фиксируем попытку заказа в Telegram.
+        // Ошибка Telegram НЕ должна ломать оплату.
+        sendOrderAttemptToTelegram({
+            amount: paymentAmount,
+            items,
+            customer,
+            delivery,
+            orderId,
+            promoCode,
+            comment
+        }).catch(error => {
+            console.error(
+                'RTN order attempt Telegram error:',
+                error.response?.data ||
+                error.message
+            );
+        });
+
         // Сначала фиксируем заказ в Bitrix24.
         // Даже если ЮKassa временно не работает, заявка не потеряется.
         let bitrixDealId = null;
@@ -5642,9 +4492,7 @@ app.post('/api/create-payment', async (req, res) => {
                     customer,
                     delivery,
                     comment,
-                    promoCode,
-                    attribution:
-                        normalizedAttribution
+                    promoCode
                 });
         } catch (bitrixError) {
             // Ошибка CRM не должна блокировать оплату.
@@ -5652,85 +4500,6 @@ app.post('/api/create-payment', async (req, res) => {
                 'Bitrix24 order sync error:',
                 bitrixError.response?.data ||
                 bitrixError.message
-            );
-        }
-
-        const rawPaymentMetadata = {
-            customerName:
-                customer?.name || '',
-
-            customerPhone:
-                normalizedPhone,
-
-            customerEmail:
-                normalizedEmail,
-
-            deliveryMethod:
-                delivery?.method || '',
-
-            deliveryCity:
-                delivery?.city || '',
-
-            deliveryAddress:
-                delivery?.address || '',
-
-            orderId:
-                String(orderId || ''),
-
-            bitrixDealId:
-                bitrixDealId
-                    ? String(bitrixDealId)
-                    : '',
-
-            promoCode:
-                normalizePromoCode(promoCode),
-
-            trafficSource:
-                normalizedAttribution.lastTouch.source,
-
-            trafficMedium:
-                normalizedAttribution.lastTouch.medium,
-
-            trafficCampaign:
-                normalizedAttribution.lastTouch.campaign,
-
-            trafficContent:
-                normalizedAttribution.lastTouch.content,
-
-            telegramStart:
-                normalizedAttribution.lastTouch.startParam,
-
-            // В metadata ЮKassa допускается не более 16 пар ключ-значение.
-            // Оставляем только поля, которые реально нужны после оплаты:
-            // данные заказа, атрибуция и идентификаторы Метрики.
-            metrikaClientId:
-                normalizedAttribution.metrikaClientId,
-
-            yclid:
-                normalizedAttribution.yclid
-        };
-
-        const paymentMetadataEntries =
-            Object.entries(rawPaymentMetadata)
-                .map(([key, value]) => [
-                    key,
-                    String(value ?? '')
-                        .replace(/\s+/g, ' ')
-                        .trim()
-                        .slice(0, 500)
-                ])
-                .filter(([, value]) => Boolean(value));
-
-        // Жёсткая страховка от invalid_request по metadata:
-        // максимум 16 ключей по требованиям ЮKassa.
-        const paymentMetadata =
-            Object.fromEntries(
-                paymentMetadataEntries.slice(0, 16)
-            );
-
-        if (paymentMetadataEntries.length > 16) {
-            console.warn(
-                `YooKassa metadata trimmed: ${paymentMetadataEntries.length} -> 16 fields, order=${String(orderId || 'NO_ID')}`
             );
         }
 
@@ -5755,8 +4524,36 @@ app.post('/api/create-payment', async (req, res) => {
                 items
             }),
 
-            metadata:
-                paymentMetadata,
+            metadata: {
+                customerName:
+                    customer?.name || '',
+
+                customerPhone:
+                    normalizedPhone,
+
+                customerEmail:
+                    normalizedEmail,
+
+                deliveryMethod:
+                    delivery?.method || '',
+
+                deliveryCity:
+                    delivery?.city || '',
+
+                deliveryAddress:
+                    delivery?.address || '',
+
+                orderId:
+                    String(orderId || ''),
+
+                bitrixDealId:
+                    bitrixDealId
+                        ? String(bitrixDealId)
+                        : '',
+
+                promoCode:
+                    normalizePromoCode(promoCode)
+            },
 
             receipt: {
                 customer: {
@@ -5775,21 +4572,45 @@ app.post('/api/create-payment', async (req, res) => {
             }
         };
 
-        const yooPayment =
-            await createYooKassaPaymentOnce(
-                orderId,
-                paymentData
+        const idempotenceKey =
+            crypto.randomUUID();
+
+        const response =
+            await axios.post(
+                'https://api.yookassa.ru/v3/payments',
+
+                paymentData,
+
+                {
+                    auth: {
+                        username:
+                            YOOKASSA_SHOP_ID,
+
+                        password:
+                            YOOKASSA_SECRET_KEY
+                    },
+
+                    headers: {
+                        'Idempotence-Key':
+                            idempotenceKey,
+
+                        'Content-Type':
+                            'application/json'
+                    },
+
+                    timeout: 15000
+                }
             );
 
         const confirmationUrl =
-            yooPayment
+            response.data
                 ?.confirmation
                 ?.confirmation_url;
 
         if (!confirmationUrl) {
             console.error(
                 'YooKassa did not return confirmation_url:',
-                yooPayment
+                response.data
             );
 
             return res.status(500).json({
@@ -5798,35 +4619,10 @@ app.post('/api/create-payment', async (req, res) => {
             });
         }
 
-        // Уведомляем о попытке только после того, как ЮKassa
-        // реально создала платеж и вернула confirmation_url.
-        // Дедупликация идёт прежде всего по orderId, поэтому повторный запрос
-        // одного заказа не создаст несколько сообщений.
-        sendOrderAttemptToTelegramOnce({
-            paymentId:
-                yooPayment.id,
-            amount:
-                paymentAmount,
-            items,
-            customer,
-            delivery,
-            orderId,
-            promoCode,
-            comment,
-            attribution:
-                normalizedAttribution
-        }).catch(error => {
-            console.error(
-                'RTN order attempt Telegram error:',
-                error.response?.data ||
-                error.message
-            );
-        });
-
         if (bitrixDealId) {
             markBitrixPaymentCreated(
                 bitrixDealId,
-                yooPayment
+                response.data
             ).catch(error => {
                 console.error(
                     'Bitrix24 payment update error:',
@@ -5838,15 +4634,15 @@ app.post('/api/create-payment', async (req, res) => {
 
         res.json({
             id:
-                yooPayment.id,
+                response.data.id,
 
             status:
-                yooPayment.status,
+                response.data.status,
 
             confirmationUrl,
 
             confirmation:
-                yooPayment.confirmation,
+                response.data.confirmation,
 
             bitrixDealId
         });
@@ -5865,19 +4661,11 @@ app.post('/api/create-payment', async (req, res) => {
             error.response?.status ||
             500;
 
-        const parameter =
-            yooError?.parameter ||
-            '';
-
         const description =
             yooError?.description ||
+            yooError?.parameter ||
             error.message ||
             'Неизвестная ошибка';
-
-        const diagnosticDescription =
-            parameter
-                ? `${description} (parameter: ${parameter})`
-                : description;
 
         if (
             statusCode === 401 ||
@@ -5892,7 +4680,7 @@ app.post('/api/create-payment', async (req, res) => {
                         yooError?.code ||
                         'invalid_credentials',
 
-                    description: diagnosticDescription,
+                    description,
 
                     shopIdMasked:
                         YOOKASSA_SHOP_ID
@@ -5905,7 +4693,7 @@ app.post('/api/create-payment', async (req, res) => {
         res.status(statusCode).json({
             error:
                 'Ошибка создания платежа: ' +
-                diagnosticDescription,
+                description,
 
             details:
                 yooError ||
