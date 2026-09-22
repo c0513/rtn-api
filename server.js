@@ -103,6 +103,7 @@ const YCP_ACCESS_TOKEN =
 
 const BLOG_ADMIN_TOKEN = normalizeEnvValue(process.env.BLOG_ADMIN_TOKEN || '');
 const BLOG_DATA_FILE = process.env.BLOG_DATA_FILE || path.join(__dirname, 'data', 'articles.json');
+const ORDER_DATA_FILE = process.env.ORDER_DATA_FILE || path.join(path.dirname(BLOG_DATA_FILE), 'orders.json');
 
 function readBlogArticles() {
     try {
@@ -120,6 +121,124 @@ function writeBlogArticles(articles) {
     const temporaryFile = `${BLOG_DATA_FILE}.tmp`;
     fs.writeFileSync(temporaryFile, JSON.stringify(articles, null, 2), 'utf8');
     fs.renameSync(temporaryFile, BLOG_DATA_FILE);
+}
+
+function readOrders() {
+    try {
+        if (!fs.existsSync(ORDER_DATA_FILE)) return [];
+        const parsed = JSON.parse(fs.readFileSync(ORDER_DATA_FILE, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+        console.error('Orders read error:', error.message);
+        return [];
+    }
+}
+
+function writeOrders(orders) {
+    fs.mkdirSync(path.dirname(ORDER_DATA_FILE), { recursive: true });
+    const temporaryFile = `${ORDER_DATA_FILE}.tmp`;
+    fs.writeFileSync(temporaryFile, JSON.stringify(orders, null, 2), 'utf8');
+    fs.renameSync(temporaryFile, ORDER_DATA_FILE);
+}
+
+function cleanOrderValue(value, max = 500) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function upsertLocalOrder(update) {
+    const orders = readOrders();
+    const orderId = cleanOrderValue(update.orderId, 100);
+    const paymentId = cleanOrderValue(update.paymentId, 100);
+    const index = orders.findIndex(order =>
+        (orderId && order.orderId === orderId) ||
+        (paymentId && order.paymentId === paymentId)
+    );
+    const existing = index >= 0 ? orders[index] : {};
+    const definedUpdate = Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined));
+    const now = new Date().toISOString();
+    const next = {
+        id: existing.id || crypto.randomUUID(),
+        fulfillmentStatus: existing.fulfillmentStatus || 'new',
+        paymentStatus: existing.paymentStatus || 'pending',
+        createdAt: existing.createdAt || now,
+        ...existing,
+        ...definedUpdate,
+        orderId: orderId || existing.orderId || '',
+        paymentId: paymentId || existing.paymentId || '',
+        updatedAt: now
+    };
+    if (index >= 0) orders[index] = next;
+    else orders.push(next);
+    writeOrders(orders);
+    return next;
+}
+
+function orderFromCheckout({ orderId, amount, items, customer, delivery, comment, promoCode }) {
+    return {
+        orderId: cleanOrderValue(orderId, 100),
+        publicOrderNumber: getPublicOrderNumber(orderId),
+        amount: Math.max(0, Number(amount || 0)),
+        customer: {
+            name: cleanOrderValue(customer?.name, 256),
+            phone: cleanOrderValue(customer?.phone, 40),
+            email: cleanOrderValue(customer?.email, 254).toLowerCase()
+        },
+        delivery: {
+            method: cleanOrderValue(delivery?.method, 100),
+            address: cleanOrderValue(delivery?.address, 1000),
+            city: cleanOrderValue(delivery?.city, 200),
+            price: Math.max(0, Number(delivery?.price || 0))
+        },
+        items: (Array.isArray(items) ? items : []).map(item => ({
+            externalId: cleanOrderValue(item?.externalId || item?.id, 150),
+            name: cleanOrderValue(item?.name || item?.productName, 300),
+            flavor: cleanOrderValue(item?.flavor, 200),
+            quantity: Math.max(1, Math.floor(Number(item?.quantity) || 1)),
+            price: Math.max(0, Number(item?.price || item?.priceNum || 0))
+        })),
+        comment: cleanOrderValue(comment, 2000),
+        promoCode: normalizePromoCode(promoCode),
+        source: 'site'
+    };
+}
+
+async function syncRecentYooKassaPayments() {
+    if (!YOOKASSA_SHOP_ID || !YOOKASSA_SECRET_KEY) return;
+    const response = await axios.get('https://api.yookassa.ru/v3/payments?limit=100', {
+        auth: { username: YOOKASSA_SHOP_ID, password: YOOKASSA_SECRET_KEY },
+        headers: { Accept: 'application/json' },
+        timeout: 15000
+    });
+    for (const payment of response.data?.items || []) {
+        const metadata = payment.metadata || {};
+        upsertLocalOrder({
+            orderId: metadata.orderId || payment.id,
+            paymentId: payment.id,
+            publicOrderNumber: metadata.orderId
+                ? getPublicOrderNumber(metadata.orderId)
+                : String(payment.id || '').slice(-8).toUpperCase(),
+            amount: Number(payment.amount?.value || 0),
+            paymentStatus: payment.status || 'unknown',
+            fulfillmentStatus: payment.status === 'canceled' ? 'cancelled' : undefined,
+            paid: payment.paid === true,
+            paidAt: payment.status === 'succeeded' ? payment.captured_at || payment.created_at : undefined,
+            createdAt: payment.created_at,
+            description: cleanOrderValue(payment.description, 500),
+            customer: {
+                name: cleanOrderValue(metadata.customerName, 256),
+                phone: cleanOrderValue(metadata.customerPhone, 40),
+                email: cleanOrderValue(metadata.customerEmail, 254).toLowerCase()
+            },
+            delivery: {
+                method: cleanOrderValue(metadata.deliveryMethod, 100),
+                address: cleanOrderValue(metadata.deliveryAddress, 1000),
+                city: cleanOrderValue(metadata.deliveryCity, 200),
+                price: 0
+            },
+            promoCode: normalizePromoCode(metadata.promoCode),
+            source: 'yookassa'
+        });
+    }
 }
 
 function requireBlogAdmin(req, res, next) {
@@ -2705,6 +2824,14 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             });
         }
 
+        upsertLocalOrder({
+            orderId: payment?.metadata?.orderId,
+            paymentId: payment?.id,
+            paymentStatus: payment?.status,
+            paid: true,
+            paidAt: payment?.captured_at || new Date().toISOString()
+        });
+
         // Сначала Telegram. Подтверждение уже перепроверено через API ЮKassa,
         // поэтому сообщение означает реальную успешную оплату.
         let telegramDeliveryError = null;
@@ -2995,6 +3122,34 @@ app.get('/api/articles/:slug', (req, res) => {
 
 app.get('/api/admin/articles', requireBlogAdmin, (req, res) => {
     res.json(readBlogArticles().sort((a, b) => String(b.dateModified).localeCompare(String(a.dateModified))));
+});
+
+app.get('/api/admin/orders', requireBlogAdmin, async (req, res) => {
+    let syncError = '';
+    if (String(req.query.refresh || '') === '1') {
+        try {
+            await syncRecentYooKassaPayments();
+        } catch (error) {
+            syncError = error.response?.data?.description || error.message;
+            console.error('YooKassa orders sync error:', error.response?.data || error.message);
+        }
+    }
+    const orders = readOrders().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.json({ orders, syncError });
+});
+
+app.patch('/api/admin/orders/:id/status', requireBlogAdmin, (req, res) => {
+    const allowed = ['new', 'processing', 'ready', 'shipped', 'completed', 'cancelled'];
+    const fulfillmentStatus = String(req.body?.status || '').trim().toLowerCase();
+    if (!allowed.includes(fulfillmentStatus)) {
+        return res.status(400).json({ error: 'Некорректный статус заказа' });
+    }
+    const orders = readOrders();
+    const index = orders.findIndex(order => String(order.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ error: 'Заказ не найден' });
+    orders[index] = { ...orders[index], fulfillmentStatus, updatedAt: new Date().toISOString() };
+    writeOrders(orders);
+    res.json(orders[index]);
 });
 
 app.get('/api/blog-images/:filename', (req, res) => {
@@ -4291,6 +4446,13 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
         let notificationSent = true;
 
         if (succeeded) {
+            upsertLocalOrder({
+                orderId: payment?.metadata?.orderId,
+                paymentId: payment?.id,
+                paymentStatus: payment?.status,
+                paid: true,
+                paidAt: payment?.captured_at || new Date().toISOString()
+            });
             try {
                 const sent =
                     await sendPaidOrderToTelegram(
@@ -4386,6 +4548,7 @@ function buildPaymentDescription({ orderId, customerName, items }) {
 }
 
 app.post('/api/create-payment', async (req, res) => {
+    let localOrderReference = '';
     try {
         const {
             amount,
@@ -4456,6 +4619,13 @@ app.post('/api/create-payment', async (req, res) => {
                 error: 'Корзина пуста'
             });
         }
+
+        localOrderReference = cleanOrderValue(orderId, 100);
+        upsertLocalOrder({
+            ...orderFromCheckout({ orderId, amount: paymentAmount, items, customer, delivery, comment, promoCode }),
+            paymentStatus: 'creating',
+            paid: false
+        });
 
         console.log(
             `YooKassa receipt prepared: order=${String(orderId || 'NO_ID')}, email=yes, phone=yes, items=${receiptItems.length}`
@@ -4607,6 +4777,14 @@ app.post('/api/create-payment', async (req, res) => {
                 ?.confirmation
                 ?.confirmation_url;
 
+        upsertLocalOrder({
+            orderId: localOrderReference,
+            paymentId: response.data?.id,
+            paymentStatus: response.data?.status || 'pending',
+            paid: response.data?.paid === true,
+            bitrixDealId: bitrixDealId || null
+        });
+
         if (!confirmationUrl) {
             console.error(
                 'YooKassa did not return confirmation_url:',
@@ -4648,6 +4826,17 @@ app.post('/api/create-payment', async (req, res) => {
         });
 
     } catch (error) {
+        if (localOrderReference) {
+            try {
+                upsertLocalOrder({
+                    orderId: localOrderReference,
+                    paymentStatus: 'creation_failed',
+                    paymentError: cleanOrderValue(error.response?.data?.description || error.message, 1000)
+                });
+            } catch (storageError) {
+                console.error('Local order failure status error:', storageError.message);
+            }
+        }
         console.error(
             'YooKassa payment error:',
             error.response?.data ||
