@@ -4016,6 +4016,20 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
             300
         );
 
+    const searchPhrase =
+        cleanPlenoshnayaLeadValue(
+            body.search_phrase ||
+            body.searchPhrase,
+            500
+        );
+
+    const adPhrase =
+        cleanPlenoshnayaLeadValue(
+            body.ad_phrase ||
+            body.adPhrase,
+            500
+        );
+
     const yclid =
         cleanPlenoshnayaLeadValue(
             body.yclid,
@@ -4061,6 +4075,12 @@ app.post('/api/plenoshnaya/lead', async (req, res) => {
             : null,
         utmTerm
             ? `🔎 UTM term: ${utmTerm}`
+            : null,
+        searchPhrase
+            ? `🔍 Поисковая фраза: ${searchPhrase}`
+            : null,
+        adPhrase
+            ? `📢 Рекламная фраза: ${adPhrase}`
             : null,
         yclid
             ? `🟡 yclid: ${yclid}`
@@ -4225,6 +4245,32 @@ app.post('/api/plenoshnaya/identify', async (req, res) => {
             300
         );
 
+    const utmContent =
+        cleanPlenoshnayaLeadValue(
+            body.utm_content,
+            300
+        );
+
+    const utmTerm =
+        cleanPlenoshnayaLeadValue(
+            body.utm_term,
+            300
+        );
+
+    const searchPhrase =
+        cleanPlenoshnayaLeadValue(
+            body.search_phrase ||
+            body.searchPhrase,
+            500
+        );
+
+    const adPhrase =
+        cleanPlenoshnayaLeadValue(
+            body.ad_phrase ||
+            body.adPhrase,
+            500
+        );
+
     const yclid =
         cleanPlenoshnayaLeadValue(
             body.yclid,
@@ -4332,6 +4378,18 @@ app.post('/api/plenoshnaya/identify', async (req, res) => {
             : null,
         utmCampaign
             ? `🎯 Кампания: ${utmCampaign}`
+            : null,
+        utmContent
+            ? `🧩 UTM content: ${utmContent}`
+            : null,
+        utmTerm
+            ? `🔎 UTM term: ${utmTerm}`
+            : null,
+        searchPhrase
+            ? `🔍 Поисковая фраза: ${searchPhrase}`
+            : null,
+        adPhrase
+            ? `📢 Рекламная фраза: ${adPhrase}`
             : null,
         yclid
             ? `🟡 yclid: ${yclid}`
@@ -4547,6 +4605,32 @@ app.post(
                 300
             );
 
+        const utmContent =
+            cleanPlenoshnayaLeadValue(
+                body.utm_content,
+                300
+            );
+
+        const utmTerm =
+            cleanPlenoshnayaLeadValue(
+                body.utm_term,
+                300
+            );
+
+        const searchPhrase =
+            cleanPlenoshnayaLeadValue(
+                body.search_phrase ||
+                body.searchPhrase,
+                500
+            );
+
+        const adPhrase =
+            cleanPlenoshnayaLeadValue(
+                body.ad_phrase ||
+                body.adPhrase,
+                500
+            );
+
         const yclid =
             cleanPlenoshnayaLeadValue(
                 body.yclid,
@@ -4755,6 +4839,18 @@ app.post(
                 : null,
             utmCampaign
                 ? `🎯 Кампания: ${utmCampaign}`
+                : null,
+            utmContent
+                ? `🧩 UTM content: ${utmContent}`
+                : null,
+            utmTerm
+                ? `🔎 UTM term: ${utmTerm}`
+                : null,
+            searchPhrase
+                ? `🔍 Поисковая фраза: ${searchPhrase}`
+                : null,
+            adPhrase
+                ? `📢 Рекламная фраза: ${adPhrase}`
                 : null,
             yclid
                 ? `🟡 yclid: ${yclid}`
