@@ -3892,6 +3892,166 @@ function cleanupPlenoshnayaIdentifyRecent() {
     }
 }
 
+const PLENOSHNAYA_IP_CACHE_TTL_MS =
+    6 * 60 * 60 * 1000;
+
+const plenoshnayaIpCache =
+    new Map();
+
+function isPublicIpForLookup(ip) {
+    const value =
+        String(ip || '')
+            .trim()
+            .replace(/^::ffff:/, '');
+
+    if (!value) {
+        return false;
+    }
+
+    if (
+        value === '::1' ||
+        value === '127.0.0.1' ||
+        /^10\./.test(value) ||
+        /^192\.168\./.test(value) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(value) ||
+        /^169\.254\./.test(value) ||
+        /^fc/i.test(value) ||
+        /^fd/i.test(value) ||
+        /^fe80:/i.test(value)
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+async function getPlenoshnayaIpInfo(ip) {
+    const cleanIp =
+        String(ip || '')
+            .trim()
+            .replace(/^::ffff:/, '');
+
+    if (!isPublicIpForLookup(cleanIp)) {
+        return null;
+    }
+
+    const cached =
+        plenoshnayaIpCache.get(cleanIp);
+
+    if (
+        cached &&
+        Date.now() - cached.savedAt <
+            PLENOSHNAYA_IP_CACHE_TTL_MS
+    ) {
+        return cached.data;
+    }
+
+    try {
+        const response =
+            await axios.get(
+                `https://ipapi.co/${encodeURIComponent(cleanIp)}/json/`,
+                {
+                    timeout: 1800,
+                    headers: {
+                        Accept: 'application/json',
+                        'User-Agent':
+                            'Plenoshnaya/1.0'
+                    }
+                }
+            );
+
+        const data =
+            response.data || {};
+
+        if (
+            data.error ||
+            !data.ip
+        ) {
+            return null;
+        }
+
+        const normalized = {
+            city:
+                cleanPlenoshnayaLeadValue(
+                    data.city,
+                    120
+                ),
+            region:
+                cleanPlenoshnayaLeadValue(
+                    data.region,
+                    160
+                ),
+            country:
+                cleanPlenoshnayaLeadValue(
+                    data.country_name ||
+                    data.country_code ||
+                    data.country,
+                    120
+                ),
+            countryCode:
+                cleanPlenoshnayaLeadValue(
+                    data.country_code ||
+                    data.country,
+                    20
+                ),
+            timezone:
+                cleanPlenoshnayaLeadValue(
+                    data.timezone,
+                    120
+                ),
+            asn:
+                cleanPlenoshnayaLeadValue(
+                    data.asn,
+                    80
+                ),
+            org:
+                cleanPlenoshnayaLeadValue(
+                    data.org,
+                    200
+                )
+        };
+
+        if (
+            plenoshnayaIpCache.size >
+            1000
+        ) {
+            const oldestKey =
+                plenoshnayaIpCache
+                    .keys()
+                    .next()
+                    .value;
+
+            if (oldestKey) {
+                plenoshnayaIpCache.delete(
+                    oldestKey
+                );
+            }
+        }
+
+        plenoshnayaIpCache.set(
+            cleanIp,
+            {
+                savedAt:
+                    Date.now(),
+                data:
+                    normalized
+            }
+        );
+
+        return normalized;
+
+    } catch (error) {
+        console.warn(
+            'Plenoshnaya IP lookup skipped:',
+            error.response?.status ||
+            error.code ||
+            error.message
+        );
+
+        return null;
+    }
+}
+
 app.get('/api/plenoshnaya/health', (req, res) => {
     return res.json({
         ok: true,
@@ -4525,6 +4685,9 @@ app.post(
 
         const supportedEvents = new Set([
             'phone_click',
+            'whatsapp_click',
+            'telegram_click',
+            'calculator_action',
             'consent_accept',
             'consent_necessary',
             'contact_share'
@@ -4790,6 +4953,113 @@ app.post(
                 80
             );
 
+        const devicePixelRatio =
+            cleanPlenoshnayaLeadValue(
+                body.device_pixel_ratio ||
+                body.devicePixelRatio,
+                40
+            );
+
+        const touchPoints =
+            cleanPlenoshnayaLeadValue(
+                body.touch_points ||
+                body.touchPoints,
+                40
+            );
+
+        const colorDepth =
+            cleanPlenoshnayaLeadValue(
+                body.color_depth ||
+                body.colorDepth,
+                40
+            );
+
+        const orientation =
+            cleanPlenoshnayaLeadValue(
+                body.orientation,
+                80
+            );
+
+        const darkMode =
+            cleanPlenoshnayaLeadValue(
+                body.dark_mode ||
+                body.darkMode,
+                20
+            );
+
+        const reducedMotion =
+            cleanPlenoshnayaLeadValue(
+                body.reduced_motion ||
+                body.reducedMotion,
+                20
+            );
+
+        const cookiesEnabled =
+            cleanPlenoshnayaLeadValue(
+                body.cookies_enabled ||
+                body.cookiesEnabled,
+                20
+            );
+
+        const dnt =
+            cleanPlenoshnayaLeadValue(
+                body.dnt,
+                40
+            );
+
+        const gpc =
+            cleanPlenoshnayaLeadValue(
+                body.gpc,
+                40
+            );
+
+        const sessionSeconds =
+            cleanPlenoshnayaLeadValue(
+                body.session_seconds ||
+                body.sessionSeconds,
+                40
+            );
+
+        const pageCount =
+            cleanPlenoshnayaLeadValue(
+                body.page_count ||
+                body.pageCount,
+                40
+            );
+
+        const firstPage =
+            cleanPlenoshnayaLeadValue(
+                body.first_page ||
+                body.firstPage,
+                1000
+            );
+
+        const firstReferrer =
+            cleanPlenoshnayaLeadValue(
+                body.first_referrer ||
+                body.firstReferrer,
+                1000
+            );
+
+        const pageHistory =
+            cleanPlenoshnayaLeadValue(
+                body.page_history ||
+                body.pageHistory,
+                1400
+            );
+
+        const calculatorSelection =
+            cleanPlenoshnayaLeadValue(
+                body.calculator_selection ||
+                body.calculatorSelection,
+                1200
+            );
+
+        const ipInfo =
+            await getPlenoshnayaIpInfo(
+                visitorIp
+            );
+
         const source =
             [utmSource, utmMedium]
                 .filter(Boolean)
@@ -4798,6 +5068,12 @@ app.post(
         const titles = {
             phone_click:
                 '📞 ПЛЁНОШНАЯ — КЛИК ПО ТЕЛЕФОНУ',
+            whatsapp_click:
+                '🟢 ПЛЁНОШНАЯ — КЛИК WHATSAPP',
+            telegram_click:
+                '🔵 ПЛЁНОШНАЯ — КЛИК TELEGRAM',
+            calculator_action:
+                '🧮 ПЛЁНОШНАЯ — ДЕЙСТВИЕ В КАЛЬКУЛЯТОРЕ',
             consent_accept:
                 '🍪 ПЛЁНОШНАЯ — COOKIE: ПРИНЯТО',
             consent_necessary:
@@ -4884,6 +5160,74 @@ app.post(
                 : null,
             viewport
                 ? `📐 Viewport: ${viewport}`
+                : null,
+            devicePixelRatio
+                ? `🔎 Pixel ratio: ${devicePixelRatio}`
+                : null,
+            touchPoints
+                ? `👆 Touch points: ${touchPoints}`
+                : null,
+            colorDepth
+                ? `🎨 Color depth: ${colorDepth}`
+                : null,
+            orientation
+                ? `↔️ Ориентация: ${orientation}`
+                : null,
+            darkMode
+                ? `🌗 Тема: ${darkMode}`
+                : null,
+            reducedMotion
+                ? `🎞 Reduced motion: ${reducedMotion}`
+                : null,
+            cookiesEnabled
+                ? `🍪 Cookies enabled: ${cookiesEnabled}`
+                : null,
+            dnt
+                ? `🛡 DNT: ${dnt}`
+                : null,
+            gpc
+                ? `🔐 GPC: ${gpc}`
+                : null,
+            sessionSeconds
+                ? `⏱ В сессии: ${sessionSeconds} сек.`
+                : null,
+            pageCount
+                ? `📚 Страниц в сессии: ${pageCount}`
+                : null,
+            firstPage
+                ? `🚪 Входная страница: ${firstPage}`
+                : null,
+            firstReferrer
+                ? `↩️ Первый referrer: ${firstReferrer}`
+                : null,
+            pageHistory
+                ? `🧭 Маршрут: ${pageHistory}`
+                : null,
+            calculatorSelection
+                ? `🧮 Калькулятор: ${calculatorSelection}`
+                : null,
+            ipInfo && (
+                ipInfo.city ||
+                ipInfo.region ||
+                ipInfo.country
+            )
+                ? `📍 Сеть: ${[
+                    ipInfo.city,
+                    ipInfo.region,
+                    ipInfo.country
+                ].filter(Boolean).join(', ')}`
+                : null,
+            ipInfo && (
+                ipInfo.asn ||
+                ipInfo.org
+            )
+                ? `🏢 ASN/провайдер: ${[
+                    ipInfo.asn,
+                    ipInfo.org
+                ].filter(Boolean).join(' · ')}`
+                : null,
+            ipInfo && ipInfo.timezone
+                ? `🌐 Часовой пояс сети: ${ipInfo.timezone}`
                 : null,
             deviceModel
                 ? `📲 Модель: ${deviceModel}`
