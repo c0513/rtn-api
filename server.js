@@ -272,6 +272,61 @@ async function syncRecentYooKassaPayments() {
     }
 }
 
+async function fetchAllYooKassaPayments() {
+    if (!YOOKASSA_SHOP_ID || !YOOKASSA_SECRET_KEY) {
+        throw new Error('YooKassa не настроена');
+    }
+
+    const payments = [];
+    let cursor = '';
+    let pages = 0;
+
+    do {
+        const params = { limit: 100 };
+
+        if (cursor) {
+            params.cursor = cursor;
+        }
+
+        const response = await axios.get(
+            'https://api.yookassa.ru/v3/payments',
+            {
+                auth: {
+                    username: YOOKASSA_SHOP_ID,
+                    password: YOOKASSA_SECRET_KEY
+                },
+                headers: {
+                    Accept: 'application/json'
+                },
+                params,
+                timeout: 20000
+            }
+        );
+
+        const items = Array.isArray(response.data?.items)
+            ? response.data.items
+            : [];
+
+        payments.push(...items);
+        pages += 1;
+
+        cursor = String(response.data?.next_cursor || '').trim();
+
+        if (cursor) {
+            await sleep(150);
+        }
+
+        if (pages > 1000) {
+            throw new Error('YooKassa pagination safety limit exceeded');
+        }
+    } while (cursor);
+
+    return {
+        pages,
+        payments
+    };
+}
+
 function requireBlogAdmin(req, res, next) {
     if (!BLOG_ADMIN_TOKEN) {
         return res.status(503).json({ error: 'BLOG_ADMIN_TOKEN не настроен на сервере' });
@@ -3167,6 +3222,34 @@ app.get('/api/admin/orders', requireBlogAdmin, async (req, res) => {
     }
     const orders = readOrders().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
     res.json({ orders, syncError });
+});
+
+app.get('/api/admin/yookassa/payments-export', requireBlogAdmin, async (req, res) => {
+    try {
+        const result = await fetchAllYooKassaPayments();
+
+        res.set('Cache-Control', 'no-store');
+
+        return res.json({
+            exportedAt: new Date().toISOString(),
+            pages: result.pages,
+            count: result.payments.length,
+            payments: result.payments
+        });
+    } catch (error) {
+        console.error(
+            'YooKassa full export error:',
+            error.response?.data || error.message
+        );
+
+        return res.status(502).json({
+            error:
+                error.response?.data?.description ||
+                error.response?.data?.error ||
+                error.message ||
+                'Не удалось выгрузить платежи YooKassa'
+        });
+    }
 });
 
 app.patch('/api/admin/orders/:id/status', requireBlogAdmin, (req, res) => {
