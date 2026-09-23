@@ -4527,12 +4527,6 @@ function buildPlenoshnayaVisitCardText(card) {
         card.visitCount && Number(card.visitCount) > 1
             ? `🔁 Посещение №${card.visitCount}`
             : null,
-        card.hasLead && card.name
-            ? `👤 ${card.name}`
-            : null,
-        card.hasLead && card.phone
-            ? `📞 ${card.phone}`
-            : null,
         card.hasYclientsBooking && card.yclientsDate
             ? `📅 ${card.yclientsDate}`
             : null,
