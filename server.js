@@ -4256,6 +4256,8 @@ function buildPlenoshnayaVisitEventLabel(
             'открыл WhatsApp',
         telegram_click:
             'открыл Telegram',
+        yclients_open:
+            'перешёл в онлайн-запись YCLIENTS',
         contact_share:
             'поделился контактами',
         consent_accept:
@@ -4317,6 +4319,14 @@ function escapePlenoshnayaHtml(value) {
 }
 
 function getPlenoshnayaVisitStatus(card) {
+    if (card.hasYclientsBooking) {
+        return '✅ ЗАПИСАН В YCLIENTS';
+    }
+
+    if (card.yclientsIntent) {
+        return '🟡 ПЕРЕШЁЛ В YCLIENTS';
+    }
+
     if (card.hasLead && card.ended) {
         return '🔥 ЗАЯВКА · ВИЗИТ ЗАВЕРШЁН';
     }
@@ -4521,14 +4531,24 @@ function buildPlenoshnayaVisitCardText(card) {
         card.visitCount && Number(card.visitCount) > 1
             ? `🔁 Посещение №${card.visitCount}`
             : null,
-        card.hasLead && card.name
+        card.hasYclientsBooking && card.yclientsDate
+            ? `📅 ${card.yclientsDate}`
+            : null,
+        card.hasYclientsBooking && card.yclientsService
+            ? `🚘 ${card.yclientsService}`
+            : (
+                card.hasLead && card.service
+                    ? `🚘 ${card.service}`
+                    : null
+            ),
+        card.hasYclientsBooking && card.yclientsCost
+            ? `💰 ${card.yclientsCost}`
+            : null,
+        card.name
             ? `👤 ${card.name}`
             : null,
-        card.hasLead && card.phone
+        card.phone
             ? `📞 ${card.phone}`
-            : null,
-        card.hasLead && card.service
-            ? `🚘 ${card.service}`
             : null,
         compactCalculator
             ? `🧮 ${compactCalculator}`
@@ -4592,6 +4612,11 @@ function buildPlenoshnayaVisitDetailsHtml(card) {
         ['Имя', card.name],
         ['Телефон', card.phone],
         ['Услуга', card.service],
+        ['YCLIENTS запись', card.yclientsRecordId],
+        ['YCLIENTS дата', card.yclientsDate],
+        ['YCLIENTS услуга', card.yclientsService],
+        ['YCLIENTS стоимость', card.yclientsCost],
+        ['YCLIENTS мастер', card.yclientsStaff],
         ['Метрика ClientID', card.metrikaClientId],
         ['Visitor ID', card.visitorId],
         ['Session ID', card.sessionId],
@@ -5208,6 +5233,11 @@ async function upsertPlenoshnayaVisitCard(
         card.hasLead = true;
     }
 
+    if (eventType === 'yclients_open') {
+        card.yclientsIntent = true;
+        card.yclientsIntentAt = now;
+    }
+
     if (
         eventType &&
         eventType !== 'visit_end'
@@ -5462,8 +5492,497 @@ async function upsertPlenoshnayaVisitCard(
 const PLENOSHNAYA_YCLIENTS_DEDUPE_TTL_MS =
     48 * 60 * 60 * 1000;
 
+const PLENOSHNAYA_YCLIENTS_INTENT_TTL_MS =
+    90 * 60 * 1000;
+
 const plenoshnayaYclientsRecent =
     new Map();
+
+const plenoshnayaYclientsIntents =
+    new Map();
+
+function normalizePlenoshnayaMatchText(value) {
+    return cleanPlenoshnayaLeadValue(
+        value,
+        2000
+    )
+        .toLowerCase()
+        .replace(/ё/g, 'е')
+        .replace(/[^a-zа-я0-9]+/gi, ' ')
+        .trim();
+}
+
+function getPlenoshnayaMatchTokens(value) {
+    const stop =
+        new Set([
+            'для',
+            'или',
+            'и',
+            'на',
+            'по',
+            'авто',
+            'автомобиля',
+            'услуга',
+            'пленка',
+            'пленкой',
+            'класс'
+        ]);
+
+    return new Set(
+        normalizePlenoshnayaMatchText(
+            value
+        )
+            .split(/\s+/)
+            .filter(
+                token =>
+                    token.length >= 3 &&
+                    !stop.has(token)
+            )
+    );
+}
+
+function cleanupPlenoshnayaYclientsIntents() {
+    const now =
+        Date.now();
+
+    for (
+        const [key, intent]
+        of plenoshnayaYclientsIntents.entries()
+    ) {
+        if (
+            !intent ||
+            now - Number(intent.createdAt || 0) >
+                PLENOSHNAYA_YCLIENTS_INTENT_TTL_MS
+        ) {
+            plenoshnayaYclientsIntents.delete(
+                key
+            );
+        }
+    }
+}
+
+function rememberPlenoshnayaYclientsIntent(
+    payload = {}
+) {
+    const key =
+        getPlenoshnayaVisitCardKey(
+            payload
+        );
+
+    if (!key) {
+        return null;
+    }
+
+    cleanupPlenoshnayaYclientsIntents();
+
+    const intent = {
+        key,
+        createdAt:
+            Date.now(),
+        calculatorSelection:
+            cleanPlenoshnayaLeadValue(
+                payload.calculatorSelection ||
+                payload.calculator_selection,
+                1400
+            ),
+        page:
+            cleanPlenoshnayaLeadValue(
+                payload.page,
+                1000
+            ),
+        pageTitle:
+            cleanPlenoshnayaLeadValue(
+                payload.pageTitle ||
+                payload.page_title,
+                300
+            ),
+        linkText:
+            cleanPlenoshnayaLeadValue(
+                payload.linkText ||
+                payload.link_text,
+                600
+            ),
+        phone:
+            cleanPlenoshnayaLeadValue(
+                payload.phone,
+                80
+            ),
+        name:
+            cleanPlenoshnayaLeadValue(
+                payload.name,
+                160
+            )
+    };
+
+    plenoshnayaYclientsIntents.set(
+        key,
+        intent
+    );
+
+    return intent;
+}
+
+function getPlenoshnayaPhoneDigits(value) {
+    return String(value || '')
+        .replace(/\D/g, '')
+        .replace(/^8(?=\d{10}$)/, '7');
+}
+
+function scorePlenoshnayaYclientsIntent(
+    intent,
+    card,
+    booking
+) {
+    let score = 0;
+
+    const intentPhone =
+        getPlenoshnayaPhoneDigits(
+            intent.phone ||
+            card?.phone
+        );
+
+    const bookingPhone =
+        getPlenoshnayaPhoneDigits(
+            booking.phone
+        );
+
+    if (
+        intentPhone &&
+        bookingPhone &&
+        intentPhone === bookingPhone
+    ) {
+        score += 100;
+    }
+
+    const bookingText =
+        booking.services
+            .map(
+                service =>
+                    service.title ||
+                    service.id
+            )
+            .filter(Boolean)
+            .join(' ');
+
+    const intentText =
+        [
+            intent.calculatorSelection,
+            card?.calculatorSelection,
+            card?.service,
+            intent.pageTitle
+        ]
+            .filter(Boolean)
+            .join(' ');
+
+    const bookingTokens =
+        getPlenoshnayaMatchTokens(
+            bookingText
+        );
+
+    const intentTokens =
+        getPlenoshnayaMatchTokens(
+            intentText
+        );
+
+    let overlap = 0;
+
+    for (const token of bookingTokens) {
+        if (intentTokens.has(token)) {
+            overlap += 1;
+        }
+    }
+
+    score +=
+        Math.min(
+            48,
+            overlap * 8
+        );
+
+    const age =
+        Date.now() -
+        Number(intent.createdAt || 0);
+
+    if (age <= 10 * 60 * 1000) {
+        score += 20;
+    } else if (age <= 30 * 60 * 1000) {
+        score += 12;
+    } else if (
+        age <=
+        PLENOSHNAYA_YCLIENTS_INTENT_TTL_MS
+    ) {
+        score += 5;
+    }
+
+    return score;
+}
+
+async function linkPlenoshnayaYclientsBookingToVisit(
+    payload = {}
+) {
+    cleanupPlenoshnayaYclientsIntents();
+
+    const record =
+        getPlenoshnayaYclientsRecord(
+            payload
+        );
+
+    if (record.online === false) {
+        return {
+            linked: false,
+            reason: 'not_online_record'
+        };
+    }
+
+    const client =
+        getPlenoshnayaYclientsClient(
+            record,
+            payload
+        );
+
+    const services =
+        getPlenoshnayaYclientsServices(
+            record,
+            payload
+        );
+
+    const staff =
+        getPlenoshnayaYclientsStaff(
+            record,
+            payload
+        );
+
+    const recordId =
+        cleanPlenoshnayaLeadValue(
+            payload.resource_id ||
+            record.record_id ||
+            record.id ||
+            payload.record_id,
+            100
+        );
+
+    const date =
+        formatPlenoshnayaYclientsDate(
+            record.datetime ||
+            record.date ||
+            payload.datetime ||
+            payload.date
+        );
+
+    const serviceTitle =
+        services
+            .map(
+                service =>
+                    service.title ||
+                    (
+                        service.id
+                            ? `Услуга #${service.id}`
+                            : ''
+                    )
+            )
+            .filter(Boolean)
+            .join(' + ');
+
+    const totalCost =
+        services.reduce(
+            (sum, service) =>
+                sum +
+                (
+                    Number.isFinite(
+                        service.cost
+                    )
+                        ? service.cost
+                        : 0
+                ),
+            0
+        );
+
+    const booking = {
+        phone:
+            client.phone,
+        services
+    };
+
+    const candidates = [];
+
+    for (
+        const [key, intent]
+        of plenoshnayaYclientsIntents.entries()
+    ) {
+        const card =
+            plenoshnayaVisitCards.get(
+                key
+            );
+
+        if (!card) {
+            continue;
+        }
+
+        candidates.push({
+            key,
+            intent,
+            card,
+            score:
+                scorePlenoshnayaYclientsIntent(
+                    intent,
+                    card,
+                    booking
+                )
+        });
+    }
+
+    candidates.sort(
+        (a, b) =>
+            b.score - a.score ||
+            Number(b.intent.createdAt) -
+                Number(a.intent.createdAt)
+    );
+
+    if (!candidates.length) {
+        return {
+            linked: false,
+            reason: 'no_recent_intent'
+        };
+    }
+
+    const best =
+        candidates[0];
+
+    const second =
+        candidates[1];
+
+    const bestAge =
+        Date.now() -
+        Number(
+            best.intent.createdAt ||
+            0
+        );
+
+    const confident =
+        best.score >= 60 ||
+        (
+            candidates.length === 1 &&
+            bestAge <= 20 * 60 * 1000
+        ) ||
+        (
+            best.score >= 30 &&
+            (
+                !second ||
+                best.score - second.score >= 20
+            )
+        );
+
+    if (!confident) {
+        console.warn(
+            'Plenoshnaya YCLIENTS visit link skipped: ambiguous candidates',
+            candidates
+                .slice(0, 3)
+                .map(
+                    item => ({
+                        key:
+                            item.key,
+                        score:
+                            item.score
+                    })
+                )
+        );
+
+        return {
+            linked: false,
+            reason: 'ambiguous'
+        };
+    }
+
+    const card =
+        best.card;
+
+    card.hasYclientsBooking =
+        true;
+    card.yclientsIntent =
+        false;
+
+    if (recordId) {
+        card.yclientsRecordId =
+            recordId;
+    }
+
+    if (date) {
+        card.yclientsDate =
+            date;
+    }
+
+    if (serviceTitle) {
+        card.yclientsService =
+            serviceTitle;
+    }
+
+    if (totalCost > 0) {
+        card.yclientsCost =
+            `${new Intl.NumberFormat('ru-RU').format(totalCost)} ₽`;
+    }
+
+    if (staff.name || staff.id) {
+        card.yclientsStaff =
+            staff.name ||
+            `#${staff.id}`;
+    }
+
+    if (client.name) {
+        card.name =
+            client.name;
+    }
+
+    if (client.phone) {
+        card.phone =
+            client.phone;
+    }
+
+    const now =
+        Date.now();
+
+    card.events.push({
+        at: now,
+        time:
+            formatPlenoshnayaMoscowTime(
+                now
+            ),
+        label:
+            `✅ записался в YCLIENTS${serviceTitle ? `: ${serviceTitle}` : ''}`
+    });
+
+    if (card.events.length > 20) {
+        card.events =
+            card.events.slice(-20);
+    }
+
+    plenoshnayaVisitCards.set(
+        best.key,
+        card
+    );
+
+    plenoshnayaYclientsIntents.delete(
+        best.key
+    );
+
+    await editPlenoshnayaVisitTelegramCard(
+        card
+    );
+
+    console.log(
+        'Plenoshnaya YCLIENTS booking linked to visit:',
+        recordId || 'no-record-id',
+        best.key,
+        'score',
+        best.score
+    );
+
+    return {
+        linked: true,
+        key:
+            best.key,
+        score:
+            best.score
+    };
+}
 
 function cleanupPlenoshnayaYclientsRecent() {
     const now =
@@ -6003,6 +6522,18 @@ async function processPlenoshnayaYclientsWebhook(
         );
     }
 
+    try {
+        await linkPlenoshnayaYclientsBookingToVisit(
+            payload
+        );
+    } catch (linkError) {
+        console.warn(
+            'Plenoshnaya YCLIENTS visit link skipped:',
+            linkError.response?.data ||
+            linkError.message
+        );
+    }
+
     const text =
         buildPlenoshnayaYclientsTelegramText(
             payload
@@ -6150,7 +6681,9 @@ app.get('/api/plenoshnaya/health', (req, res) => {
         yclientsWebhookProtected:
             Boolean(
                 PLENOSHNAYA_YCLIENTS_WEBHOOK_SECRET
-            )
+            ),
+        yclientsPendingIntents:
+            plenoshnayaYclientsIntents.size
     });
 });
 
@@ -6898,6 +7431,7 @@ app.post(
             'phone_click',
             'whatsapp_click',
             'telegram_click',
+            'yclients_open',
             'calculator_action',
             'consent_accept',
             'consent_necessary',
@@ -7356,6 +7890,22 @@ app.post(
                 visitCardError.response?.data ||
                 visitCardError.message
             );
+        }
+
+        if (
+            eventType === 'yclients_open'
+        ) {
+            rememberPlenoshnayaYclientsIntent({
+                visitorId,
+                sessionId,
+                visitorIp,
+                page,
+                pageTitle,
+                calculatorSelection,
+                phone,
+                name,
+                linkText
+            });
         }
 
         const separateTelegramAlerts =
