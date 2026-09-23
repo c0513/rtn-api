@@ -4317,7 +4317,7 @@ function getPlenoshnayaVisitStatus(card) {
         return '⚫ ВИЗИТ ЗАВЕРШЁН';
     }
 
-    return '🟢 НОВЫЙ ВИЗИТ';
+    return '🟢 НА САЙТЕ';
 }
 
 function getPlenoshnayaManagerSource(card) {
@@ -5349,7 +5349,11 @@ async function upsertPlenoshnayaVisitCard(
                         text:
                             latestText,
                         disable_web_page_preview:
-                            true
+                            true,
+                        reply_markup:
+                            buildPlenoshnayaVisitReplyMarkup(
+                                card
+                            )
                     }
                 );
             } catch (error) {
