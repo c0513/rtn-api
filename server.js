@@ -5817,16 +5817,22 @@ function buildPlenoshnayaYclientsTelegramText(
         services.length
             ? services.map(service => {
                 const title =
-                    service.title ||
                     (
-                        service.id
-                            ? `Услуга #${service.id}`
-                            : 'Услуга'
-                    );
+                        service.title ||
+                        (
+                            service.id
+                                ? `Услуга #${service.id}`
+                                : 'Услуга'
+                        )
+                    )
+                        .replace(
+                            /%\s*\/\s*/g,
+                            '% / '
+                        );
 
                 return `🚘 ${title}`;
             })
-            : ['🚘 Услуга YCLIENTS'];
+            : ['🚘 Услуга'];
 
     const totalCost =
         services.reduce(
@@ -5843,14 +5849,14 @@ function buildPlenoshnayaYclientsTelegramText(
         );
 
     const lines = [
-        '✅ НОВАЯ ЗАПИСЬ В YCLIENTS',
+        '✅ ЗАПИСЬ YCLIENTS',
+        date
+            ? `📅 ${date}`
+            : null,
         '',
         ...serviceLines,
         totalCost > 0
             ? `💰 ${new Intl.NumberFormat('ru-RU').format(totalCost)} ₽`
-            : null,
-        date
-            ? `📅 ${date}`
             : null,
         staff.name
             ? `👨‍🔧 Мастер: ${staff.name}`
@@ -5861,16 +5867,16 @@ function buildPlenoshnayaYclientsTelegramText(
             ),
         '',
         client.name
-            ? `👤 ${client.name}`
+            ? `👤 Клиент: ${client.name}`
             : null,
         client.phone
             ? `📞 ${client.phone}`
             : null,
         comment
-            ? `💬 ${comment}`
+            ? `💬 Комментарий: ${comment}`
             : null,
         recordId
-            ? `Запись #${recordId}`
+            ? `№ ${recordId}`
             : null
     ];
 
