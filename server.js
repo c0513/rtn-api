@@ -4323,6 +4323,10 @@ function getPlenoshnayaVisitStatus(card) {
         return '✅ ЗАПИСАН В YCLIENTS';
     }
 
+    if (card.yclientsIntent) {
+        return '🟡 ПЕРЕШЁЛ В YCLIENTS';
+    }
+
     if (card.hasLead && card.ended) {
         return '🔥 ЗАЯВКА · ВИЗИТ ЗАВЕРШЁН';
     }
@@ -5229,6 +5233,11 @@ async function upsertPlenoshnayaVisitCard(
         card.hasLead = true;
     }
 
+    if (eventType === 'yclients_open') {
+        card.yclientsIntent = true;
+        card.yclientsIntentAt = now;
+    }
+
     if (
         eventType &&
         eventType !== 'visit_end'
@@ -5717,6 +5726,13 @@ async function linkPlenoshnayaYclientsBookingToVisit(
             payload
         );
 
+    if (record.online === false) {
+        return {
+            linked: false,
+            reason: 'not_online_record'
+        };
+    }
+
     const client =
         getPlenoshnayaYclientsClient(
             record,
@@ -5845,7 +5861,7 @@ async function linkPlenoshnayaYclientsBookingToVisit(
         best.score >= 60 ||
         (
             candidates.length === 1 &&
-            bestAge <= 45 * 60 * 1000
+            bestAge <= 20 * 60 * 1000
         ) ||
         (
             best.score >= 30 &&
@@ -5881,6 +5897,8 @@ async function linkPlenoshnayaYclientsBookingToVisit(
 
     card.hasYclientsBooking =
         true;
+    card.yclientsIntent =
+        false;
 
     if (recordId) {
         card.yclientsRecordId =
