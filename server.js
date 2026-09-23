@@ -91,6 +91,18 @@ const PLENOSHNAYA_IDENTITY_SECRET =
         ''
     );
 
+const PLENOSHNAYA_YCLIENTS_COMPANY_ID =
+    Number(
+        process.env.PLENOSHNAYA_YCLIENTS_COMPANY_ID ||
+        1291516
+    );
+
+const PLENOSHNAYA_YCLIENTS_WEBHOOK_SECRET =
+    normalizeEnvValue(
+        process.env.PLENOSHNAYA_YCLIENTS_WEBHOOK_SECRET ||
+        ''
+    );
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://rtn.pro';
 const PUBLIC_API_URL = (process.env.PUBLIC_API_URL || 'https://rhino-api-yrfq.onrender.com').replace(/\/$/, '');
 
@@ -5443,6 +5455,634 @@ async function upsertPlenoshnayaVisitCard(
     };
 }
 
+// ============================================================
+// ПЛЁНОШНАЯ — YCLIENTS WEBHOOK: РЕАЛЬНЫЕ ОНЛАЙН-ЗАПИСИ
+// ============================================================
+
+const PLENOSHNAYA_YCLIENTS_DEDUPE_TTL_MS =
+    48 * 60 * 60 * 1000;
+
+const plenoshnayaYclientsRecent =
+    new Map();
+
+function cleanupPlenoshnayaYclientsRecent() {
+    const now =
+        Date.now();
+
+    for (
+        const [key, timestamp]
+        of plenoshnayaYclientsRecent.entries()
+    ) {
+        if (
+            now - timestamp >
+            PLENOSHNAYA_YCLIENTS_DEDUPE_TTL_MS
+        ) {
+            plenoshnayaYclientsRecent.delete(
+                key
+            );
+        }
+    }
+}
+
+function isPlenoshnayaYclientsWebhookAuthorized(req) {
+    if (!PLENOSHNAYA_YCLIENTS_WEBHOOK_SECRET) {
+        return true;
+    }
+
+    const supplied =
+        cleanPlenoshnayaLeadValue(
+            req.query?.key ||
+            req.get('x-yclients-webhook-secret'),
+            500
+        );
+
+    if (!supplied) {
+        return false;
+    }
+
+    const expectedBuffer =
+        Buffer.from(
+            PLENOSHNAYA_YCLIENTS_WEBHOOK_SECRET,
+            'utf8'
+        );
+
+    const suppliedBuffer =
+        Buffer.from(
+            supplied,
+            'utf8'
+        );
+
+    return (
+        expectedBuffer.length ===
+            suppliedBuffer.length &&
+        crypto.timingSafeEqual(
+            expectedBuffer,
+            suppliedBuffer
+        )
+    );
+}
+
+function getPlenoshnayaYclientsRecord(payload = {}) {
+    const data =
+        payload?.data;
+
+    if (
+        data &&
+        typeof data === 'object'
+    ) {
+        if (
+            data.record &&
+            typeof data.record === 'object'
+        ) {
+            return data.record;
+        }
+
+        return data;
+    }
+
+    if (
+        payload?.record &&
+        typeof payload.record === 'object'
+    ) {
+        return payload.record;
+    }
+
+    if (
+        payload?.resource_data &&
+        typeof payload.resource_data === 'object'
+    ) {
+        return payload.resource_data;
+    }
+
+    return payload || {};
+}
+
+function formatPlenoshnayaYclientsPhone(value) {
+    const digits =
+        String(value || '')
+            .replace(/\D/g, '');
+
+    if (/^7\d{10}$/.test(digits)) {
+        return (
+            '+' +
+            digits[0] +
+            ' ' +
+            digits.slice(1, 4) +
+            ' ' +
+            digits.slice(4, 7) +
+            '-' +
+            digits.slice(7, 9) +
+            '-' +
+            digits.slice(9, 11)
+        );
+    }
+
+    return cleanPlenoshnayaLeadValue(
+        value,
+        80
+    );
+}
+
+function formatPlenoshnayaYclientsDate(value) {
+    const clean =
+        cleanPlenoshnayaLeadValue(
+            value,
+            80
+        );
+
+    if (!clean) {
+        return '';
+    }
+
+    const simpleMatch =
+        clean.match(
+            /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/
+        );
+
+    if (simpleMatch) {
+        const months = [
+            '',
+            'января',
+            'февраля',
+            'марта',
+            'апреля',
+            'мая',
+            'июня',
+            'июля',
+            'августа',
+            'сентября',
+            'октября',
+            'ноября',
+            'декабря'
+        ];
+
+        const day =
+            Number(simpleMatch[3]);
+
+        const month =
+            months[
+                Number(simpleMatch[2])
+            ] || simpleMatch[2];
+
+        return (
+            `${day} ${month} · ` +
+            `${simpleMatch[4]}:${simpleMatch[5]}`
+        );
+    }
+
+    return clean;
+}
+
+function getPlenoshnayaYclientsClient(record = {}, payload = {}) {
+    const client =
+        (
+            record.client &&
+            typeof record.client === 'object'
+        )
+            ? record.client
+            : (
+                payload.client &&
+                typeof payload.client === 'object'
+                    ? payload.client
+                    : {}
+            );
+
+    const name =
+        cleanPlenoshnayaLeadValue(
+            record.fullname ||
+            record.client_name ||
+            record.name ||
+            client.fullname ||
+            client.name ||
+            payload.fullname ||
+            payload.client_name,
+            160
+        );
+
+    const phone =
+        formatPlenoshnayaYclientsPhone(
+            record.phone ||
+            record.client_phone ||
+            client.phone ||
+            payload.phone ||
+            payload.client_phone
+        );
+
+    return {
+        name,
+        phone
+    };
+}
+
+function getPlenoshnayaYclientsServices(record = {}, payload = {}) {
+    let services =
+        record.services ||
+        payload.services ||
+        [];
+
+    if (!Array.isArray(services)) {
+        services = [services];
+    }
+
+    return services
+        .filter(Boolean)
+        .map(service => {
+            if (
+                typeof service !== 'object'
+            ) {
+                return {
+                    id:
+                        cleanPlenoshnayaLeadValue(
+                            service,
+                            80
+                        ),
+                    title: '',
+                    cost: null
+                };
+            }
+
+            const rawCost =
+                service.cost ??
+                service.price ??
+                service.price_min ??
+                null;
+
+            const numericCost =
+                Number(rawCost);
+
+            return {
+                id:
+                    cleanPlenoshnayaLeadValue(
+                        service.id ||
+                        service.service_id,
+                        80
+                    ),
+                title:
+                    cleanPlenoshnayaLeadValue(
+                        service.title ||
+                        service.name,
+                        300
+                    ),
+                cost:
+                    Number.isFinite(numericCost)
+                        ? numericCost
+                        : null
+            };
+        });
+}
+
+function getPlenoshnayaYclientsStaff(record = {}, payload = {}) {
+    const staff =
+        (
+            record.staff &&
+            typeof record.staff === 'object'
+        )
+            ? record.staff
+            : (
+                payload.staff &&
+                typeof payload.staff === 'object'
+                    ? payload.staff
+                    : {}
+            );
+
+    return {
+        id:
+            cleanPlenoshnayaLeadValue(
+                staff.id ||
+                record.staff_id ||
+                payload.staff_id,
+                80
+            ),
+        name:
+            cleanPlenoshnayaLeadValue(
+                staff.name ||
+                record.staff_name ||
+                payload.staff_name,
+                160
+            )
+    };
+}
+
+function buildPlenoshnayaYclientsTelegramText(
+    payload = {}
+) {
+    const record =
+        getPlenoshnayaYclientsRecord(
+            payload
+        );
+
+    const recordId =
+        cleanPlenoshnayaLeadValue(
+            payload.resource_id ||
+            record.record_id ||
+            record.id ||
+            payload.record_id,
+            100
+        );
+
+    const client =
+        getPlenoshnayaYclientsClient(
+            record,
+            payload
+        );
+
+    const services =
+        getPlenoshnayaYclientsServices(
+            record,
+            payload
+        );
+
+    const staff =
+        getPlenoshnayaYclientsStaff(
+            record,
+            payload
+        );
+
+    const date =
+        formatPlenoshnayaYclientsDate(
+            record.datetime ||
+            record.date ||
+            payload.datetime ||
+            payload.date
+        );
+
+    const comment =
+        cleanPlenoshnayaLeadValue(
+            record.comment ||
+            payload.comment,
+            500
+        );
+
+    const serviceLines =
+        services.length
+            ? services.map(service => {
+                const title =
+                    service.title ||
+                    (
+                        service.id
+                            ? `Услуга #${service.id}`
+                            : 'Услуга'
+                    );
+
+                return `🚘 ${title}`;
+            })
+            : ['🚘 Услуга YCLIENTS'];
+
+    const totalCost =
+        services.reduce(
+            (sum, service) =>
+                sum +
+                (
+                    Number.isFinite(
+                        service.cost
+                    )
+                        ? service.cost
+                        : 0
+                ),
+            0
+        );
+
+    const lines = [
+        '✅ НОВАЯ ЗАПИСЬ В YCLIENTS',
+        '',
+        ...serviceLines,
+        totalCost > 0
+            ? `💰 ${new Intl.NumberFormat('ru-RU').format(totalCost)} ₽`
+            : null,
+        date
+            ? `📅 ${date}`
+            : null,
+        staff.name
+            ? `👨‍🔧 Мастер: ${staff.name}`
+            : (
+                staff.id
+                    ? `👨‍🔧 Мастер #${staff.id}`
+                    : null
+            ),
+        '',
+        client.name
+            ? `👤 ${client.name}`
+            : null,
+        client.phone
+            ? `📞 ${client.phone}`
+            : null,
+        comment
+            ? `💬 ${comment}`
+            : null,
+        recordId
+            ? `Запись #${recordId}`
+            : null
+    ];
+
+    return lines
+        .filter(
+            value =>
+                value !== null &&
+                value !== undefined
+        )
+        .join('\n')
+        .slice(0, 3900);
+}
+
+async function processPlenoshnayaYclientsWebhook(
+    payload = {}
+) {
+    const record =
+        getPlenoshnayaYclientsRecord(
+            payload
+        );
+
+    const companyId =
+        Number(
+            payload.company_id ||
+            record.company_id ||
+            record.company?.id ||
+            0
+        );
+
+    const resource =
+        cleanPlenoshnayaLeadValue(
+            payload.resource ||
+            payload.resource_type ||
+            payload.object_type,
+            80
+        ).toLowerCase();
+
+    const status =
+        cleanPlenoshnayaLeadValue(
+            payload.status ||
+            payload.action ||
+            payload.event,
+            80
+        ).toLowerCase();
+
+    const recordId =
+        cleanPlenoshnayaLeadValue(
+            payload.resource_id ||
+            record.record_id ||
+            record.id ||
+            payload.record_id,
+            100
+        );
+
+    if (
+        companyId !==
+        PLENOSHNAYA_YCLIENTS_COMPANY_ID
+    ) {
+        console.warn(
+            'Plenoshnaya YCLIENTS webhook ignored: wrong company',
+            companyId
+        );
+
+        return {
+            sent: false,
+            reason: 'wrong_company'
+        };
+    }
+
+    const isRecord =
+        !resource ||
+        resource === 'record' ||
+        resource === 'records';
+
+    const isCreate =
+        !status ||
+        status === 'create' ||
+        status === 'created' ||
+        status === 'new';
+
+    if (
+        !isRecord ||
+        !isCreate
+    ) {
+        return {
+            sent: false,
+            reason: 'not_new_record'
+        };
+    }
+
+    cleanupPlenoshnayaYclientsRecent();
+
+    const dedupeKey =
+        [
+            companyId,
+            resource || 'record',
+            status || 'create',
+            recordId ||
+                cleanPlenoshnayaLeadValue(
+                    record.record_hash ||
+                    payload.record_hash,
+                    120
+                )
+        ]
+            .filter(Boolean)
+            .join('|');
+
+    if (
+        dedupeKey &&
+        plenoshnayaYclientsRecent.has(
+            dedupeKey
+        )
+    ) {
+        return {
+            sent: false,
+            reason: 'duplicate'
+        };
+    }
+
+    if (dedupeKey) {
+        plenoshnayaYclientsRecent.set(
+            dedupeKey,
+            Date.now()
+        );
+    }
+
+    const text =
+        buildPlenoshnayaYclientsTelegramText(
+            payload
+        );
+
+    await callPlenoshnayaTelegram(
+        'sendMessage',
+        {
+            chat_id:
+                PLENOSHNAYA_TG_CHAT_ID,
+            text,
+            disable_web_page_preview:
+                true
+        }
+    );
+
+    console.log(
+        'Plenoshnaya YCLIENTS booking sent to Telegram:',
+        recordId || 'no-record-id'
+    );
+
+    return {
+        sent: true,
+        recordId:
+            recordId || null
+    };
+}
+
+app.post(
+    '/api/plenoshnaya/yclients/webhook',
+    async (req, res) => {
+        if (
+            !isPlenoshnayaYclientsWebhookAuthorized(
+                req
+            )
+        ) {
+            return res
+                .status(403)
+                .json({
+                    ok: false,
+                    error:
+                        'Invalid webhook secret'
+                });
+        }
+
+        const payload =
+            (
+                req.body &&
+                typeof req.body === 'object'
+            )
+                ? req.body
+                : {};
+
+        const events =
+            Array.isArray(payload)
+                ? payload
+                : [payload];
+
+        // YCLIENTS webhooks are acknowledged immediately.
+        // Telegram processing continues asynchronously so YCLIENTS
+        // is not blocked by a slow Telegram API response.
+        res.status(200).json({
+            ok: true,
+            accepted:
+                events.length
+        });
+
+        for (const event of events) {
+            Promise.resolve()
+                .then(
+                    () =>
+                        processPlenoshnayaYclientsWebhook(
+                            event
+                        )
+                )
+                .catch(error => {
+                    console.error(
+                        'Plenoshnaya YCLIENTS webhook processing error:',
+                        error.response?.data ||
+                        error.message
+                    );
+                });
+        }
+    }
+);
+
 app.get('/api/plenoshnaya/visit-details', (req, res) => {
     const key =
         parsePlenoshnayaVisitDetailsToken(
@@ -5498,7 +6138,13 @@ app.get('/api/plenoshnaya/health', (req, res) => {
             PLENOSHNAYA_IDENTITY_SECRET
         ),
         liveVisitCards:
-            plenoshnayaVisitCards.size
+            plenoshnayaVisitCards.size,
+        yclientsCompanyId:
+            PLENOSHNAYA_YCLIENTS_COMPANY_ID,
+        yclientsWebhookProtected:
+            Boolean(
+                PLENOSHNAYA_YCLIENTS_WEBHOOK_SECRET
+            )
     });
 });
 
