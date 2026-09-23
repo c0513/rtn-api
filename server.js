@@ -4059,6 +4059,9 @@ async function getPlenoshnayaIpInfo(ip) {
 const PLENOSHNAYA_VISIT_CARD_TTL_MS =
     12 * 60 * 60 * 1000;
 
+const PLENOSHNAYA_VISIT_INACTIVE_MS =
+    75 * 1000;
+
 const plenoshnayaVisitCards =
     new Map();
 
@@ -4075,6 +4078,12 @@ function cleanupPlenoshnayaVisitCards() {
             now - Number(card.lastSeenAt || card.startedAt || 0) >
                 PLENOSHNAYA_VISIT_CARD_TTL_MS
         ) {
+            if (card?.inactivityTimer) {
+                clearTimeout(
+                    card.inactivityTimer
+                );
+            }
+
             plenoshnayaVisitCards.delete(key);
         }
     }
@@ -4286,16 +4295,32 @@ async function callPlenoshnayaTelegram(
     return response.data.result;
 }
 
-function buildPlenoshnayaVisitCardText(card) {
-    const status =
-        card.hasLead
-            ? '🔥 ЗАЯВКА'
-            : (
-                card.ended
-                    ? '⚫ ВИЗИТ ЗАВЕРШЁН'
-                    : '🟢 НА САЙТЕ'
-            );
+function escapePlenoshnayaHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
 
+function getPlenoshnayaVisitStatus(card) {
+    if (card.hasLead && card.ended) {
+        return '🔥 ЗАЯВКА · ВИЗИТ ЗАВЕРШЁН';
+    }
+
+    if (card.hasLead) {
+        return '🔥 ЗАЯВКА';
+    }
+
+    if (card.ended) {
+        return '⚫ ВИЗИТ ЗАВЕРШЁН';
+    }
+
+    return '🟢 НА САЙТЕ';
+}
+
+function getPlenoshnayaManagerSource(card) {
     const source =
         [
             card.utmSource,
@@ -4303,6 +4328,221 @@ function buildPlenoshnayaVisitCardText(card) {
         ]
             .filter(Boolean)
             .join(' / ');
+
+    if (source) {
+        return source;
+    }
+
+    if (card.referrer) {
+        try {
+            return new URL(
+                card.referrer
+            ).hostname.replace(/^www\./, '');
+        } catch (error) {}
+    }
+
+    return 'Прямой заход';
+}
+
+function buildPlenoshnayaVisitDetailsToken(key) {
+    if (!PLENOSHNAYA_IDENTITY_SECRET) {
+        return '';
+    }
+
+    const encoded =
+        Buffer.from(
+            String(key),
+            'utf8'
+        ).toString('base64url');
+
+    const signature =
+        crypto
+            .createHmac(
+                'sha256',
+                PLENOSHNAYA_IDENTITY_SECRET
+            )
+            .update(encoded)
+            .digest('base64url')
+            .slice(0, 32);
+
+    return `${encoded}.${signature}`;
+}
+
+function parsePlenoshnayaVisitDetailsToken(token) {
+    if (
+        !PLENOSHNAYA_IDENTITY_SECRET ||
+        !token
+    ) {
+        return '';
+    }
+
+    const parts =
+        String(token).split('.');
+
+    if (parts.length !== 2) {
+        return '';
+    }
+
+    const [
+        encoded,
+        suppliedSignature
+    ] = parts;
+
+    const expectedSignature =
+        crypto
+            .createHmac(
+                'sha256',
+                PLENOSHNAYA_IDENTITY_SECRET
+            )
+            .update(encoded)
+            .digest('base64url')
+            .slice(0, 32);
+
+    const supplied =
+        Buffer.from(
+            suppliedSignature,
+            'utf8'
+        );
+
+    const expected =
+        Buffer.from(
+            expectedSignature,
+            'utf8'
+        );
+
+    if (
+        supplied.length !== expected.length ||
+        !crypto.timingSafeEqual(
+            supplied,
+            expected
+        )
+    ) {
+        return '';
+    }
+
+    try {
+        return Buffer.from(
+            encoded,
+            'base64url'
+        ).toString('utf8');
+    } catch (error) {
+        return '';
+    }
+}
+
+function getPlenoshnayaVisitDetailsUrl(card) {
+    const token =
+        buildPlenoshnayaVisitDetailsToken(
+            card.key
+        );
+
+    if (!token) {
+        return '';
+    }
+
+    return `${PUBLIC_API_URL}/api/plenoshnaya/visit-details?t=${encodeURIComponent(token)}`;
+}
+
+function buildPlenoshnayaVisitReplyMarkup(card) {
+    const url =
+        getPlenoshnayaVisitDetailsUrl(
+            card
+        );
+
+    if (!url) {
+        return undefined;
+    }
+
+    return {
+        inline_keyboard: [
+            [
+                {
+                    text: 'Подробнее',
+                    url
+                }
+            ]
+        ]
+    };
+}
+
+function buildPlenoshnayaVisitCardText(card) {
+    const shortId =
+        shortPlenoshnayaVisitId(
+            card.sessionId ||
+            card.visitorId ||
+            card.key
+        );
+
+    const status =
+        getPlenoshnayaVisitStatus(
+            card
+        );
+
+    const source =
+        getPlenoshnayaManagerSource(
+            card
+        );
+
+    const page =
+        card.pageTitle ||
+        card.service ||
+        'Сайт Плёношной';
+
+    const duration =
+        formatPlenoshnayaVisitDuration(
+            card.startedAt,
+            card.lastSeenAt
+        );
+
+    const compactCalculator =
+        cleanPlenoshnayaLeadValue(
+            card.calculatorSelection,
+            280
+        );
+
+    const lines = [
+        `${status} · #${shortId}`,
+        page,
+        '',
+        `📣 ${source}`,
+        `⏱ ${duration}${card.pageCount ? ` · ${card.pageCount} стр.` : ''}`,
+        card.visitCount && Number(card.visitCount) > 1
+            ? `🔁 Посещение №${card.visitCount}`
+            : null,
+        card.hasLead && card.name
+            ? `👤 ${card.name}`
+            : null,
+        card.hasLead && card.phone
+            ? `📞 ${card.phone}`
+            : null,
+        card.hasLead && card.service
+            ? `🚘 ${card.service}`
+            : null,
+        compactCalculator
+            ? `🧮 ${compactCalculator}`
+            : null
+    ];
+
+    return lines
+        .filter(
+            value =>
+                value !== null &&
+                value !== undefined
+        )
+        .join('\n')
+        .slice(0, 1200);
+}
+
+function buildPlenoshnayaVisitDetailsHtml(card) {
+    const status =
+        getPlenoshnayaVisitStatus(
+            card
+        );
+
+    const source =
+        getPlenoshnayaManagerSource(
+            card
+        );
 
     const location =
         [
@@ -4313,85 +4553,246 @@ function buildPlenoshnayaVisitCardText(card) {
             .filter(Boolean)
             .join(', ');
 
-    const currentPage =
-        card.pageTitle ||
-        card.page ||
-        '—';
-
-    const actions =
-        Array.isArray(card.events)
-            ? card.events.slice(-8)
-            : [];
-
-    const lines = [
-        `👤 ПЛЁНОШНАЯ — ВИЗИТ #${shortPlenoshnayaVisitId(card.sessionId || card.visitorId || card.key)}`,
-        `Статус: ${status}`,
-        `⏱ На сайте: ${formatPlenoshnayaVisitDuration(card.startedAt, card.lastSeenAt)}`,
-        card.visitCount
-            ? `🔁 Визит пользователя: ${card.visitCount}`
-            : null,
-        card.pageCount
-            ? `📚 Страниц в сессии: ${card.pageCount}`
-            : null,
-        '',
-        card.hasLead && card.name
-            ? `👤 Имя: ${card.name}`
-            : null,
-        card.hasLead && card.phone
-            ? `📞 Телефон: ${card.phone}`
-            : null,
-        card.hasLead && card.service
-            ? `🚘 Заявка: ${card.service}`
-            : null,
-        `📍 Сейчас: ${currentPage}`,
-        source
-            ? `📣 Источник: ${source}`
-            : null,
-        card.utmCampaign
-            ? `🎯 Кампания: ${card.utmCampaign}`
-            : null,
-        card.searchPhrase
-            ? `🔍 Поиск: ${card.searchPhrase}`
-            : null,
-        card.yclid
-            ? `🟡 yclid: ${card.yclid}`
-            : null,
-        card.metrikaClientId
-            ? `📊 Метрика ClientID: ${card.metrikaClientId}`
-            : null,
-        card.referrer
-            ? `↩️ Referrer: ${card.referrer}`
-            : null,
-        location
-            ? `🌍 Гео по сети: ${location}`
-            : null,
-        card.device || card.browser
-            ? `📱 ${[card.device, card.browser].filter(Boolean).join(' · ')}`
-            : null,
-        card.calculatorSelection
-            ? `🧮 Калькулятор: ${card.calculatorSelection}`
-            : null,
-        card.pageHistory
-            ? `🧭 Маршрут: ${card.pageHistory}`
-            : null,
-        '',
-        actions.length
-            ? 'Последние действия:'
-            : null,
-        ...actions.map(
-            event =>
-                `${event.time} — ${event.label}`
-        )
-    ];
-
-    return lines
+    const rows = [
+        ['Статус', status],
+        ['Визит', shortPlenoshnayaVisitId(card.sessionId || card.visitorId || card.key)],
+        ['Начало', formatPlenoshnayaMoscowTime(card.startedAt)],
+        ['Последняя активность', formatPlenoshnayaMoscowTime(card.lastSeenAt)],
+        ['Время на сайте', formatPlenoshnayaVisitDuration(card.startedAt, card.lastSeenAt)],
+        ['Визит пользователя', card.visitCount],
+        ['Страниц в сессии', card.pageCount],
+        ['Текущая страница', card.pageTitle || card.page],
+        ['URL', card.page],
+        ['Источник', source],
+        ['UTM source', card.utmSource],
+        ['UTM medium', card.utmMedium],
+        ['UTM campaign', card.utmCampaign],
+        ['UTM content', card.utmContent],
+        ['UTM term', card.utmTerm],
+        ['Поисковая фраза', card.searchPhrase],
+        ['Рекламная фраза', card.adPhrase],
+        ['yclid', card.yclid],
+        ['Referrer', card.referrer],
+        ['Первая страница', card.firstPage],
+        ['Первый referrer', card.firstReferrer],
+        ['Маршрут', card.pageHistory],
+        ['Калькулятор', card.calculatorSelection],
+        ['Имя', card.name],
+        ['Телефон', card.phone],
+        ['Услуга', card.service],
+        ['Метрика ClientID', card.metrikaClientId],
+        ['Visitor ID', card.visitorId],
+        ['Session ID', card.sessionId],
+        ['IP', card.visitorIp],
+        ['Гео по сети', location],
+        ['Устройство', card.device],
+        ['Модель', card.deviceModel],
+        ['ОС / платформа', card.platformVersion],
+        ['Браузер', card.browser],
+        ['Версии браузера', card.browserVersions],
+        ['Язык', card.language],
+        ['Часовой пояс', card.timezone],
+        ['Экран', card.screen],
+        ['Viewport', card.viewport],
+        ['Pixel ratio', card.devicePixelRatio],
+        ['Touch points', card.touchPoints],
+        ['Color depth', card.colorDepth],
+        ['Ориентация', card.orientation],
+        ['Тема', card.darkMode],
+        ['Reduced motion', card.reducedMotion],
+        ['Cookies enabled', card.cookiesEnabled],
+        ['DNT', card.dnt],
+        ['GPC', card.gpc],
+        ['CPU / ядра', card.cpu],
+        ['Память', card.memory],
+        ['Соединение', card.connection],
+        ['User-Agent', card.userAgent],
+        ['Accept-Language', card.acceptLanguage],
+        ['Client platform', card.clientPlatform],
+        ['Client hints', card.clientHints],
+        ['Country header', card.countryHeader]
+    ]
         .filter(
-            value =>
+            ([, value]) =>
                 value !== null &&
-                value !== undefined
+                value !== undefined &&
+                String(value).trim() !== ''
         )
-        .join('\n')
-        .slice(0, 3900);
+        .map(
+            ([label, value]) =>
+                `<div class="row"><div class="label">${escapePlenoshnayaHtml(label)}</div><div class="value">${escapePlenoshnayaHtml(value)}</div></div>`
+        )
+        .join('');
+
+    const events =
+        (Array.isArray(card.events)
+            ? card.events
+            : [])
+            .map(
+                event =>
+                    `<div class="event"><span>${escapePlenoshnayaHtml(event.time)}</span><b>${escapePlenoshnayaHtml(event.label)}</b></div>`
+            )
+            .join('');
+
+    const refresh =
+        card.ended
+            ? ''
+            : '<meta http-equiv="refresh" content="10">';
+
+    return `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+${refresh}
+<title>Визит Плёношной</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#080808;color:#fff;font-family:Arial,sans-serif}.wrap{max-width:900px;margin:0 auto;padding:24px 16px 60px}.top{padding:22px;border:1px solid #252525;border-radius:16px;background:#0d0d0d;margin-bottom:14px}.status{font-size:22px;font-weight:700;margin-bottom:8px}.sub{color:#999;font-size:13px}.card{border:1px solid #252525;border-radius:16px;background:#0d0d0d;overflow:hidden;margin-top:14px}.title{padding:16px 18px;border-bottom:1px solid #252525;color:#efb321;font-size:12px;text-transform:uppercase;letter-spacing:1px}.row{display:grid;grid-template-columns:190px 1fr;gap:18px;padding:12px 18px;border-bottom:1px solid #1d1d1d}.row:last-child{border-bottom:0}.label{color:#777;font-size:12px}.value{font-size:14px;word-break:break-word}.event{display:grid;grid-template-columns:90px 1fr;gap:12px;padding:11px 18px;border-bottom:1px solid #1d1d1d}.event:last-child{border-bottom:0}.event span{color:#777;font-size:12px}.event b{font-size:14px;font-weight:400}@media(max-width:600px){.row{grid-template-columns:1fr;gap:5px}.event{grid-template-columns:72px 1fr}.status{font-size:19px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="top">
+<div class="status">${escapePlenoshnayaHtml(status)}</div>
+<div class="sub">Техническая карточка визита · обновляется автоматически, пока пользователь на сайте</div>
+</div>
+<div class="card"><div class="title">Данные визита</div>${rows}</div>
+<div class="card"><div class="title">Действия пользователя</div>${events || '<div class="row"><div class="value">Пока нет действий</div></div>'}</div>
+</div>
+</body>
+</html>`;
+}
+
+async function editPlenoshnayaVisitTelegramCard(card) {
+    if (!card?.messageId) {
+        return false;
+    }
+
+    try {
+        await callPlenoshnayaTelegram(
+            'editMessageText',
+            {
+                chat_id:
+                    PLENOSHNAYA_TG_CHAT_ID,
+                message_id:
+                    card.messageId,
+                text:
+                    buildPlenoshnayaVisitCardText(
+                        card
+                    ),
+                disable_web_page_preview:
+                    true,
+                reply_markup:
+                    buildPlenoshnayaVisitReplyMarkup(
+                        card
+                    )
+            }
+        );
+
+        return true;
+    } catch (error) {
+        const description =
+            String(
+                error.response?.data?.description ||
+                error.message ||
+                ''
+            );
+
+        if (
+            /message is not modified/i
+                .test(description)
+        ) {
+            return true;
+        }
+
+        console.warn(
+            'Plenoshnaya live card edit skipped:',
+            description
+        );
+
+        return false;
+    }
+}
+
+function schedulePlenoshnayaVisitAutoEnd(
+    key,
+    card
+) {
+    if (card?.inactivityTimer) {
+        clearTimeout(
+            card.inactivityTimer
+        );
+        card.inactivityTimer = null;
+    }
+
+    if (!card || card.ended) {
+        return;
+    }
+
+    card.inactivityTimer =
+        setTimeout(
+            async () => {
+                const current =
+                    plenoshnayaVisitCards.get(
+                        key
+                    );
+
+                if (
+                    !current ||
+                    current.ended
+                ) {
+                    return;
+                }
+
+                current.ended = true;
+                current.inactivityTimer = null;
+
+                const now =
+                    Date.now();
+
+                const previous =
+                    current.events[
+                        current.events.length - 1
+                    ];
+
+                if (
+                    !previous ||
+                    previous.label !==
+                        'визит завершён по отсутствию активности'
+                ) {
+                    current.events.push({
+                        at: now,
+                        time:
+                            formatPlenoshnayaMoscowTime(
+                                now
+                            ),
+                        label:
+                            'визит завершён по отсутствию активности'
+                    });
+
+                    if (
+                        current.events.length >
+                        20
+                    ) {
+                        current.events =
+                            current.events.slice(
+                                -20
+                            );
+                    }
+                }
+
+                plenoshnayaVisitCards.set(
+                    key,
+                    current
+                );
+
+                await editPlenoshnayaVisitTelegramCard(
+                    current
+                );
+            },
+            PLENOSHNAYA_VISIT_INACTIVE_MS
+        );
 }
 
 async function upsertPlenoshnayaVisitCard(
@@ -4422,6 +4823,7 @@ async function upsertPlenoshnayaVisitCard(
             key,
             messageId: null,
             creatingPromise: null,
+            inactivityTimer: null,
             startedAt: now,
             lastSeenAt: now,
             events: [],
@@ -4510,6 +4912,24 @@ async function upsertPlenoshnayaVisitCard(
     );
 
     assign(
+        'utmContent',
+        payload.utmContent ||
+        payload.utm_content
+    );
+
+    assign(
+        'utmTerm',
+        payload.utmTerm ||
+        payload.utm_term
+    );
+
+    assign(
+        'adPhrase',
+        payload.adPhrase ||
+        payload.ad_phrase
+    );
+
+    assign(
         'searchPhrase',
         payload.searchPhrase ||
         payload.search_phrase
@@ -4535,6 +4955,158 @@ async function upsertPlenoshnayaVisitCard(
     assign(
         'browser',
         payload.browser
+    );
+
+    assign(
+        'language',
+        payload.language
+    );
+
+    assign(
+        'timezone',
+        payload.timezone
+    );
+
+    assign(
+        'screen',
+        payload.screen
+    );
+
+    assign(
+        'viewport',
+        payload.viewport
+    );
+
+    assign(
+        'devicePixelRatio',
+        payload.devicePixelRatio ||
+        payload.device_pixel_ratio
+    );
+
+    assign(
+        'touchPoints',
+        payload.touchPoints ||
+        payload.touch_points
+    );
+
+    assign(
+        'colorDepth',
+        payload.colorDepth ||
+        payload.color_depth
+    );
+
+    assign(
+        'orientation',
+        payload.orientation
+    );
+
+    assign(
+        'darkMode',
+        payload.darkMode ||
+        payload.dark_mode
+    );
+
+    assign(
+        'reducedMotion',
+        payload.reducedMotion ||
+        payload.reduced_motion
+    );
+
+    assign(
+        'cookiesEnabled',
+        payload.cookiesEnabled ||
+        payload.cookies_enabled
+    );
+
+    assign(
+        'dnt',
+        payload.dnt
+    );
+
+    assign(
+        'gpc',
+        payload.gpc
+    );
+
+    assign(
+        'deviceModel',
+        payload.deviceModel ||
+        payload.device_model
+    );
+
+    assign(
+        'platformVersion',
+        payload.platformVersion ||
+        payload.platform_version
+    );
+
+    assign(
+        'browserVersions',
+        payload.browserVersions ||
+        payload.browser_versions
+    );
+
+    assign(
+        'cpu',
+        payload.cpu
+    );
+
+    assign(
+        'memory',
+        payload.memory
+    );
+
+    assign(
+        'connection',
+        payload.connection
+    );
+
+    assign(
+        'firstPage',
+        payload.firstPage ||
+        payload.first_page
+    );
+
+    assign(
+        'firstReferrer',
+        payload.firstReferrer ||
+        payload.first_referrer
+    );
+
+    assign(
+        'visitorIp',
+        payload.visitorIp ||
+        payload.visitor_ip
+    );
+
+    assign(
+        'countryHeader',
+        payload.countryHeader ||
+        payload.country_header
+    );
+
+    assign(
+        'clientPlatform',
+        payload.clientPlatform ||
+        payload.client_platform
+    );
+
+    assign(
+        'clientHints',
+        payload.clientHints ||
+        payload.client_hints
+    );
+
+    assign(
+        'acceptLanguage',
+        payload.acceptLanguage ||
+        payload.accept_language
+    );
+
+    assign(
+        'userAgent',
+        payload.userAgent ||
+        payload.user_agent
     );
 
     assign(
@@ -4603,10 +5175,16 @@ async function upsertPlenoshnayaVisitCard(
 
     if (eventType === 'visit_end') {
         card.ended = true;
-    } else if (
-        eventType &&
-        eventType !== 'heartbeat'
-    ) {
+
+        if (card.inactivityTimer) {
+            clearTimeout(
+                card.inactivityTimer
+            );
+            card.inactivityTimer = null;
+        }
+    } else if (eventType) {
+        // Любая новая активность, включая heartbeat,
+        // возвращает карточку в состояние "на сайте".
         card.ended = false;
     }
 
@@ -4616,7 +5194,16 @@ async function upsertPlenoshnayaVisitCard(
         eventType === 'lead'
     ) {
         card.hasLead = true;
-        card.ended = false;
+    }
+
+    if (
+        eventType &&
+        eventType !== 'visit_end'
+    ) {
+        schedulePlenoshnayaVisitAutoEnd(
+            key,
+            card
+        );
     }
 
     if (
@@ -4678,7 +5265,11 @@ async function upsertPlenoshnayaVisitCard(
                         card.messageId,
                     text,
                     disable_web_page_preview:
-                        true
+                        true,
+                    reply_markup:
+                        buildPlenoshnayaVisitReplyMarkup(
+                            card
+                        )
                 }
             );
 
@@ -4758,7 +5349,11 @@ async function upsertPlenoshnayaVisitCard(
                         text:
                             latestText,
                         disable_web_page_preview:
-                            true
+                            true,
+                        reply_markup:
+                            buildPlenoshnayaVisitReplyMarkup(
+                                card
+                            )
                     }
                 );
             } catch (error) {
@@ -4807,7 +5402,11 @@ async function upsertPlenoshnayaVisitCard(
                 disable_web_page_preview:
                     true,
                 disable_notification:
-                    true
+                    true,
+                reply_markup:
+                    buildPlenoshnayaVisitReplyMarkup(
+                        card
+                    )
             }
         );
 
@@ -4843,6 +5442,49 @@ async function upsertPlenoshnayaVisitCard(
             card.messageId
     };
 }
+
+app.get('/api/plenoshnaya/visit-details', (req, res) => {
+    const key =
+        parsePlenoshnayaVisitDetailsToken(
+            req.query?.t
+        );
+
+    if (!key) {
+        return res
+            .status(403)
+            .type('html')
+            .send(
+                '<!doctype html><meta charset="utf-8"><title>Недоступно</title><body style="background:#080808;color:#fff;font-family:Arial;padding:30px">Ссылка недействительна.</body>'
+            );
+    }
+
+    const card =
+        plenoshnayaVisitCards.get(
+            key
+        );
+
+    if (!card) {
+        return res
+            .status(404)
+            .type('html')
+            .send(
+                '<!doctype html><meta charset="utf-8"><title>Визит завершён</title><body style="background:#080808;color:#fff;font-family:Arial;padding:30px">Подробности этого визита уже недоступны. Оперативные карточки хранятся ограниченное время.</body>'
+            );
+    }
+
+    res.set(
+        'Cache-Control',
+        'no-store, no-cache, must-revalidate'
+    );
+
+    return res
+        .type('html')
+        .send(
+            buildPlenoshnayaVisitDetailsHtml(
+                card
+            )
+        );
+});
 
 app.get('/api/plenoshnaya/health', (req, res) => {
     return res.json({
@@ -6017,12 +6659,41 @@ app.post(
                     utmSource,
                     utmMedium,
                     utmCampaign,
+                    utmContent,
+                    utmTerm,
                     searchPhrase,
+                    adPhrase,
                     yclid,
                     device,
                     browser,
-                    placement,
+                    language,
+                    timezone,
+                    screen,
+                    viewport,
+                    devicePixelRatio,
+                    touchPoints,
+                    colorDepth,
+                    orientation,
+                    darkMode,
+                    reducedMotion,
+                    cookiesEnabled,
+                    dnt,
+                    gpc,
+                    deviceModel,
+                    platformVersion,
+                    browserVersions,
+                    cpu,
+                    memory,
+                    connection,
+                    firstPage,
+                    firstReferrer,
                     visitorIp,
+                    countryHeader,
+                    clientPlatform,
+                    clientHints,
+                    acceptLanguage,
+                    userAgent,
+                    placement,
                     ipInfo,
                     name,
                     phone
