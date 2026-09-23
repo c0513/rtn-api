@@ -327,6 +327,61 @@ async function fetchAllYooKassaPayments() {
     };
 }
 
+async function fetchAllYooKassaReceipts() {
+    if (!YOOKASSA_SHOP_ID || !YOOKASSA_SECRET_KEY) {
+        throw new Error('YooKassa не настроена');
+    }
+
+    const receipts = [];
+    let cursor = '';
+    let pages = 0;
+
+    do {
+        const params = { limit: 100 };
+
+        if (cursor) {
+            params.cursor = cursor;
+        }
+
+        const response = await axios.get(
+            'https://api.yookassa.ru/v3/receipts',
+            {
+                auth: {
+                    username: YOOKASSA_SHOP_ID,
+                    password: YOOKASSA_SECRET_KEY
+                },
+                headers: {
+                    Accept: 'application/json'
+                },
+                params,
+                timeout: 20000
+            }
+        );
+
+        const items = Array.isArray(response.data?.items)
+            ? response.data.items
+            : [];
+
+        receipts.push(...items);
+        pages += 1;
+
+        cursor = String(response.data?.next_cursor || '').trim();
+
+        if (cursor) {
+            await sleep(150);
+        }
+
+        if (pages > 1000) {
+            throw new Error('YooKassa receipts pagination safety limit exceeded');
+        }
+    } while (cursor);
+
+    return {
+        pages,
+        receipts
+    };
+}
+
 function requireBlogAdmin(req, res, next) {
     if (!BLOG_ADMIN_TOKEN) {
         return res.status(503).json({ error: 'BLOG_ADMIN_TOKEN не настроен на сервере' });
@@ -3248,6 +3303,112 @@ app.get('/api/admin/yookassa/payments-export', requireBlogAdmin, async (req, res
                 error.response?.data?.error ||
                 error.message ||
                 'Не удалось выгрузить платежи YooKassa'
+        });
+    }
+});
+
+app.get('/api/admin/yookassa/receipts-export', requireBlogAdmin, async (req, res) => {
+    try {
+        const result = await fetchAllYooKassaReceipts();
+
+        res.set('Cache-Control', 'no-store');
+
+        return res.json({
+            exportedAt: new Date().toISOString(),
+            pages: result.pages,
+            count: result.receipts.length,
+            receipts: result.receipts
+        });
+    } catch (error) {
+        console.error(
+            'YooKassa receipts export error:',
+            error.response?.data || error.message
+        );
+
+        return res.status(502).json({
+            error:
+                error.response?.data?.description ||
+                error.response?.data?.error ||
+                error.message ||
+                'Не удалось выгрузить чеки YooKassa'
+        });
+    }
+});
+
+app.get('/api/admin/bitrix/yookassa-audit', requireBlogAdmin, async (req, res) => {
+    try {
+        if (!isBitrixConfigured()) {
+            return res.status(503).json({
+                error: 'BITRIX_WEBHOOK_URL не настроен'
+            });
+        }
+
+        const result = await fetchAllYooKassaPayments();
+
+        const candidates = result.payments.filter(payment => {
+            const amount = Number(payment?.amount?.value || 0);
+            const refunded = Number(payment?.refunded_amount?.value || 0);
+
+            return (
+                payment?.status === 'succeeded' &&
+                payment?.paid === true &&
+                amount > 0 &&
+                refunded <= 0
+            );
+        });
+
+        const audit = [];
+
+        for (const payment of candidates) {
+            const metadata = payment?.metadata || {};
+
+            const contactId = await findBitrixContactId(
+                metadata.customerPhone,
+                metadata.customerEmail
+            );
+
+            const dealId = await findExistingBitrixDeal(
+                metadata.orderId
+            );
+
+            audit.push({
+                paymentId: payment.id,
+                orderId: metadata.orderId || '',
+                createdAt: payment.created_at || '',
+                amount: Number(payment?.amount?.value || 0),
+                customerName: metadata.customerName || '',
+                customerPhone: metadata.customerPhone || '',
+                customerEmail: metadata.customerEmail || '',
+                metadataBitrixDealId: metadata.bitrixDealId || '',
+                contactId: contactId || null,
+                dealId: dealId || null
+            });
+
+            await sleep(250);
+        }
+
+        return res.json({
+            checkedAt: new Date().toISOString(),
+            candidates: candidates.length,
+            contactsFound: audit.filter(item => item.contactId).length,
+            dealsFound: audit.filter(item => item.dealId).length,
+            missingContacts: audit.filter(item => !item.contactId).length,
+            missingDeals: audit.filter(item => !item.dealId).length,
+            audit
+        });
+    } catch (error) {
+        console.error(
+            'Bitrix YooKassa audit error:',
+            error.response?.data || error.message
+        );
+
+        return res.status(502).json({
+            error:
+                error.response?.data?.error_description ||
+                error.response?.data?.description ||
+                error.response?.data?.error ||
+                error.message ||
+                'Не удалось сверить YooKassa с Bitrix24'
         });
     }
 });
