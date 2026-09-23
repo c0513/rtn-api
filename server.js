@@ -4421,12 +4421,22 @@ async function upsertPlenoshnayaVisitCard(
         card = {
             key,
             messageId: null,
+            creatingPromise: null,
             startedAt: now,
             lastSeenAt: now,
             events: [],
             hasLead: false,
             ended: false
         };
+
+        // Сразу кладём карточку в Map ДО первого await.
+        // Иначе несколько стартовых событий одного визита
+        // (consent_accept / visit_start / page_view / ClientID)
+        // успевают одновременно создать несколько Telegram-сообщений.
+        plenoshnayaVisitCards.set(
+            key,
+            card
+        );
     }
 
     const assign = (
@@ -4719,21 +4729,105 @@ async function upsertPlenoshnayaVisitCard(
         }
     }
 
-    const result =
-        await callPlenoshnayaTelegram(
+    // Если другой стартовый event уже создаёт Telegram-карточку
+    // этого же визита, ждём его вместо второго sendMessage.
+    if (
+        !card.messageId &&
+        card.creatingPromise
+    ) {
+        try {
+            await card.creatingPromise;
+        } catch (error) {
+            // Первый create мог упасть — ниже попробуем создать карточку снова.
+        }
+
+        if (card.messageId) {
+            const latestText =
+                buildPlenoshnayaVisitCardText(
+                    card
+                );
+
+            try {
+                await callPlenoshnayaTelegram(
+                    'editMessageText',
+                    {
+                        chat_id:
+                            PLENOSHNAYA_TG_CHAT_ID,
+                        message_id:
+                            card.messageId,
+                        text:
+                            latestText,
+                        disable_web_page_preview:
+                            true
+                    }
+                );
+            } catch (error) {
+                const description =
+                    String(
+                        error.response?.data?.description ||
+                        error.message ||
+                        ''
+                    );
+
+                if (
+                    !/message is not modified/i
+                        .test(description)
+                ) {
+                    console.warn(
+                        'Plenoshnaya visit card post-create edit skipped:',
+                        description
+                    );
+                }
+            }
+
+            plenoshnayaVisitCards.set(
+                key,
+                card
+            );
+
+            return {
+                updated: true,
+                created: false,
+                messageId:
+                    card.messageId
+            };
+        }
+    }
+
+    const createPromise =
+        callPlenoshnayaTelegram(
             'sendMessage',
             {
                 chat_id:
                     PLENOSHNAYA_TG_CHAT_ID,
-                text,
+                text:
+                    buildPlenoshnayaVisitCardText(
+                        card
+                    ),
                 disable_web_page_preview:
                     true
             }
         );
 
-    card.messageId =
-        result?.message_id ||
-        null;
+    card.creatingPromise =
+        createPromise;
+
+    plenoshnayaVisitCards.set(
+        key,
+        card
+    );
+
+    try {
+        const result =
+            await createPromise;
+
+        card.messageId =
+            result?.message_id ||
+            null;
+    } finally {
+        card.creatingPromise =
+            null;
+    }
 
     plenoshnayaVisitCards.set(
         key,
