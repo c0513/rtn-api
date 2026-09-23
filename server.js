@@ -684,6 +684,177 @@ function findRtnProductForOrderItem(item = {}) {
     }) || null;
 }
 
+function rtnProductFromReceiptDescription(description) {
+    const normalized = normalizeProductText(description)
+        .replace(/&/g, 'AND')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const exactMap = {
+        'MASS GAINER (СОЛЕНАЯ КАРАМЕЛЬ)': 'mass-caramel',
+        'WHEY PRO (WHITE CHOCOLATE AND RASPBERRY)': 'whey-raspberry',
+        'WHEY PRO (МАЛИНА В БЕЛОМ ШОКОЛАДЕ)': 'whey-raspberry',
+        'WHEY PRO (ЛИМОННЫЙ МУСС)': 'whey-lemon',
+        'WHEY PRO (СОЛЕНАЯ КАРАМЕЛЬ)': 'whey-caramel',
+        'MAGNESIUM GLYCINATE (120 КАПСУЛ)': 'magnesium-caps',
+        'КРЕАТИН (ЯБЛОКО)': 'creatine-apple',
+        'КРЕАТИН (ЛЕСНЫЕ ЯГОДЫ)': 'creatine-wildberries',
+        'КРЕАТИН (АПЕЛЬСИН)': 'creatine-orange',
+        'BCAA (ГРЕЙПФРУТ)': 'bcaa-grapefruit',
+        'БЦАА (ГРЕЙПФРУТ)': 'bcaa-grapefruit',
+        'БЦАА (ЛИМОН-ЛАЙМ)': 'bcaa-lime',
+        'AAKG (ГРЕЙПФРУТ)': 'arg-grapefruit',
+        'АРГИНИН ААКГ (ГРЕЙПФРУТ)': 'arg-grapefruit',
+        'АРГИНИН ААКГ (ЛИМОН-ЛАЙМ)': 'arg-lime',
+        'АРГИНИН ААКГ (ЧЕРНАЯ СМОРОДИНА)': 'arg-currant',
+        'RHINO FURY (АПЕЛЬСИН)': 'pre-orange',
+        'ПРЕДТРЕН (АПЕЛЬСИН)': 'pre-orange',
+        'ПРЕДТРЕН (МАРМЕЛАДНАЯ КОЛА)': 'pre-cola',
+        'ХОНДРОПРОТЕКТОР (КОМПЛЕКС 120 КАПС)': 'chondro-caps',
+        'ОМЕГА-3 (90 КАПС)': 'omega3-caps',
+        'OMEGA-3 35% (90 КАПСУЛ)': 'omega3-caps',
+        'АМИЛОПЕКТИН (БЕЗ ВКУСА)': 'amylo-neutral'
+    };
+
+    const externalId = exactMap[normalized];
+
+    if (!externalId) {
+        return null;
+    }
+
+    return RTN_PRODUCTS.find(
+        product => product.externalId === externalId
+    ) || null;
+}
+
+function legacyOrderFromYooKassaReceipt(payment, receipt) {
+    const metadata = payment?.metadata || {};
+    const rawItems = Array.isArray(receipt?.items)
+        ? receipt.items
+        : [];
+
+    const aggregatedItems = new Map();
+    let deliveryPrice = 0;
+
+    for (const receiptItem of rawItems) {
+        const description = String(
+            receiptItem?.description || ''
+        ).trim();
+
+        const quantity = Math.max(
+            1,
+            Number(receiptItem?.quantity || 1)
+        );
+
+        const paidUnitPrice = Math.max(
+            0,
+            Number(receiptItem?.amount?.value || 0)
+        );
+
+        const isDelivery =
+            receiptItem?.payment_subject === 'service' ||
+            normalizeProductText(description).startsWith('ДОСТАВКА');
+
+        if (isDelivery) {
+            deliveryPrice += paidUnitPrice * quantity;
+            continue;
+        }
+
+        const product =
+            rtnProductFromReceiptDescription(description);
+
+        const key = product?.externalId || description;
+
+        const existing = aggregatedItems.get(key);
+
+        const item = {
+            externalId: product?.externalId || '',
+            name: product?.name || description,
+            flavor: product?.flavor || '',
+            quantity,
+            // Для исторической сделки сохраняем базовую цену каталога.
+            // Финальная сумма и скидка берутся из реальной оплаты YooKassa.
+            price: product?.price || paidUnitPrice
+        };
+
+        if (existing) {
+            existing.quantity += quantity;
+        } else {
+            aggregatedItems.set(key, item);
+        }
+    }
+
+    const items = Array.from(aggregatedItems.values());
+
+    const receiptTotal = rawItems.reduce(
+        (sum, item) =>
+            sum +
+            Math.max(1, Number(item?.quantity || 1)) *
+            Math.max(0, Number(item?.amount?.value || 0)),
+        0
+    );
+
+    const paymentAmount = Math.max(
+        0,
+        Number(payment?.amount?.value || 0)
+    );
+
+    if (Math.abs(receiptTotal - paymentAmount) > 0.01) {
+        throw new Error(
+            `Чек не сходится с платежом ${payment?.id}: ${receiptTotal} != ${paymentAmount}`
+        );
+    }
+
+    if (!items.length) {
+        throw new Error(
+            `В чеке платежа ${payment?.id} нет товарных позиций`
+        );
+    }
+
+    return {
+        orderId:
+            String(metadata.orderId || payment?.id || '').trim(),
+
+        amount:
+            paymentAmount,
+
+        items,
+
+        customer: {
+            name:
+                String(metadata.customerName || '').trim(),
+
+            phone:
+                String(metadata.customerPhone || '').trim(),
+
+            email:
+                String(metadata.customerEmail || '')
+                    .trim()
+                    .toLowerCase()
+        },
+
+        delivery: {
+            method:
+                String(metadata.deliveryMethod || '').trim(),
+
+            address:
+                String(metadata.deliveryAddress || '').trim(),
+
+            city:
+                String(metadata.deliveryCity || '').trim(),
+
+            price:
+                Number(deliveryPrice.toFixed(2))
+        },
+
+        promoCode:
+            normalizePromoCode(metadata.promoCode),
+
+        comment:
+            'Исторический заказ RTN.PRO, импортирован из YooKassa после подключения Bitrix24'
+    };
+}
+
 async function getBitrixCatalogContext() {
     if (bitrixCatalogContextPromise) {
         return bitrixCatalogContextPromise;
@@ -3409,6 +3580,289 @@ app.get('/api/admin/bitrix/yookassa-audit', requireBlogAdmin, async (req, res) =
                 error.response?.data?.error ||
                 error.message ||
                 'Не удалось сверить YooKassa с Bitrix24'
+        });
+    }
+});
+
+app.post('/api/admin/bitrix/yookassa-import', requireBlogAdmin, async (req, res) => {
+    const confirmation =
+        String(req.body?.confirm || '').trim();
+
+    if (confirmation !== 'IMPORT_VERIFIED_LEGACY_ORDERS') {
+        return res.status(400).json({
+            error:
+                'Для запуска импорта передайте confirm=IMPORT_VERIFIED_LEGACY_ORDERS'
+        });
+    }
+
+    const cutoffRaw =
+        String(req.body?.cutoff || '').trim();
+
+    const cutoff =
+        cutoffRaw
+            ? new Date(cutoffRaw)
+            : null;
+
+    if (
+        !cutoff ||
+        Number.isNaN(cutoff.getTime())
+    ) {
+        return res.status(400).json({
+            error:
+                'Нужно передать корректный cutoff проверенной выгрузки YooKassa'
+        });
+    }
+
+    try {
+        if (!isBitrixConfigured()) {
+            return res.status(503).json({
+                error: 'BITRIX_WEBHOOK_URL не настроен'
+            });
+        }
+
+        const [
+            paymentResult,
+            receiptResult
+        ] = await Promise.all([
+            fetchAllYooKassaPayments(),
+            fetchAllYooKassaReceipts()
+        ]);
+
+        const receiptsByPaymentId = new Map();
+
+        for (const receipt of receiptResult.receipts) {
+            if (
+                receipt?.type === 'payment' &&
+                receipt?.status === 'succeeded' &&
+                receipt?.payment_id
+            ) {
+                receiptsByPaymentId.set(
+                    String(receipt.payment_id),
+                    receipt
+                );
+            }
+        }
+
+        const candidates =
+            paymentResult.payments.filter(payment => {
+                const amount =
+                    Number(payment?.amount?.value || 0);
+
+                const refunded =
+                    Number(
+                        payment?.refunded_amount?.value ||
+                        0
+                    );
+
+                const createdAt =
+                    new Date(payment?.created_at || 0);
+
+                return (
+                    payment?.status === 'succeeded' &&
+                    payment?.paid === true &&
+                    amount > 0 &&
+                    refunded <= 0 &&
+                    !Number.isNaN(createdAt.getTime()) &&
+                    createdAt <= cutoff
+                );
+            });
+
+        const results = [];
+
+        for (const payment of candidates) {
+            const metadata =
+                payment?.metadata || {};
+
+            const orderId =
+                String(metadata.orderId || '').trim();
+
+            const result = {
+                paymentId:
+                    payment?.id || '',
+                orderId,
+                amount:
+                    Number(payment?.amount?.value || 0),
+                customerName:
+                    metadata.customerName || '',
+                status:
+                    'pending'
+            };
+
+            try {
+                if (!orderId) {
+                    throw new Error(
+                        'У платежа отсутствует orderId'
+                    );
+                }
+
+                const receipt =
+                    receiptsByPaymentId.get(
+                        String(payment.id)
+                    );
+
+                if (!receipt) {
+                    throw new Error(
+                        'Не найден успешный фискальный чек платежа'
+                    );
+                }
+
+                const legacyOrder =
+                    legacyOrderFromYooKassaReceipt(
+                        payment,
+                        receipt
+                    );
+
+                const contactBefore =
+                    await findBitrixContactId(
+                        legacyOrder.customer.phone,
+                        legacyOrder.customer.email
+                    );
+
+                const dealBefore =
+                    await findExistingBitrixDeal(
+                        legacyOrder.orderId
+                    );
+
+                const dealId =
+                    await syncOrderToBitrix(
+                        legacyOrder
+                    );
+
+                if (!dealId) {
+                    throw new Error(
+                        'Bitrix24 не вернул ID сделки'
+                    );
+                }
+
+                await moveBitrixDealToPaid({
+                    dealId,
+                    payment
+                });
+
+                // Сохраняем фактическую дату исторического заказа
+                // в стандартном поле начала сделки.
+                try {
+                    await bitrixCall(
+                        'crm.item.update',
+                        {
+                            entityTypeId: 2,
+                            id: Number(dealId),
+                            fields: {
+                                begindate:
+                                    String(
+                                        payment.created_at ||
+                                        ''
+                                    ).slice(0, 10)
+                            }
+                        }
+                    );
+                } catch (dateError) {
+                    console.error(
+                        'Legacy Bitrix deal date update error:',
+                        dateError.response?.data ||
+                        dateError.message
+                    );
+                }
+
+                const contactAfter =
+                    await findBitrixContactId(
+                        legacyOrder.customer.phone,
+                        legacyOrder.customer.email
+                    );
+
+                result.status =
+                    dealBefore
+                        ? 'already_exists'
+                        : 'imported';
+
+                result.contactId =
+                    contactAfter ||
+                    contactBefore ||
+                    null;
+
+                result.dealId =
+                    Number(dealId);
+
+                result.items =
+                    legacyOrder.items.length;
+
+                result.deliveryPrice =
+                    legacyOrder.delivery.price;
+
+                result.contactCreated =
+                    !contactBefore &&
+                    Boolean(contactAfter);
+
+                result.dealCreated =
+                    !dealBefore;
+
+            } catch (itemError) {
+                result.status = 'error';
+                result.error =
+                    itemError.response?.data?.error_description ||
+                    itemError.response?.data?.description ||
+                    itemError.response?.data?.error ||
+                    itemError.message ||
+                    'Ошибка импорта';
+            }
+
+            results.push(result);
+
+            await sleep(350);
+        }
+
+        return res.json({
+            importedAt:
+                new Date().toISOString(),
+
+            cutoff:
+                cutoff.toISOString(),
+
+            candidates:
+                candidates.length,
+
+            imported:
+                results.filter(
+                    item => item.status === 'imported'
+                ).length,
+
+            alreadyExists:
+                results.filter(
+                    item => item.status === 'already_exists'
+                ).length,
+
+            errors:
+                results.filter(
+                    item => item.status === 'error'
+                ).length,
+
+            contactsCreated:
+                results.filter(
+                    item => item.contactCreated
+                ).length,
+
+            dealsCreated:
+                results.filter(
+                    item => item.dealCreated
+                ).length,
+
+            results
+        });
+
+    } catch (error) {
+        console.error(
+            'Legacy YooKassa -> Bitrix import error:',
+            error.response?.data ||
+            error.message
+        );
+
+        return res.status(502).json({
+            error:
+                error.response?.data?.error_description ||
+                error.response?.data?.description ||
+                error.response?.data?.error ||
+                error.message ||
+                'Не удалось импортировать историю YooKassa в Bitrix24'
         });
     }
 });
