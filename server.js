@@ -3584,6 +3584,245 @@ app.get('/api/admin/bitrix/yookassa-audit', requireBlogAdmin, async (req, res) =
     }
 });
 
+app.post('/api/admin/bitrix/yookassa-import-next', requireBlogAdmin, async (req, res) => {
+    const confirmation =
+        String(req.body?.confirm || '').trim();
+
+    if (confirmation !== 'IMPORT_VERIFIED_LEGACY_ORDERS') {
+        return res.status(400).json({
+            error:
+                'Для запуска импорта передайте confirm=IMPORT_VERIFIED_LEGACY_ORDERS'
+        });
+    }
+
+    const cutoffRaw =
+        String(req.body?.cutoff || '').trim();
+
+    const cutoff =
+        cutoffRaw
+            ? new Date(cutoffRaw)
+            : null;
+
+    if (
+        !cutoff ||
+        Number.isNaN(cutoff.getTime())
+    ) {
+        return res.status(400).json({
+            error:
+                'Нужно передать корректный cutoff проверенной выгрузки YooKassa'
+        });
+    }
+
+    try {
+        if (!isBitrixConfigured()) {
+            return res.status(503).json({
+                error: 'BITRIX_WEBHOOK_URL не настроен'
+            });
+        }
+
+        const [
+            paymentResult,
+            receiptResult
+        ] = await Promise.all([
+            fetchAllYooKassaPayments(),
+            fetchAllYooKassaReceipts()
+        ]);
+
+        const receiptsByPaymentId = new Map();
+
+        for (const receipt of receiptResult.receipts) {
+            if (
+                receipt?.type === 'payment' &&
+                receipt?.status === 'succeeded' &&
+                receipt?.payment_id
+            ) {
+                receiptsByPaymentId.set(
+                    String(receipt.payment_id),
+                    receipt
+                );
+            }
+        }
+
+        const candidates =
+            paymentResult.payments.filter(payment => {
+                const amount =
+                    Number(payment?.amount?.value || 0);
+
+                const refunded =
+                    Number(
+                        payment?.refunded_amount?.value ||
+                        0
+                    );
+
+                const createdAt =
+                    new Date(payment?.created_at || 0);
+
+                return (
+                    payment?.status === 'succeeded' &&
+                    payment?.paid === true &&
+                    amount > 0 &&
+                    refunded <= 0 &&
+                    !Number.isNaN(createdAt.getTime()) &&
+                    createdAt <= cutoff
+                );
+            });
+
+        let existingDeals = 0;
+
+        for (const payment of candidates) {
+            const metadata =
+                payment?.metadata || {};
+
+            const orderId =
+                String(metadata.orderId || '').trim();
+
+            if (!orderId) {
+                continue;
+            }
+
+            const existingDealId =
+                await findExistingBitrixDeal(orderId);
+
+            if (existingDealId) {
+                existingDeals += 1;
+                continue;
+            }
+
+            const receipt =
+                receiptsByPaymentId.get(
+                    String(payment.id)
+                );
+
+            if (!receipt) {
+                return res.status(409).json({
+                    error:
+                        'Не найден успешный фискальный чек платежа',
+                    paymentId:
+                        payment.id,
+                    orderId
+                });
+            }
+
+            const legacyOrder =
+                legacyOrderFromYooKassaReceipt(
+                    payment,
+                    receipt
+                );
+
+            const contactBefore =
+                await findBitrixContactId(
+                    legacyOrder.customer.phone,
+                    legacyOrder.customer.email
+                );
+
+            const dealId =
+                await syncOrderToBitrix(
+                    legacyOrder
+                );
+
+            if (!dealId) {
+                throw new Error(
+                    'Bitrix24 не вернул ID сделки'
+                );
+            }
+
+            await moveBitrixDealToPaid({
+                dealId,
+                payment
+            });
+
+            try {
+                await bitrixCall(
+                    'crm.item.update',
+                    {
+                        entityTypeId: 2,
+                        id: Number(dealId),
+                        fields: {
+                            begindate:
+                                String(
+                                    payment.created_at ||
+                                    ''
+                                ).slice(0, 10)
+                        }
+                    }
+                );
+            } catch (dateError) {
+                console.error(
+                    'Legacy Bitrix deal date update error:',
+                    dateError.response?.data ||
+                    dateError.message
+                );
+            }
+
+            const contactAfter =
+                await findBitrixContactId(
+                    legacyOrder.customer.phone,
+                    legacyOrder.customer.email
+                );
+
+            return res.json({
+                ok: true,
+                done: false,
+                imported: {
+                    paymentId:
+                        payment.id,
+                    orderId:
+                        legacyOrder.orderId,
+                    amount:
+                        legacyOrder.amount,
+                    customerName:
+                        legacyOrder.customer.name,
+                    contactId:
+                        contactAfter ||
+                        contactBefore ||
+                        null,
+                    dealId:
+                        Number(dealId),
+                    items:
+                        legacyOrder.items.length,
+                    deliveryPrice:
+                        legacyOrder.delivery.price,
+                    contactCreated:
+                        !contactBefore &&
+                        Boolean(contactAfter)
+                },
+                existingDealsBefore:
+                    existingDeals,
+                totalCandidates:
+                    candidates.length
+            });
+        }
+
+        return res.json({
+            ok: true,
+            done: true,
+            imported: null,
+            existingDealsBefore:
+                existingDeals,
+            totalCandidates:
+                candidates.length,
+            message:
+                'Все проверенные исторические заказы уже есть в Bitrix24'
+        });
+
+    } catch (error) {
+        console.error(
+            'Legacy YooKassa -> Bitrix next import error:',
+            error.response?.data ||
+            error.message
+        );
+
+        return res.status(502).json({
+            error:
+                error.response?.data?.error_description ||
+                error.response?.data?.description ||
+                error.response?.data?.error ||
+                error.message ||
+                'Не удалось импортировать следующий заказ YooKassa в Bitrix24'
+        });
+    }
+});
+
 app.post('/api/admin/bitrix/yookassa-import', requireBlogAdmin, async (req, res) => {
     const confirmation =
         String(req.body?.confirm || '').trim();
