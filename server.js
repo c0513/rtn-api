@@ -11654,7 +11654,7 @@ app.all(
                 ''
             ).trim() === '2.10'
                 ? '2.10'
-                : '2.07';
+                : '';
 
         // 1С УТ при кнопке "Проверить соединение" может сначала
         // обращаться с type=catalog, даже если нам нужен обмен заказами.
@@ -11726,6 +11726,15 @@ app.all(
                 'failure\nСессия обмена не найдена. Повторите checkauth.'
             );
         }
+
+        if (requestedCmlVersion) {
+            session.cmlVersion =
+                requestedCmlVersion;
+        }
+
+        const effectiveCmlVersion =
+            session.cmlVersion ||
+            '2.07';
 
         if (type === 'catalog') {
             if (mode === 'init') {
@@ -11835,7 +11844,7 @@ app.all(
 
                 return res.send(
                     oneCEmptyCommerceMl(
-                        requestedCmlVersion
+                        effectiveCmlVersion
                     )
                 );
             }
@@ -11843,14 +11852,14 @@ app.all(
             try {
                 const generated =
                     await buildOneCTestOrderCommerceMl(
-                        requestedCmlVersion
+                        effectiveCmlVersion
                     );
 
                 session.lastSaleOrderId =
                     generated.order.orderId;
 
                 console.log(
-                    `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines, CML ${requestedCmlVersion}`
+                    `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines, CML ${effectiveCmlVersion}`
                 );
 
                 res.set(
