@@ -10387,6 +10387,7 @@ app.post('/api/create-payment', async (req, res) => {
 
 const onecSessions = new Map();
 const onecSaleDeliveredOrders = new Set();
+let onecSaleExportArmed = false;
 const ONEC_SESSION_TTL_MS = 60 * 60 * 1000;
 const ONEC_COOKIE_NAME = 'RTN1CSESSID';
 const ONEC_CATALOG_CAPTURE_DIR =
@@ -11508,6 +11509,7 @@ app.all(
         if (mode === 'query') {
             if (
                 !ONEC_ORDER_EXPORT_ENABLED ||
+                !onecSaleExportArmed ||
                 (
                     ONEC_ORDER_EXPORT_ORDER_ID &&
                     onecSaleDeliveredOrders.has(
@@ -11575,6 +11577,7 @@ app.all(
                 );
 
                 delete session.lastSaleOrderId;
+                onecSaleExportArmed = false;
             }
 
             return oneCText(
@@ -11743,6 +11746,55 @@ app.get(
 );
 
 
+app.post(
+    '/api/admin/1c/arm-test-order',
+    requireBlogAdmin,
+    (req, res) => {
+        if (!ONEC_ORDER_EXPORT_ENABLED) {
+            return res.status(409).json({
+                ok: false,
+                error:
+                    'ONEC_ORDER_EXPORT_ENABLED выключен'
+            });
+        }
+
+        if (!ONEC_ORDER_EXPORT_ORDER_ID) {
+            return res.status(409).json({
+                ok: false,
+                error:
+                    'ONEC_ORDER_EXPORT_ORDER_ID не задан'
+            });
+        }
+
+        onecSaleDeliveredOrders.delete(
+            ONEC_ORDER_EXPORT_ORDER_ID
+        );
+        onecSaleExportArmed = true;
+
+        return res.json({
+            ok: true,
+            armed: true,
+            orderId:
+                ONEC_ORDER_EXPORT_ORDER_ID
+        });
+    }
+);
+
+
+app.post(
+    '/api/admin/1c/disarm-test-order',
+    requireBlogAdmin,
+    (req, res) => {
+        onecSaleExportArmed = false;
+
+        return res.json({
+            ok: true,
+            armed: false
+        });
+    }
+);
+
+
 app.get(
     '/api/admin/1c/status',
     requireBlogAdmin,
@@ -11760,6 +11812,9 @@ app.get(
             orderExportOrderId:
                 ONEC_ORDER_EXPORT_ORDER_ID ||
                 null,
+
+            exportArmed:
+                onecSaleExportArmed,
 
             deliveredThisProcess:
                 Array.from(
