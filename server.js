@@ -11819,6 +11819,145 @@ app.get(
 );
 
 
+app.get(
+    '/api/admin/1c/sale-capture',
+    requireBlogAdmin,
+    (req, res) => {
+        try {
+            if (
+                !fs.existsSync(
+                    ONEC_SALE_CAPTURE_DIR
+                )
+            ) {
+                return res.json({
+                    count: 0,
+                    files: []
+                });
+            }
+
+            const files =
+                fs.readdirSync(
+                    ONEC_SALE_CAPTURE_DIR,
+                    {
+                        withFileTypes: true
+                    }
+                )
+                .filter(entry =>
+                    entry.isFile()
+                )
+                .map(entry => {
+                    const fullPath =
+                        path.join(
+                            ONEC_SALE_CAPTURE_DIR,
+                            entry.name
+                        );
+
+                    const stat =
+                        fs.statSync(fullPath);
+
+                    return {
+                        name: entry.name,
+                        bytes: stat.size,
+                        updatedAt:
+                            stat.mtime.toISOString(),
+                        xml:
+                            /\.xml$/i.test(
+                                entry.name
+                            )
+                    };
+                })
+                .sort(
+                    (left, right) =>
+                        left.name.localeCompare(
+                            right.name,
+                            'ru'
+                        )
+                );
+
+            return res.json({
+                count:
+                    files.length,
+                files
+            });
+
+        } catch (error) {
+            return res.status(500).json({
+                error:
+                    error.message ||
+                    'Не удалось прочитать входящие файлы заказов 1С'
+            });
+        }
+    }
+);
+
+app.get(
+    '/api/admin/1c/sale-capture/:filename',
+    requireBlogAdmin,
+    (req, res) => {
+        try {
+            const safeName =
+                sanitizeOneCCatalogFilename(
+                    req.params.filename
+                );
+
+            if (
+                !safeName ||
+                safeName !==
+                    String(
+                        req.params.filename ||
+                        ''
+                    )
+            ) {
+                return res.status(400).json({
+                    error:
+                        'Некорректное имя файла'
+                });
+            }
+
+            const fullPath =
+                path.join(
+                    ONEC_SALE_CAPTURE_DIR,
+                    safeName
+                );
+
+            if (
+                !fs.existsSync(fullPath) ||
+                !fs.statSync(fullPath).isFile()
+            ) {
+                return res.status(404).json({
+                    error:
+                        'Файл не найден'
+                });
+            }
+
+            res.set(
+                'Cache-Control',
+                'no-store'
+            );
+
+            if (/\.xml$/i.test(safeName)) {
+                res.type(
+                    'application/xml; charset=utf-8'
+                );
+            } else {
+                res.type(
+                    'application/octet-stream'
+                );
+            }
+
+            return res.sendFile(fullPath);
+
+        } catch (error) {
+            return res.status(500).json({
+                error:
+                    error.message ||
+                    'Не удалось отдать входящий файл заказов 1С'
+            });
+        }
+    }
+);
+
+
 app.post(
     '/api/admin/1c/arm-test-order',
     requireBlogAdmin,
