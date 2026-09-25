@@ -10880,15 +10880,25 @@ function oneCText(res, statusCode, body) {
         .send(String(body || ''));
 }
 
-function oneCEmptyCommerceMl() {
+function oneCEmptyCommerceMl(cmlVersion = '2.07') {
     const now =
         new Date()
             .toISOString()
             .replace(/\.\d{3}Z$/, '');
 
+    const version =
+        String(cmlVersion || '').trim() === '2.10'
+            ? '2.10'
+            : '2.07';
+
+    const namespace =
+        version === '2.10'
+            ? 'urn:1C.ru:commerceml_210'
+            : 'urn:1C.ru:commerceml_2';
+
     return [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        `<КоммерческаяИнформация ВерсияСхемы="2.08" ДатаФормирования="${now}">`,
+        `<КоммерческаяИнформация xmlns="${namespace}" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="${version}" ДатаФормирования="${now}">`,
         '</КоммерческаяИнформация>'
     ].join('\n');
 }
@@ -11509,15 +11519,28 @@ function oneCOrderXml(order) {
     ].join('');
 }
 
-function oneCOrdersCommerceMl(orders) {
+function oneCOrdersCommerceMl(
+    orders,
+    cmlVersion = '2.07'
+) {
     const now =
         new Date()
             .toISOString()
             .replace(/\.\d{3}Z$/, '');
 
+    const version =
+        String(cmlVersion || '').trim() === '2.10'
+            ? '2.10'
+            : '2.07';
+
+    const namespace =
+        version === '2.10'
+            ? 'urn:1C.ru:commerceml_210'
+            : 'urn:1C.ru:commerceml_2';
+
     return [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        `<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_2" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="2.07" ДатаФормирования="${now}">`,
+        `<КоммерческаяИнформация xmlns="${namespace}" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="${version}" ДатаФормирования="${now}">`,
         ...orders.map(
             order =>
                 oneCOrderXml(order)
@@ -11526,7 +11549,9 @@ function oneCOrdersCommerceMl(orders) {
     ].join('\n');
 }
 
-async function buildOneCTestOrderCommerceMl() {
+async function buildOneCTestOrderCommerceMl(
+    cmlVersion = '2.07'
+) {
     if (!onecSaleTestOrderId) {
         throw new Error(
             'onecSaleTestOrderId не задан; массовая выгрузка намеренно заблокирована'
@@ -11597,7 +11622,8 @@ async function buildOneCTestOrderCommerceMl() {
         order,
         xml:
             oneCOrdersCommerceMl(
-                [order]
+                [order],
+                cmlVersion
             )
     };
 }
@@ -11620,6 +11646,15 @@ app.all(
                 req.query?.mode ||
                 ''
             ).trim().toLowerCase();
+
+        const requestedCmlVersion =
+            String(
+                req.query?.cmlVersion ||
+                req.query?.cmlversion ||
+                ''
+            ).trim() === '2.10'
+                ? '2.10'
+                : '2.07';
 
         // 1С УТ при кнопке "Проверить соединение" может сначала
         // обращаться с type=catalog, даже если нам нужен обмен заказами.
@@ -11799,19 +11834,23 @@ app.all(
                     .type('application/xml; charset=utf-8');
 
                 return res.send(
-                    oneCEmptyCommerceMl()
+                    oneCEmptyCommerceMl(
+                        requestedCmlVersion
+                    )
                 );
             }
 
             try {
                 const generated =
-                    await buildOneCTestOrderCommerceMl();
+                    await buildOneCTestOrderCommerceMl(
+                        requestedCmlVersion
+                    );
 
                 session.lastSaleOrderId =
                     generated.order.orderId;
 
                 console.log(
-                    `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines`
+                    `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines, CML ${requestedCmlVersion}`
                 );
 
                 res.set(
