@@ -10943,20 +10943,44 @@ function buildOneCOrderFromPaymentReceipt(payment, receipt) {
             );
         }
 
-        lines.push({
-            id:
-                mapped.id,
-            catalogId:
-                ONEC_CATALOG_ID,
-            name:
-                mapped.name,
-            quantity,
-            unitPrice,
-            total:
-                lineTotal,
-            type:
-                'Товар'
-        });
+        const existingLine =
+            lines.find(
+                line =>
+                    line.type === 'Товар' &&
+                    line.id === mapped.id &&
+                    Math.abs(
+                        Number(line.unitPrice) -
+                        unitPrice
+                    ) < 0.0001
+            );
+
+        if (existingLine) {
+            existingLine.quantity +=
+                quantity;
+
+            existingLine.total =
+                Number(
+                    (
+                        existingLine.total +
+                        lineTotal
+                    ).toFixed(2)
+                );
+        } else {
+            lines.push({
+                id:
+                    mapped.id,
+                catalogId:
+                    ONEC_CATALOG_ID,
+                name:
+                    mapped.name,
+                quantity,
+                unitPrice,
+                total:
+                    lineTotal,
+                type:
+                    'Товар'
+            });
+        }
 
         calculatedTotal +=
             lineTotal;
