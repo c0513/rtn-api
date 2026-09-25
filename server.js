@@ -10553,24 +10553,50 @@ function oneCXmlDecode(value) {
 }
 
 function oneCExtractTag(xml, tagName) {
-    const escaped =
-        String(tagName || '')
-            .replace(/[.*+?^$()|[\]\\{}]/g, '\\.replace(/[.*+?^$()|[\]\\{}]/g, '\\function cleanupOneCSessions() {');');
+    const source =
+        String(xml || '');
 
-    const match =
-        String(xml || '').match(
-            new RegExp(
-                '<' + escaped + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/' + escaped + '>',
-                'i'
-            )
+    const name =
+        String(tagName || '').trim();
+
+    if (!name) {
+        return '';
+    }
+
+    const openTag =
+        '<' + name + '>';
+
+    const closeTag =
+        '</' + name + '>';
+
+    const startIndex =
+        source.indexOf(openTag);
+
+    if (startIndex < 0) {
+        return '';
+    }
+
+    const valueStart =
+        startIndex + openTag.length;
+
+    const endIndex =
+        source.indexOf(
+            closeTag,
+            valueStart
         );
 
-    return match
-        ? oneCXmlDecode(
-            String(match[1] || '')
-                .replace(/<[^>]+>/g, '')
-        )
-        : '';
+    if (endIndex < 0) {
+        return '';
+    }
+
+    return oneCXmlDecode(
+        source
+            .slice(
+                valueStart,
+                endIndex
+            )
+            .replace(/<[^>]+>/g, '')
+    );
 }
 
 function oneCExtractRequisite(xml, name) {
