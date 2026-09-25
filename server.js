@@ -11146,6 +11146,7 @@ function oneCOrderXml(order) {
         ['Дата оплаты', `${order.paidDate} ${order.paidTime}`],
         ['Номер платежного документа', order.paymentId],
         ['Метод оплаты', 'ЮKassa'],
+        ['Метод оплаты ИД', 'yookassa'],
         ['Заказ оплачен', 'true'],
         ['Доставка разрешена', 'true'],
         ['Отменен', 'false'],
