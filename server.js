@@ -11361,7 +11361,12 @@ function buildOneCOrderFromPaymentReceipt(payment, receipt) {
     };
 }
 
-function oneCOrderXml(order) {
+function oneCOrderXml(
+    order,
+    {
+        includeChildPayment = true
+    } = {}
+) {
     const customerContacts =
         [
             oneCContactXml(
@@ -11450,33 +11455,36 @@ function oneCOrderXml(order) {
         ].join(''))
         .join('');
 
-    const paymentDocumentXml = [
-        '<ПодчиненныеДокументы>',
-        '<ПодчиненныйДокумент>',
-        `<Ид>${oneCXmlEscape(order.paymentId)}</Ид>`,
-        `<Номер>${oneCXmlEscape(order.paymentId)}</Номер>`,
-        `<Дата>${oneCXmlEscape(order.paidDate)}</Дата>`,
-        '<ХозОперация>Эквайринговая операция</ХозОперация>',
-        '<Валюта>643</Валюта>',
-        '<Курс>1</Курс>',
-        `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
-        '<ЗначенияРеквизитов>',
-        '<ЗначениеРеквизита>',
-        '<Наименование>Оплачено</Наименование>',
-        '<Значение>true</Значение>',
-        '</ЗначениеРеквизита>',
-        '<ЗначениеРеквизита>',
-        '<Наименование>Метод оплаты ИД</Наименование>',
-        '<Значение>yookassa</Значение>',
-        '</ЗначениеРеквизита>',
-        '<ЗначениеРеквизита>',
-        '<Наименование>Метод оплаты</Наименование>',
-        '<Значение>ЮKassa</Значение>',
-        '</ЗначениеРеквизита>',
-        '</ЗначенияРеквизитов>',
-        '</ПодчиненныйДокумент>',
-        '</ПодчиненныеДокументы>'
-    ].join('');
+    const paymentDocumentXml =
+        includeChildPayment
+            ? [
+                '<ПодчиненныеДокументы>',
+                '<ПодчиненныйДокумент>',
+                `<Ид>${oneCXmlEscape(order.paymentId)}</Ид>`,
+                `<Номер>${oneCXmlEscape(order.paymentId)}</Номер>`,
+                `<Дата>${oneCXmlEscape(order.paidDate)}</Дата>`,
+                '<ХозОперация>Эквайринговая операция</ХозОперация>',
+                '<Валюта>643</Валюта>',
+                '<Курс>1</Курс>',
+                `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
+                '<ЗначенияРеквизитов>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>Оплачено</Наименование>',
+                '<Значение>true</Значение>',
+                '</ЗначениеРеквизита>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>Метод оплаты ИД</Наименование>',
+                '<Значение>yookassa</Значение>',
+                '</ЗначениеРеквизита>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>Метод оплаты</Наименование>',
+                '<Значение>ЮKassa</Значение>',
+                '</ЗначениеРеквизита>',
+                '</ЗначенияРеквизитов>',
+                '</ПодчиненныйДокумент>',
+                '</ПодчиненныеДокументы>'
+            ].join('')
+            : '';
 
     return [
         '<Документ>',
@@ -11519,6 +11527,37 @@ function oneCOrderXml(order) {
     ].join('');
 }
 
+function oneCPaymentDocumentXml(order) {
+    const paymentRequisites = [
+        ['Оплачено', 'true'],
+        ['Метод оплаты ИД', 'yookassa'],
+        ['Метод оплаты', 'ЮKassa'],
+        ['RTN orderId', order.orderId]
+    ]
+        .map(([name, value]) => [
+            '<ЗначениеРеквизита>',
+            `<Наименование>${oneCXmlEscape(name)}</Наименование>`,
+            `<Значение>${oneCXmlEscape(value)}</Значение>`,
+            '</ЗначениеРеквизита>'
+        ].join(''))
+        .join('');
+
+    return [
+        '<Документ>',
+        `<Ид>${oneCXmlEscape(order.paymentId)}</Ид>`,
+        `<Номер>${oneCXmlEscape(order.paymentId)}</Номер>`,
+        `<Дата>${oneCXmlEscape(order.paidDate)}</Дата>`,
+        '<ХозОперация>Эквайринговая операция</ХозОперация>',
+        '<Роль>Продавец</Роль>',
+        '<Валюта>RUB</Валюта>',
+        '<Курс>1</Курс>',
+        `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
+        `<Основание>${oneCXmlEscape(order.orderId)}</Основание>`,
+        `<ЗначенияРеквизитов>${paymentRequisites}</ЗначенияРеквизитов>`,
+        '</Документ>'
+    ].join('');
+}
+
 function oneCOrdersCommerceMl(
     orders,
     cmlVersion = '2.07'
@@ -11541,10 +11580,32 @@ function oneCOrdersCommerceMl(
     return [
         '<?xml version="1.0" encoding="UTF-8"?>',
         `<КоммерческаяИнформация xmlns="${namespace}" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="${version}" ДатаФормирования="${now}">`,
-        ...orders.map(
-            order =>
-                oneCOrderXml(order)
-        ),
+        ...orders.flatMap(order => {
+            if (version === '2.10') {
+                return [
+                    oneCOrderXml(
+                        order,
+                        {
+                            includeChildPayment:
+                                true
+                        }
+                    )
+                ];
+            }
+
+            return [
+                oneCOrderXml(
+                    order,
+                    {
+                        includeChildPayment:
+                            false
+                    }
+                ),
+                oneCPaymentDocumentXml(
+                    order
+                )
+            ];
+        }),
         '</КоммерческаяИнформация>'
     ].join('\n');
 }
