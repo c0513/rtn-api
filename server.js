@@ -10480,6 +10480,68 @@ function saveOneCCatalogChunk(filename, body) {
     };
 }
 
+function resetOneCSaleCapture() {
+    fs.rmSync(
+        ONEC_SALE_CAPTURE_DIR,
+        {
+            recursive: true,
+            force: true
+        }
+    );
+
+    fs.mkdirSync(
+        ONEC_SALE_CAPTURE_DIR,
+        {
+            recursive: true
+        }
+    );
+}
+
+function saveOneCSaleChunk(filename, body) {
+    const safeName =
+        sanitizeOneCCatalogFilename(filename);
+
+    if (!safeName) {
+        throw new Error(
+            '1С не передала имя файла обмена заказами'
+        );
+    }
+
+    fs.mkdirSync(
+        ONEC_SALE_CAPTURE_DIR,
+        {
+            recursive: true
+        }
+    );
+
+    const target =
+        path.join(
+            ONEC_SALE_CAPTURE_DIR,
+            safeName
+        );
+
+    const chunk =
+        Buffer.isBuffer(body)
+            ? body
+            : Buffer.from(
+                body == null
+                    ? ''
+                    : String(body),
+                'utf8'
+            );
+
+    fs.appendFileSync(
+        target,
+        chunk
+    );
+
+    return {
+        name: safeName,
+        bytes:
+            fs.statSync(target).size
+    };
+}
+
 function cleanupOneCSessions() {
     const now = Date.now();
 
