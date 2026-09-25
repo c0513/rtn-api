@@ -11533,6 +11533,8 @@ app.all(
         }
 
         if (mode === 'init') {
+            resetOneCSaleCapture();
+
             return oneCText(
                 res,
                 200,
@@ -11625,11 +11627,35 @@ app.all(
         }
 
         if (mode === 'file') {
-            return oneCText(
-                res,
-                200,
-                'success'
-            );
+            try {
+                const saved =
+                    saveOneCSaleChunk(
+                        req.query?.filename,
+                        req.body
+                    );
+
+                console.log(
+                    `1C sale capture: ${saved.name}, ${saved.bytes} bytes total`
+                );
+
+                return oneCText(
+                    res,
+                    200,
+                    'success'
+                );
+
+            } catch (error) {
+                console.error(
+                    '1C sale capture file error:',
+                    error.message
+                );
+
+                return oneCText(
+                    res,
+                    500,
+                    `failure\n${error.message}`
+                );
+            }
         }
 
         if (
