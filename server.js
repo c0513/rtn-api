@@ -150,6 +150,13 @@ const ONEC_ORDER_EXPORT_ENABLED =
         ''
     ).trim().toLowerCase() === 'true';
 
+
+const ONEC_ORDER_EXPORT_ORDER_ID =
+    normalizeEnvValue(
+        process.env.ONEC_ORDER_EXPORT_ORDER_ID ||
+        ''
+    );
+
 const BLOG_ADMIN_TOKEN = normalizeEnvValue(process.env.BLOG_ADMIN_TOKEN || '');
 const BLOG_DATA_FILE = process.env.BLOG_DATA_FILE || path.join(__dirname, 'data', 'articles.json');
 const ORDER_DATA_FILE = process.env.ORDER_DATA_FILE || path.join(path.dirname(BLOG_DATA_FILE), 'orders.json');
@@ -10620,6 +10627,658 @@ function oneCEmptyCommerceMl() {
     ].join('\n');
 }
 
+
+const ONEC_CATALOG_ID =
+    'acbfbaa2-5baa-4aa7-91f0-7205d37bc576';
+
+const ONEC_PRODUCT_MAP = {
+    'whey-caramel': {
+        id: '4d7485e3-8f66-11f1-8faa-7cc2552d3155',
+        name: 'RHINO TECH NUTRITION Протеин 900 г Соленая карамель'
+    },
+    'whey-lemon': {
+        id: '4d7485e4-8f66-11f1-8faa-7cc2552d3155',
+        name: 'Напиток растворимый "ВЕЙ ПРО" ("Whey Protein") со вкусом "Лимонный мусс" 900 г'
+    },
+    'whey-raspberry': {
+        id: '1eceae1f-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'RHINO TECH NUTRITION Протеин 900 г Малина в белом шоколаде'
+    },
+    'mass-choco': {
+        id: '1eceae23-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'Гейнер, шоколад, 3000 г'
+    },
+    'mass-caramel': {
+        id: '1eceae20-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'Напиток растворимый "Гейнер" ("Gainer") со вкусом солёная карамель'
+    },
+    'mass-lemon': {
+        id: '1eceae21-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'Напиток растворимый "Гейнер" ("Gainer") со вкусом лимонный мусс 3000 г'
+    },
+    'mass-raspberry': {
+        id: '1eceae22-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'Напиток растворимый "Гейнер" ("Gainer") со вкусом белый шоколад с малиной 3000 г'
+    },
+    'bcaa-wildberries': {
+        id: '1eceae27-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'RHINO TECH NUTRITION БЦАА 300 г Лесные ягоды'
+    },
+    'bcaa-lime': {
+        id: '1eceae2b-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'БЦАА 300 г Лимон-лайм'
+    },
+    'bcaa-grapefruit': {
+        id: '1eceae2c-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'RHINO TECH NUTRITION БЦАА 300 г Грейпфрут'
+    },
+    'bcaa-currant': {
+        id: '1eceae2d-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'БЦАА 300 г Черная смородина'
+    },
+    'arg-wildberries': {
+        id: '1eceae31-8f7c-11f1-8faa-7cc2552d3155',
+        name: 'Аргинин ААКГ 150 г Лесные ягоды'
+    },
+    'arg-lime': {
+        id: '365e5275-903e-11f1-8faa-7cc2552d3155',
+        name: 'Аргинин ААКГ 150 г Лимон-лайм'
+    },
+    'arg-grapefruit': {
+        id: '365e5276-903e-11f1-8faa-7cc2552d3155',
+        name: 'Аргинин ААКГ 150 г Грейпфрут'
+    },
+    'arg-currant': {
+        id: '365e5277-903e-11f1-8faa-7cc2552d3155',
+        name: 'Аргинин ААКГ 150 г Черная смородина'
+    },
+    'pre-cola': {
+        id: '365e527b-903e-11f1-8faa-7cc2552d3155',
+        name: 'Rhino Fury Мармеладная кола'
+    },
+    'pre-orange': {
+        id: '365e527c-903e-11f1-8faa-7cc2552d3155',
+        name: 'Rhino Fury Апельсин 225 г'
+    },
+    'pre-bubblegum': {
+        id: '365e527d-903e-11f1-8faa-7cc2552d3155',
+        name: 'Rhino Fury Бабл Гам'
+    },
+    'creatine-neutral': {
+        id: '365e5281-903e-11f1-8faa-7cc2552d3155',
+        name: 'Креатин 300 г'
+    },
+    'creatine-orange': {
+        id: '365e5282-903e-11f1-8faa-7cc2552d3155',
+        name: 'Креатин Апельсин 300 г'
+    },
+    'creatine-wildberries': {
+        id: '365e5283-903e-11f1-8faa-7cc2552d3155',
+        name: 'Креатин Лесные ягоды 300 г'
+    },
+    'creatine-apple': {
+        id: '365e5284-903e-11f1-8faa-7cc2552d3155',
+        name: 'Креатин Яблоко 300 г'
+    },
+    'amylo-neutral': {
+        id: '365e5288-903e-11f1-8faa-7cc2552d3155',
+        name: 'Амилопектин 1000 г'
+    },
+    'magnesium-caps': {
+        id: '365e528c-903e-11f1-8faa-7cc2552d3155',
+        name: 'Магний глицинат 120 капс'
+    },
+    'chondro-caps': {
+        id: '365e5290-903e-11f1-8faa-7cc2552d3155',
+        name: 'Хондропротектор 120 капс'
+    },
+    'omega3-caps': {
+        id: '365e5294-903e-11f1-8faa-7cc2552d3155',
+        name: 'Омега-3 90 капс'
+    }
+};
+
+function oneCXmlEscape(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function oneCMoney(value) {
+    return Math.max(
+        0,
+        Number(value || 0)
+    ).toFixed(2);
+}
+
+function oneCDateTimeParts(value) {
+    const source =
+        value
+            ? new Date(value)
+            : new Date();
+
+    const date =
+        Number.isNaN(source.getTime())
+            ? new Date()
+            : source;
+
+    const moscow =
+        new Date(
+            date.getTime() +
+            3 * 60 * 60 * 1000
+        );
+
+    const pad = part =>
+        String(part).padStart(2, '0');
+
+    return {
+        date:
+            [
+                moscow.getUTCFullYear(),
+                pad(moscow.getUTCMonth() + 1),
+                pad(moscow.getUTCDate())
+            ].join('-'),
+
+        time:
+            [
+                pad(moscow.getUTCHours()),
+                pad(moscow.getUTCMinutes()),
+                pad(moscow.getUTCSeconds())
+            ].join(':')
+    };
+}
+
+function oneCCustomerId(customer = {}) {
+    const source =
+        [
+            normalizeBitrixPhone(
+                customer.phone
+            ),
+            String(
+                customer.email || ''
+            ).trim().toLowerCase(),
+            String(
+                customer.name || ''
+            ).trim()
+        ].join('|');
+
+    return (
+        'RTN-CUSTOMER-' +
+        crypto
+            .createHash('sha256')
+            .update(source)
+            .digest('hex')
+            .slice(0, 24)
+    );
+}
+
+function oneCContactXml(type, value) {
+    const normalized =
+        String(value || '').trim();
+
+    if (!normalized) {
+        return '';
+    }
+
+    return [
+        '<Контакт>',
+        `<Тип>${oneCXmlEscape(type)}</Тип>`,
+        `<Значение>${oneCXmlEscape(normalized)}</Значение>`,
+        '</Контакт>'
+    ].join('');
+}
+
+function buildOneCOrderFromPaymentReceipt(payment, receipt) {
+    const metadata =
+        payment?.metadata || {};
+
+    const orderId =
+        String(
+            metadata.orderId ||
+            payment?.id ||
+            ''
+        ).trim();
+
+    if (!orderId) {
+        throw new Error(
+            'У платежа нет orderId для 1С'
+        );
+    }
+
+    const rawItems =
+        Array.isArray(receipt?.items)
+            ? receipt.items
+            : [];
+
+    const lines = [];
+    let calculatedTotal = 0;
+
+    for (const receiptItem of rawItems) {
+        const description =
+            String(
+                receiptItem?.description ||
+                ''
+            ).trim();
+
+        const quantity =
+            Math.max(
+                1,
+                Number(
+                    receiptItem?.quantity ||
+                    1
+                )
+            );
+
+        const unitPrice =
+            Math.max(
+                0,
+                Number(
+                    receiptItem?.amount?.value ||
+                    0
+                )
+            );
+
+        const lineTotal =
+            Number(
+                (
+                    unitPrice *
+                    quantity
+                ).toFixed(2)
+            );
+
+        const isDelivery =
+            receiptItem?.payment_subject ===
+                'service' ||
+            normalizeProductText(
+                description
+            ).startsWith(
+                'ДОСТАВКА'
+            );
+
+        if (isDelivery) {
+            lines.push({
+                id:
+                    'ORDER_DELIVERY',
+                catalogId:
+                    '',
+                name:
+                    description ||
+                    'Доставка заказа',
+                quantity,
+                unitPrice,
+                total:
+                    lineTotal,
+                type:
+                    'Услуга'
+            });
+
+            calculatedTotal +=
+                lineTotal;
+
+            continue;
+        }
+
+        const rtnProduct =
+            rtnProductFromReceiptDescription(
+                description
+            );
+
+        if (!rtnProduct) {
+            throw new Error(
+                `Не удалось сопоставить позицию чека с RTN: ${description}`
+            );
+        }
+
+        const mapped =
+            ONEC_PRODUCT_MAP[
+                rtnProduct.externalId
+            ];
+
+        if (!mapped) {
+            throw new Error(
+                `Нет GUID 1С для товара RTN ${rtnProduct.externalId}`
+            );
+        }
+
+        lines.push({
+            id:
+                mapped.id,
+            catalogId:
+                ONEC_CATALOG_ID,
+            name:
+                mapped.name,
+            quantity,
+            unitPrice,
+            total:
+                lineTotal,
+            type:
+                'Товар'
+        });
+
+        calculatedTotal +=
+            lineTotal;
+    }
+
+    const amount =
+        Math.max(
+            0,
+            Number(
+                payment?.amount?.value ||
+                0
+            )
+        );
+
+    if (
+        Math.abs(
+            calculatedTotal -
+            amount
+        ) > 0.01
+    ) {
+        throw new Error(
+            `Сумма строк 1С не совпадает с платежом: ${calculatedTotal} != ${amount}`
+        );
+    }
+
+    const customer = {
+        name:
+            String(
+                metadata.customerName ||
+                'Покупатель RTN.PRO'
+            ).trim(),
+
+        phone:
+            String(
+                metadata.customerPhone ||
+                ''
+            ).trim(),
+
+        email:
+            String(
+                metadata.customerEmail ||
+                ''
+            ).trim().toLowerCase(),
+
+        address:
+            String(
+                metadata.deliveryAddress ||
+                ''
+            ).trim(),
+
+        city:
+            String(
+                metadata.deliveryCity ||
+                ''
+            ).trim()
+    };
+
+    const created =
+        oneCDateTimeParts(
+            payment?.created_at
+        );
+
+    const paid =
+        oneCDateTimeParts(
+            payment?.captured_at ||
+            payment?.created_at
+        );
+
+    return {
+        orderId,
+        publicNumber:
+            getPublicOrderNumber(
+                orderId
+            ),
+        date:
+            created.date,
+        time:
+            created.time,
+        paidDate:
+            paid.date,
+        paidTime:
+            paid.time,
+        amount,
+        customer,
+        customerId:
+            oneCCustomerId(customer),
+        deliveryMethod:
+            String(
+                metadata.deliveryMethod ||
+                ''
+            ).trim(),
+        promoCode:
+            normalizePromoCode(
+                metadata.promoCode
+            ),
+        paymentId:
+            String(
+                payment?.id ||
+                ''
+            ).trim(),
+        lines
+    };
+}
+
+function oneCOrderXml(order) {
+    const customerContacts =
+        [
+            oneCContactXml(
+                'Телефон мобильный',
+                order.customer.phone
+            ),
+            oneCContactXml(
+                'Почта',
+                order.customer.email
+            )
+        ].join('');
+
+    const addressXml =
+        order.customer.address
+            ? [
+                '<Адрес>',
+                `<Представление>${oneCXmlEscape(order.customer.address)}</Представление>`,
+                order.customer.city
+                    ? [
+                        '<АдресноеПоле>',
+                        '<Тип>Город</Тип>',
+                        `<Значение>${oneCXmlEscape(order.customer.city)}</Значение>`,
+                        '</АдресноеПоле>'
+                    ].join('')
+                    : '',
+                '</Адрес>'
+            ].join('')
+            : '';
+
+    const itemsXml =
+        order.lines
+            .map(item => [
+                '<Товар>',
+                `<Ид>${oneCXmlEscape(item.id)}</Ид>`,
+                item.catalogId
+                    ? `<ИдКаталога>${oneCXmlEscape(item.catalogId)}</ИдКаталога>`
+                    : '',
+                `<Наименование>${oneCXmlEscape(item.name)}</Наименование>`,
+                '<БазоваяЕдиница Код="796" НаименованиеПолное="Штука" МеждународноеСокращение="PCE">шт</БазоваяЕдиница>',
+                `<ЦенаЗаЕдиницу>${oneCMoney(item.unitPrice)}</ЦенаЗаЕдиницу>`,
+                `<Количество>${Number(item.quantity).toFixed(3)}</Количество>`,
+                `<Сумма>${oneCMoney(item.total)}</Сумма>`,
+                '<ЗначенияРеквизитов>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>ВидНоменклатуры</Наименование>',
+                `<Значение>${oneCXmlEscape(item.type)}</Значение>`,
+                '</ЗначениеРеквизита>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>ТипНоменклатуры</Наименование>',
+                `<Значение>${oneCXmlEscape(item.type)}</Значение>`,
+                '</ЗначениеРеквизита>',
+                '</ЗначенияРеквизитов>',
+                '</Товар>'
+            ].join(''))
+            .join('');
+
+    const requisites = [
+        ['Дата оплаты', `${order.paidDate} ${order.paidTime}`],
+        ['Номер платежного документа', order.paymentId],
+        ['Метод оплаты', 'ЮKassa'],
+        ['Заказ оплачен', 'true'],
+        ['Доставка разрешена', 'true'],
+        ['Отменен', 'false'],
+        ['Статус заказа', 'Оплачен'],
+        ['Способ доставки', order.deliveryMethod],
+        ['Адрес доставки', order.customer.address],
+        ['Промокод', order.promoCode],
+        ['RTN orderId', order.orderId]
+    ]
+        .filter(([, value]) =>
+            String(
+                value == null
+                    ? ''
+                    : value
+            ).trim()
+        )
+        .map(([name, value]) => [
+            '<ЗначениеРеквизита>',
+            `<Наименование>${oneCXmlEscape(name)}</Наименование>`,
+            `<Значение>${oneCXmlEscape(value)}</Значение>`,
+            '</ЗначениеРеквизита>'
+        ].join(''))
+        .join('');
+
+    return [
+        '<Документ>',
+        `<Ид>${oneCXmlEscape(order.orderId)}</Ид>`,
+        `<Номер>${oneCXmlEscape(order.publicNumber)}</Номер>`,
+        `<Дата>${oneCXmlEscape(order.date)}</Дата>`,
+        '<ХозОперация>Заказ товара</ХозОперация>',
+        '<Роль>Продавец</Роль>',
+        '<Валюта>RUB</Валюта>',
+        '<Курс>1</Курс>',
+        `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
+        '<Контрагенты>',
+        '<Контрагент>',
+        `<Ид>${oneCXmlEscape(order.customerId)}</Ид>`,
+        `<Наименование>${oneCXmlEscape(order.customer.name)}</Наименование>`,
+        '<Роль>Покупатель</Роль>',
+        `<ПолноеНаименование>${oneCXmlEscape(order.customer.name)}</ПолноеНаименование>`,
+        addressXml,
+        customerContacts
+            ? `<Контакты>${customerContacts}</Контакты>`
+            : '',
+        '</Контрагент>',
+        '</Контрагенты>',
+        `<Время>${oneCXmlEscape(order.time)}</Время>`,
+        `<Комментарий>${oneCXmlEscape(
+            [
+                'Заказ RTN.PRO',
+                order.promoCode
+                    ? `Промокод: ${order.promoCode}`
+                    : '',
+                order.deliveryMethod
+                    ? `Доставка: ${order.deliveryMethod}`
+                    : ''
+            ].filter(Boolean).join('. ')
+        )}</Комментарий>`,
+        `<Товары>${itemsXml}</Товары>`,
+        `<ЗначенияРеквизитов>${requisites}</ЗначенияРеквизитов>`,
+        '</Документ>'
+    ].join('');
+}
+
+function oneCOrdersCommerceMl(orders) {
+    const now =
+        new Date()
+            .toISOString()
+            .replace(/\.\d{3}Z$/, '');
+
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        `<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_2" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="2.07" ДатаФормирования="${now}">`,
+        ...orders.map(
+            order =>
+                oneCOrderXml(order)
+        ),
+        '</КоммерческаяИнформация>'
+    ].join('\n');
+}
+
+async function buildOneCTestOrderCommerceMl() {
+    if (!ONEC_ORDER_EXPORT_ORDER_ID) {
+        throw new Error(
+            'ONEC_ORDER_EXPORT_ORDER_ID не задан; массовая выгрузка намеренно заблокирована'
+        );
+    }
+
+    const [
+        paymentResult,
+        receiptResult
+    ] = await Promise.all([
+        fetchAllYooKassaPayments(),
+        fetchAllYooKassaReceipts()
+    ]);
+
+    const payment =
+        paymentResult.payments.find(
+            candidate =>
+                String(
+                    candidate?.metadata?.orderId ||
+                    ''
+                ).trim() ===
+                    ONEC_ORDER_EXPORT_ORDER_ID &&
+                candidate?.status ===
+                    'succeeded' &&
+                candidate?.paid ===
+                    true &&
+                Number(
+                    candidate?.refunded_amount?.value ||
+                    0
+                ) <= 0
+        );
+
+    if (!payment) {
+        throw new Error(
+            `Оплаченный невозвращенный заказ ${ONEC_ORDER_EXPORT_ORDER_ID} не найден в ЮKassa`
+        );
+    }
+
+    const receipt =
+        receiptResult.receipts.find(
+            candidate =>
+                candidate?.type ===
+                    'payment' &&
+                candidate?.status ===
+                    'succeeded' &&
+                String(
+                    candidate?.payment_id ||
+                    ''
+                ) ===
+                    String(
+                        payment.id
+                    )
+        );
+
+    if (!receipt) {
+        throw new Error(
+            `Фискальный чек заказа ${ONEC_ORDER_EXPORT_ORDER_ID} не найден`
+        );
+    }
+
+    const order =
+        buildOneCOrderFromPaymentReceipt(
+            payment,
+            receipt
+        );
+
+    return {
+        order,
+        xml:
+            oneCOrdersCommerceMl(
+                [order]
+            )
+    };
+}
+
 app.all(
     '/api/1c/exchange',
     express.raw({
@@ -10788,8 +11447,6 @@ app.all(
 
         if (mode === 'query') {
             if (!ONEC_ORDER_EXPORT_ENABLED) {
-                // Канал уже можно тестировать из 1С,
-                // но заказы не отдаём до сопоставления номенклатуры.
                 res
                     .status(200)
                     .type('application/xml; charset=utf-8');
@@ -10799,11 +11456,41 @@ app.all(
                 );
             }
 
-            return oneCText(
-                res,
-                503,
-                'failure\nВыгрузка заказов включена, но генератор CommerceML ещё не активирован'
-            );
+            try {
+                const generated =
+                    await buildOneCTestOrderCommerceMl();
+
+                console.log(
+                    `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines`
+                );
+
+                res.set(
+                    'Cache-Control',
+                    'no-store'
+                );
+
+                return res
+                    .status(200)
+                    .type(
+                        'application/xml; charset=utf-8'
+                    )
+                    .send(
+                        generated.xml
+                    );
+
+            } catch (error) {
+                console.error(
+                    '1C sale query error:',
+                    error.response?.data ||
+                    error.message
+                );
+
+                return oneCText(
+                    res,
+                    500,
+                    `failure\n${error.message || 'Не удалось сформировать заказ для 1С'}`
+                );
+            }
         }
 
         if (mode === 'success') {
@@ -10986,6 +11673,15 @@ app.get(
 
             orderExportEnabled:
                 ONEC_ORDER_EXPORT_ENABLED,
+
+            orderExportOrderId:
+                ONEC_ORDER_EXPORT_ORDER_ID ||
+                null,
+
+            mappedProducts:
+                Object.keys(
+                    ONEC_PRODUCT_MAP
+                ).length,
 
             exchangeUrl:
                 `${PUBLIC_API_URL}/api/1c/exchange`,
