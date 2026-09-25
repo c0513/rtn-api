@@ -132,6 +132,24 @@ const YCP_ACCESS_TOKEN =
         ''
     );
 
+const ONEC_EXCHANGE_LOGIN =
+    normalizeEnvValue(
+        process.env.ONEC_EXCHANGE_LOGIN ||
+        ''
+    );
+
+const ONEC_EXCHANGE_PASSWORD =
+    normalizeEnvValue(
+        process.env.ONEC_EXCHANGE_PASSWORD ||
+        ''
+    );
+
+const ONEC_ORDER_EXPORT_ENABLED =
+    String(
+        process.env.ONEC_ORDER_EXPORT_ENABLED ||
+        ''
+    ).trim().toLowerCase() === 'true';
+
 const BLOG_ADMIN_TOKEN = normalizeEnvValue(process.env.BLOG_ADMIN_TOKEN || '');
 const BLOG_DATA_FILE = process.env.BLOG_DATA_FILE || path.join(__dirname, 'data', 'articles.json');
 const ORDER_DATA_FILE = process.env.ORDER_DATA_FILE || path.join(path.dirname(BLOG_DATA_FILE), 'orders.json');
@@ -10354,6 +10372,343 @@ app.post('/api/create-payment', async (req, res) => {
         });
     }
 });
+
+
+// ============================================================
+// 1C:УПРАВЛЕНИЕ ТОРГОВЛЕЙ — COMMERCE ML ORDER EXCHANGE
+// ============================================================
+
+const onecSessions = new Map();
+const ONEC_SESSION_TTL_MS = 60 * 60 * 1000;
+const ONEC_COOKIE_NAME = 'RTN1CSESSID';
+
+function cleanupOneCSessions() {
+    const now = Date.now();
+
+    for (const [sessionId, session] of onecSessions.entries()) {
+        if (
+            !session ||
+            now - Number(session.createdAt || 0) >
+                ONEC_SESSION_TTL_MS
+        ) {
+            onecSessions.delete(sessionId);
+        }
+    }
+}
+
+function parseBasicAuth(req) {
+    const header =
+        String(
+            req.get('authorization') ||
+            ''
+        ).trim();
+
+    const match =
+        header.match(/^Basic\s+(.+)$/i);
+
+    if (!match) {
+        return null;
+    }
+
+    try {
+        const decoded =
+            Buffer.from(
+                match[1],
+                'base64'
+            ).toString('utf8');
+
+        const separator =
+            decoded.indexOf(':');
+
+        if (separator < 0) {
+            return null;
+        }
+
+        return {
+            login:
+                decoded.slice(0, separator),
+
+            password:
+                decoded.slice(separator + 1)
+        };
+
+    } catch {
+        return null;
+    }
+}
+
+function isOneCBasicAuthValid(req) {
+    if (
+        !ONEC_EXCHANGE_LOGIN ||
+        !ONEC_EXCHANGE_PASSWORD
+    ) {
+        return false;
+    }
+
+    const credentials =
+        parseBasicAuth(req);
+
+    if (!credentials) {
+        return false;
+    }
+
+    return (
+        secureStringEqual(
+            credentials.login,
+            ONEC_EXCHANGE_LOGIN
+        ) &&
+        secureStringEqual(
+            credentials.password,
+            ONEC_EXCHANGE_PASSWORD
+        )
+    );
+}
+
+function getOneCSessionFromRequest(req) {
+    cleanupOneCSessions();
+
+    const cookies =
+        String(
+            req.get('cookie') ||
+            ''
+        );
+
+    const entries =
+        cookies
+            .split(';')
+            .map(item => item.trim())
+            .filter(Boolean);
+
+    let sessionId = '';
+
+    for (const entry of entries) {
+        const separator =
+            entry.indexOf('=');
+
+        if (separator < 0) {
+            continue;
+        }
+
+        const name =
+            entry.slice(0, separator).trim();
+
+        if (name !== ONEC_COOKIE_NAME) {
+            continue;
+        }
+
+        sessionId =
+            decodeURIComponent(
+                entry.slice(separator + 1).trim()
+            );
+
+        break;
+    }
+
+    if (!sessionId) {
+        return null;
+    }
+
+    return (
+        onecSessions.get(sessionId) ||
+        null
+    );
+}
+
+function oneCText(res, statusCode, body) {
+    return res
+        .status(statusCode)
+        .type('text/plain; charset=utf-8')
+        .send(String(body || ''));
+}
+
+function oneCEmptyCommerceMl() {
+    const now =
+        new Date()
+            .toISOString()
+            .replace(/\.\d{3}Z$/, '');
+
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        `<КоммерческаяИнформация ВерсияСхемы="2.08" ДатаФормирования="${now}">`,
+        '</КоммерческаяИнформация>'
+    ].join('\n');
+}
+
+app.all(
+    '/api/1c/exchange',
+    express.text({
+        type: [
+            'application/xml',
+            'text/xml',
+            'text/plain',
+            'application/octet-stream'
+        ],
+        limit: '20mb'
+    }),
+    async (req, res) => {
+        const type =
+            String(
+                req.query?.type ||
+                ''
+            ).trim().toLowerCase();
+
+        const mode =
+            String(
+                req.query?.mode ||
+                ''
+            ).trim().toLowerCase();
+
+        if (type !== 'sale') {
+            return oneCText(
+                res,
+                400,
+                'failure\nRTN.PRO поддерживает здесь только type=sale'
+            );
+        }
+
+        if (mode === 'checkauth') {
+            if (!isOneCBasicAuthValid(req)) {
+                res.set(
+                    'WWW-Authenticate',
+                    'Basic realm="RTN.PRO 1C Exchange"'
+                );
+
+                return oneCText(
+                    res,
+                    401,
+                    'failure\nНеверный логин или пароль обмена'
+                );
+            }
+
+            cleanupOneCSessions();
+
+            const sessionId =
+                crypto.randomBytes(24)
+                    .toString('hex');
+
+            const csrf =
+                crypto.randomBytes(16)
+                    .toString('hex');
+
+            onecSessions.set(
+                sessionId,
+                {
+                    createdAt:
+                        Date.now(),
+                    csrf
+                }
+            );
+
+            return oneCText(
+                res,
+                200,
+                [
+                    'success',
+                    ONEC_COOKIE_NAME,
+                    sessionId,
+                    `sessid=${csrf}`
+                ].join('\n')
+            );
+        }
+
+        const session =
+            getOneCSessionFromRequest(req);
+
+        if (!session) {
+            return oneCText(
+                res,
+                401,
+                'failure\nСессия обмена не найдена. Повторите checkauth.'
+            );
+        }
+
+        if (mode === 'init') {
+            return oneCText(
+                res,
+                200,
+                [
+                    'zip=no',
+                    'file_limit=10485760'
+                ].join('\n')
+            );
+        }
+
+        if (mode === 'query') {
+            if (!ONEC_ORDER_EXPORT_ENABLED) {
+                // Канал уже можно тестировать из 1С,
+                // но заказы не отдаём до сопоставления номенклатуры.
+                res
+                    .status(200)
+                    .type('application/xml; charset=utf-8');
+
+                return res.send(
+                    oneCEmptyCommerceMl()
+                );
+            }
+
+            return oneCText(
+                res,
+                503,
+                'failure\nВыгрузка заказов включена, но генератор CommerceML ещё не активирован'
+            );
+        }
+
+        if (mode === 'success') {
+            return oneCText(
+                res,
+                200,
+                'success'
+            );
+        }
+
+        if (mode === 'file') {
+            // Входящие изменения заказов из 1С подключим
+            // после успешного теста стандартного handshake.
+            return oneCText(
+                res,
+                200,
+                'success'
+            );
+        }
+
+        return oneCText(
+            res,
+            400,
+            `failure\nНеподдерживаемый mode=${mode || 'empty'}`
+        );
+    }
+);
+
+app.get(
+    '/api/admin/1c/status',
+    requireBlogAdmin,
+    (req, res) => {
+        res.json({
+            configured:
+                Boolean(
+                    ONEC_EXCHANGE_LOGIN &&
+                    ONEC_EXCHANGE_PASSWORD
+                ),
+
+            orderExportEnabled:
+                ONEC_ORDER_EXPORT_ENABLED,
+
+            exchangeUrl:
+                `${PUBLIC_API_URL}/api/1c/exchange`,
+
+            supportedType:
+                'sale',
+
+            modes: [
+                'checkauth',
+                'init',
+                'query',
+                'success',
+                'file'
+            ]
+        });
+    }
+);
 
 
 // ============================================================
