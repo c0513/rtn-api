@@ -10393,6 +10393,9 @@ const ONEC_COOKIE_NAME = 'RTN1CSESSID';
 const ONEC_CATALOG_CAPTURE_DIR =
     process.env.ONEC_CATALOG_CAPTURE_DIR ||
     path.join('/tmp', 'rtn-1c-catalog-capture');
+const ONEC_SALE_CAPTURE_DIR =
+    process.env.ONEC_SALE_CAPTURE_DIR ||
+    path.join('/tmp', 'rtn-1c-sale-capture');
 
 function resetOneCCatalogCapture() {
     fs.rmSync(
