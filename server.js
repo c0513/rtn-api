@@ -157,6 +157,9 @@ const ONEC_ORDER_EXPORT_ORDER_ID =
         ''
     );
 
+let onecSaleTestOrderId =
+    ONEC_ORDER_EXPORT_ORDER_ID;
+
 const BLOG_ADMIN_TOKEN = normalizeEnvValue(process.env.BLOG_ADMIN_TOKEN || '');
 const BLOG_DATA_FILE = process.env.BLOG_DATA_FILE || path.join(__dirname, 'data', 'articles.json');
 const ORDER_DATA_FILE = process.env.ORDER_DATA_FILE || path.join(path.dirname(BLOG_DATA_FILE), 'orders.json');
@@ -11498,9 +11501,9 @@ function oneCOrdersCommerceMl(orders) {
 }
 
 async function buildOneCTestOrderCommerceMl() {
-    if (!ONEC_ORDER_EXPORT_ORDER_ID) {
+    if (!onecSaleTestOrderId) {
         throw new Error(
-            'ONEC_ORDER_EXPORT_ORDER_ID не задан; массовая выгрузка намеренно заблокирована'
+            'onecSaleTestOrderId не задан; массовая выгрузка намеренно заблокирована'
         );
     }
 
@@ -11519,7 +11522,7 @@ async function buildOneCTestOrderCommerceMl() {
                     candidate?.metadata?.orderId ||
                     ''
                 ).trim() ===
-                    ONEC_ORDER_EXPORT_ORDER_ID &&
+                    onecSaleTestOrderId &&
                 candidate?.status ===
                     'succeeded' &&
                 candidate?.paid ===
@@ -11532,7 +11535,7 @@ async function buildOneCTestOrderCommerceMl() {
 
     if (!payment) {
         throw new Error(
-            `Оплаченный невозвращенный заказ ${ONEC_ORDER_EXPORT_ORDER_ID} не найден в ЮKassa`
+            `Оплаченный невозвращенный заказ ${onecSaleTestOrderId} не найден в ЮKassa`
         );
     }
 
@@ -11554,7 +11557,7 @@ async function buildOneCTestOrderCommerceMl() {
 
     if (!receipt) {
         throw new Error(
-            `Фискальный чек заказа ${ONEC_ORDER_EXPORT_ORDER_ID} не найден`
+            `Фискальный чек заказа ${onecSaleTestOrderId} не найден`
         );
     }
 
@@ -11743,10 +11746,10 @@ app.all(
 
         if (mode === 'query') {
             const linkedOneCOrder =
-                ONEC_ORDER_EXPORT_ORDER_ID
+                onecSaleTestOrderId
                     ? readOrders().find(order =>
                         order.orderId ===
-                            ONEC_ORDER_EXPORT_ORDER_ID &&
+                            onecSaleTestOrderId &&
                         String(
                             order.onecDocumentId ||
                             ''
@@ -11759,9 +11762,9 @@ app.all(
                 !onecSaleExportArmed ||
                 linkedOneCOrder ||
                 (
-                    ONEC_ORDER_EXPORT_ORDER_ID &&
+                    onecSaleTestOrderId &&
                     onecSaleDeliveredOrders.has(
-                        ONEC_ORDER_EXPORT_ORDER_ID
+                        onecSaleTestOrderId
                     )
                 )
             ) {
@@ -12302,16 +12305,28 @@ app.post(
             });
         }
 
-        if (!ONEC_ORDER_EXPORT_ORDER_ID) {
+        const requestedOrderId =
+            normalizeEnvValue(
+                req.query?.orderId ||
+                req.body?.orderId ||
+                ''
+            );
+
+        if (requestedOrderId) {
+            onecSaleTestOrderId =
+                requestedOrderId;
+        }
+
+        if (!onecSaleTestOrderId) {
             return res.status(409).json({
                 ok: false,
                 error:
-                    'ONEC_ORDER_EXPORT_ORDER_ID не задан'
+                    'orderId для тестовой выгрузки не задан'
             });
         }
 
         onecSaleDeliveredOrders.delete(
-            ONEC_ORDER_EXPORT_ORDER_ID
+            onecSaleTestOrderId
         );
         onecSaleExportArmed = true;
 
@@ -12319,7 +12334,7 @@ app.post(
             ok: true,
             armed: true,
             orderId:
-                ONEC_ORDER_EXPORT_ORDER_ID
+                onecSaleTestOrderId
         });
     }
 );
@@ -12354,7 +12369,7 @@ app.get(
                 ONEC_ORDER_EXPORT_ENABLED,
 
             orderExportOrderId:
-                ONEC_ORDER_EXPORT_ORDER_ID ||
+                onecSaleTestOrderId ||
                 null,
 
             exportArmed:
