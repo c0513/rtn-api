@@ -11254,7 +11254,7 @@ function oneCOrdersCommerceMl(orders) {
 
     return [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        `<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_2" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:anyType" ВерсияСхемы="2.10" ДатаФормирования="${now}">`,
+        `<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_210" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="2.10" ДатаФормирования="${now}">`,
         ...orders.map(
             order =>
                 oneCOrderXml(order)
