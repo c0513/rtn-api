@@ -11550,18 +11550,11 @@ function oneCOrdersCommerceMl(
 }
 
 async function buildOneCTestOrderCommerceMl(
-    cmlVersion = '2.07',
-    requestedOrderId = orderId
+    cmlVersion = '2.07'
 ) {
-    const orderId =
-        normalizeEnvValue(
-            requestedOrderId ||
-            ''
-        );
-
-    if (!orderId) {
+    if (!onecSaleTestOrderId) {
         throw new Error(
-            'orderId не задан; массовая выгрузка намеренно заблокирована'
+            'onecSaleTestOrderId не задан; массовая выгрузка намеренно заблокирована'
         );
     }
 
@@ -11580,7 +11573,7 @@ async function buildOneCTestOrderCommerceMl(
                     candidate?.metadata?.orderId ||
                     ''
                 ).trim() ===
-                    orderId &&
+                    onecSaleTestOrderId &&
                 candidate?.status ===
                     'succeeded' &&
                 candidate?.paid ===
@@ -11593,7 +11586,7 @@ async function buildOneCTestOrderCommerceMl(
 
     if (!payment) {
         throw new Error(
-            `Оплаченный невозвращенный заказ ${orderId} не найден в ЮKassa`
+            `Оплаченный невозвращенный заказ ${onecSaleTestOrderId} не найден в ЮKassa`
         );
     }
 
@@ -11615,7 +11608,7 @@ async function buildOneCTestOrderCommerceMl(
 
     if (!receipt) {
         throw new Error(
-            `Фискальный чек заказа ${orderId} не найден`
+            `Фискальный чек заказа ${onecSaleTestOrderId} не найден`
         );
     }
 
@@ -12507,8 +12500,7 @@ app.get(
             if (!orderId) {
                 return res.status(400).json({
                     ok: false,
-                    error:
-                        'Не указан orderId'
+                    error: 'Не указан orderId'
                 });
             }
 
@@ -12521,29 +12513,82 @@ app.get(
                     ? '2.10'
                     : '2.07';
 
-            const generated =
-                await buildOneCTestOrderCommerceMl(
-                    cmlVersion,
-                    orderId
+            const [
+                paymentResult,
+                receiptResult
+            ] = await Promise.all([
+                fetchAllYooKassaPayments(),
+                fetchAllYooKassaReceipts()
+            ]);
+
+            const payment =
+                paymentResult.payments.find(
+                    candidate =>
+                        String(
+                            candidate?.metadata?.orderId ||
+                            ''
+                        ).trim() === orderId &&
+                        candidate?.status === 'succeeded' &&
+                        candidate?.paid === true &&
+                        Number(
+                            candidate?.refunded_amount?.value ||
+                            0
+                        ) <= 0
+                );
+
+            if (!payment) {
+                return res.status(404).json({
+                    ok: false,
+                    error:
+                        'Оплаченный невозвращенный заказ не найден в ЮKassa'
+                });
+            }
+
+            const receipt =
+                receiptResult.receipts.find(
+                    candidate =>
+                        candidate?.type === 'payment' &&
+                        candidate?.status === 'succeeded' &&
+                        String(
+                            candidate?.payment_id ||
+                            ''
+                        ) === String(payment.id)
+                );
+
+            if (!receipt) {
+                return res.status(404).json({
+                    ok: false,
+                    error:
+                        'Фискальный чек заказа не найден'
+                });
+            }
+
+            const order =
+                buildOneCOrderFromPaymentReceipt(
+                    payment,
+                    receipt
                 );
 
             return res.json({
                 ok: true,
                 orderId:
-                    generated.order.orderId,
+                    order.orderId,
                 publicNumber:
-                    generated.order.publicNumber,
+                    order.publicNumber,
                 amount:
-                    generated.order.amount,
+                    order.amount,
                 lines:
-                    generated.order.lines.length,
+                    order.lines.length,
                 paymentId:
-                    generated.order.paymentId,
+                    order.paymentId,
                 paidDate:
-                    generated.order.paidDate,
+                    order.paidDate,
                 cmlVersion,
                 xml:
-                    generated.xml
+                    oneCOrdersCommerceMl(
+                        [order],
+                        cmlVersion
+                    )
             });
 
         } catch (error) {
