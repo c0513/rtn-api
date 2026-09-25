@@ -10555,7 +10555,7 @@ function oneCXmlDecode(value) {
 function oneCExtractTag(xml, tagName) {
     const escaped =
         String(tagName || '')
-            .replace(/[.*+?^$()|[\]\\{}]/g, '\\function cleanupOneCSessions() {');
+            .replace(/[.*+?^$()|[\]\\{}]/g, '\\.replace(/[.*+?^$()|[\]\\{}]/g, '\\function cleanupOneCSessions() {');');
 
     const match =
         String(xml || '').match(
@@ -12172,6 +12172,92 @@ app.get(
                 error:
                     error.message ||
                     'Не удалось отдать входящий файл заказов 1С'
+            });
+        }
+    }
+);
+
+
+app.post(
+    '/api/admin/1c/sale-import',
+    requireBlogAdmin,
+    express.raw({
+        type: () => true,
+        limit: '12mb'
+    }),
+    (req, res) => {
+        try {
+            const requestedName =
+                String(
+                    req.query?.filename ||
+                    'manual-orders.xml'
+                ).trim();
+
+            const safeName =
+                sanitizeOneCCatalogFilename(
+                    requestedName
+                );
+
+            if (!safeName) {
+                return res.status(400).json({
+                    error:
+                        'Некорректное имя XML-файла'
+                });
+            }
+
+            const body =
+                Buffer.isBuffer(req.body)
+                    ? req.body
+                    : Buffer.from(
+                        req.body == null
+                            ? ''
+                            : String(req.body),
+                        'utf8'
+                    );
+
+            if (!body.length) {
+                return res.status(400).json({
+                    error:
+                        'XML-файл пуст'
+                });
+            }
+
+            fs.mkdirSync(
+                ONEC_SALE_CAPTURE_DIR,
+                {
+                    recursive: true
+                }
+            );
+
+            fs.writeFileSync(
+                path.join(
+                    ONEC_SALE_CAPTURE_DIR,
+                    safeName
+                ),
+                body
+            );
+
+            const result =
+                processOneCSaleImport(
+                    safeName
+                );
+
+            return res.json({
+                ok: true,
+                ...result
+            });
+
+        } catch (error) {
+            console.error(
+                '1C manual sale import error:',
+                error.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                error:
+                    error.message ||
+                    'Не удалось обработать XML 1С'
             });
         }
     }
