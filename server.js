@@ -10542,6 +10542,176 @@ function saveOneCSaleChunk(filename, body) {
     };
 }
 
+function oneCXmlDecode(value) {
+    return String(value || '')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, '&')
+        .trim();
+}
+
+function oneCExtractTag(xml, tagName) {
+    const escaped =
+        String(tagName || '')
+            .replace(/[.*+?^$()|[\]\\{}]/g, '\\function cleanupOneCSessions() {');
+
+    const match =
+        String(xml || '').match(
+            new RegExp(
+                '<' + escaped + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/' + escaped + '>',
+                'i'
+            )
+        );
+
+    return match
+        ? oneCXmlDecode(
+            String(match[1] || '')
+                .replace(/<[^>]+>/g, '')
+        )
+        : '';
+}
+
+function oneCExtractRequisite(xml, name) {
+    const blocks =
+        String(xml || '').match(
+            /<ЗначениеРеквизита>[\s\S]*?<\/ЗначениеРеквизита>/gi
+        ) || [];
+
+    for (const block of blocks) {
+        if (
+            oneCExtractTag(
+                block,
+                'Наименование'
+            ) === name
+        ) {
+            return oneCExtractTag(
+                block,
+                'Значение'
+            );
+        }
+    }
+
+    return '';
+}
+
+function processOneCSaleImport(filename) {
+    const safeName =
+        sanitizeOneCCatalogFilename(filename);
+
+    if (!safeName) {
+        throw new Error(
+            '1С не передала имя файла для импорта заказов'
+        );
+    }
+
+    const fullPath =
+        path.join(
+            ONEC_SALE_CAPTURE_DIR,
+            safeName
+        );
+
+    if (
+        !fs.existsSync(fullPath) ||
+        !fs.statSync(fullPath).isFile()
+    ) {
+        throw new Error(
+            'Файл обмена заказами не найден на сервере'
+        );
+    }
+
+    const xml =
+        fs.readFileSync(
+            fullPath,
+            'utf8'
+        );
+
+    const documents =
+        xml.match(
+            /<Документ>[\s\S]*?<\/Документ>/gi
+        ) || [];
+
+    const orders =
+        readOrders();
+
+    let linked = 0;
+
+    for (const documentXml of documents) {
+        const siteNumber =
+            oneCExtractTag(
+                documentXml,
+                'Номер'
+            );
+
+        if (!siteNumber) {
+            continue;
+        }
+
+        const existing =
+            orders.find(order =>
+                String(
+                    order.publicOrderNumber ||
+                    ''
+                ).trim() ===
+                    siteNumber ||
+                getPublicOrderNumber(
+                    order.orderId
+                ) ===
+                    siteNumber
+            );
+
+        if (!existing?.orderId) {
+            continue;
+        }
+
+        upsertLocalOrder({
+            orderId:
+                existing.orderId,
+
+            onecDocumentId:
+                oneCExtractTag(
+                    documentXml,
+                    'Ид'
+                ),
+
+            onecDocumentNumber:
+                oneCExtractRequisite(
+                    documentXml,
+                    'Номер по 1С'
+                ),
+
+            onecDocumentDate:
+                oneCExtractRequisite(
+                    documentXml,
+                    'Дата по 1С'
+                ),
+
+            onecPosted:
+                oneCExtractRequisite(
+                    documentXml,
+                    'Проведен'
+                ) === 'true',
+
+            onecSyncedAt:
+                new Date().toISOString(),
+
+            onecLastImportFile:
+                safeName
+        });
+
+        linked += 1;
+    }
+
+    return {
+        file:
+            safeName,
+        documents:
+            documents.length,
+        linked
+    };
+}
+
 function cleanupOneCSessions() {
     const now = Date.now();
 
@@ -11658,8 +11828,45 @@ app.all(
             }
         }
 
+        if (mode === 'import') {
+            try {
+                const result =
+                    processOneCSaleImport(
+                        req.query?.filename
+                    );
+
+                console.log(
+                    '1C sale import: ' +
+                    result.file +
+                    ', ' +
+                    result.documents +
+                    ' documents, ' +
+                    result.linked +
+                    ' linked'
+                );
+
+                return oneCText(
+                    res,
+                    200,
+                    'success'
+                );
+
+            } catch (error) {
+                console.error(
+                    '1C sale import error:',
+                    error.message
+                );
+
+                return oneCText(
+                    res,
+                    500,
+                    'failure\n' +
+                    error.message
+                );
+            }
+        }
+
         if (
-            mode === 'import' ||
             mode === 'complete' ||
             mode === 'deactivate'
         ) {
