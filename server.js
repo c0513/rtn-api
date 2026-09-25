@@ -10623,7 +10623,7 @@ function oneCEmptyCommerceMl() {
 app.all(
     '/api/1c/exchange',
     express.raw({
-        type: '*/*',
+        type: () => true,
         limit: '12mb'
     }),
     async (req, res) => {
