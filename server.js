@@ -11716,9 +11716,22 @@ app.all(
         }
 
         if (mode === 'query') {
+            const linkedOneCOrder =
+                ONEC_ORDER_EXPORT_ORDER_ID
+                    ? readOrders().find(order =>
+                        order.orderId ===
+                            ONEC_ORDER_EXPORT_ORDER_ID &&
+                        String(
+                            order.onecDocumentId ||
+                            ''
+                        ).trim()
+                    )
+                    : null;
+
             if (
                 !ONEC_ORDER_EXPORT_ENABLED ||
                 !onecSaleExportArmed ||
+                linkedOneCOrder ||
                 (
                     ONEC_ORDER_EXPORT_ORDER_ID &&
                     onecSaleDeliveredOrders.has(
