@@ -10558,11 +10558,18 @@ app.all(
                 ''
             ).trim().toLowerCase();
 
-        if (type !== 'sale') {
+        // 1С УТ при кнопке "Проверить соединение" может сначала
+        // обращаться с type=catalog, даже если нам нужен обмен заказами.
+        // Авторизацию разрешаем проверить для sale/catalog, но
+        // реальные catalog-операции ниже не обслуживаем.
+        if (
+            type !== 'sale' &&
+            type !== 'catalog'
+        ) {
             return oneCText(
                 res,
                 400,
-                'failure\nRTN.PRO поддерживает здесь только type=sale'
+                'failure\nНеподдерживаемый тип обмена'
             );
         }
 
@@ -10619,6 +10626,17 @@ app.all(
                 res,
                 401,
                 'failure\nСессия обмена не найдена. Повторите checkauth.'
+            );
+        }
+
+        if (
+            type === 'catalog' &&
+            mode !== 'checkauth'
+        ) {
+            return oneCText(
+                res,
+                200,
+                'success'
             );
         }
 
