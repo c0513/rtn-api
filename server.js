@@ -11550,11 +11550,18 @@ function oneCOrdersCommerceMl(
 }
 
 async function buildOneCTestOrderCommerceMl(
-    cmlVersion = '2.07'
+    cmlVersion = '2.07',
+    requestedOrderId = orderId
 ) {
-    if (!onecSaleTestOrderId) {
+    const orderId =
+        normalizeEnvValue(
+            requestedOrderId ||
+            ''
+        );
+
+    if (!orderId) {
         throw new Error(
-            'onecSaleTestOrderId не задан; массовая выгрузка намеренно заблокирована'
+            'orderId не задан; массовая выгрузка намеренно заблокирована'
         );
     }
 
@@ -11573,7 +11580,7 @@ async function buildOneCTestOrderCommerceMl(
                     candidate?.metadata?.orderId ||
                     ''
                 ).trim() ===
-                    onecSaleTestOrderId &&
+                    orderId &&
                 candidate?.status ===
                     'succeeded' &&
                 candidate?.paid ===
@@ -11586,7 +11593,7 @@ async function buildOneCTestOrderCommerceMl(
 
     if (!payment) {
         throw new Error(
-            `Оплаченный невозвращенный заказ ${onecSaleTestOrderId} не найден в ЮKassa`
+            `Оплаченный невозвращенный заказ ${orderId} не найден в ЮKassa`
         );
     }
 
@@ -11608,7 +11615,7 @@ async function buildOneCTestOrderCommerceMl(
 
     if (!receipt) {
         throw new Error(
-            `Фискальный чек заказа ${onecSaleTestOrderId} не найден`
+            `Фискальный чек заказа ${orderId} не найден`
         );
     }
 
@@ -12483,6 +12490,76 @@ app.get(
                 'success'
             ]
         });
+    }
+);
+
+app.get(
+    '/api/admin/1c/order-preview',
+    requireBlogAdmin,
+    async (req, res) => {
+        try {
+            const orderId =
+                normalizeEnvValue(
+                    req.query?.orderId ||
+                    ''
+                );
+
+            if (!orderId) {
+                return res.status(400).json({
+                    ok: false,
+                    error:
+                        'Не указан orderId'
+                });
+            }
+
+            const cmlVersion =
+                String(
+                    req.query?.cmlVersion ||
+                    req.query?.cmlversion ||
+                    '2.07'
+                ).trim() === '2.10'
+                    ? '2.10'
+                    : '2.07';
+
+            const generated =
+                await buildOneCTestOrderCommerceMl(
+                    cmlVersion,
+                    orderId
+                );
+
+            return res.json({
+                ok: true,
+                orderId:
+                    generated.order.orderId,
+                publicNumber:
+                    generated.order.publicNumber,
+                amount:
+                    generated.order.amount,
+                lines:
+                    generated.order.lines.length,
+                paymentId:
+                    generated.order.paymentId,
+                paidDate:
+                    generated.order.paidDate,
+                cmlVersion,
+                xml:
+                    generated.xml
+            });
+
+        } catch (error) {
+            console.error(
+                '1C order preview error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                error:
+                    error.message ||
+                    'Не удалось сформировать CommerceML preview'
+            });
+        }
     }
 );
 
