@@ -11560,8 +11560,18 @@ app.all(
         }
 
         if (mode === 'file') {
-            // Входящие изменения заказов из 1С подключим
-            // после успешного теста стандартного handshake.
+            return oneCText(
+                res,
+                200,
+                'success'
+            );
+        }
+
+        if (
+            mode === 'import' ||
+            mode === 'complete' ||
+            mode === 'deactivate'
+        ) {
             return oneCText(
                 res,
                 200,
