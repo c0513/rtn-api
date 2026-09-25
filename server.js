@@ -10381,6 +10381,92 @@ app.post('/api/create-payment', async (req, res) => {
 const onecSessions = new Map();
 const ONEC_SESSION_TTL_MS = 60 * 60 * 1000;
 const ONEC_COOKIE_NAME = 'RTN1CSESSID';
+const ONEC_CATALOG_CAPTURE_DIR =
+    process.env.ONEC_CATALOG_CAPTURE_DIR ||
+    path.join('/tmp', 'rtn-1c-catalog-capture');
+
+function resetOneCCatalogCapture() {
+    fs.rmSync(
+        ONEC_CATALOG_CAPTURE_DIR,
+        {
+            recursive: true,
+            force: true
+        }
+    );
+
+    fs.mkdirSync(
+        ONEC_CATALOG_CAPTURE_DIR,
+        {
+            recursive: true
+        }
+    );
+}
+
+function sanitizeOneCCatalogFilename(value) {
+    let decoded = String(value || '').trim();
+
+    try {
+        decoded = decodeURIComponent(decoded);
+    } catch {
+        // Оставляем исходное значение, если 1С прислала не-URL encoded строку.
+    }
+
+    decoded =
+        decoded.replace(/\\/g, '/');
+
+    const base =
+        path.basename(decoded);
+
+    return base
+        .replace(/[\x00-\x1f<>:"|?*]/g, '_')
+        .slice(0, 220);
+}
+
+function saveOneCCatalogChunk(filename, body) {
+    const safeName =
+        sanitizeOneCCatalogFilename(filename);
+
+    if (!safeName) {
+        throw new Error(
+            '1С не передала имя файла CommerceML'
+        );
+    }
+
+    fs.mkdirSync(
+        ONEC_CATALOG_CAPTURE_DIR,
+        {
+            recursive: true
+        }
+    );
+
+    const target =
+        path.join(
+            ONEC_CATALOG_CAPTURE_DIR,
+            safeName
+        );
+
+    const chunk =
+        Buffer.isBuffer(body)
+            ? body
+            : Buffer.from(
+                body == null
+                    ? ''
+                    : String(body),
+                'utf8'
+            );
+
+    fs.appendFileSync(
+        target,
+        chunk
+    );
+
+    return {
+        name:
+            safeName,
+        bytes:
+            fs.statSync(target).size
+    };
+}
 
 function cleanupOneCSessions() {
     const now = Date.now();
@@ -10536,14 +10622,9 @@ function oneCEmptyCommerceMl() {
 
 app.all(
     '/api/1c/exchange',
-    express.text({
-        type: [
-            'application/xml',
-            'text/xml',
-            'text/plain',
-            'application/octet-stream'
-        ],
-        limit: '20mb'
+    express.raw({
+        type: '*/*',
+        limit: '12mb'
     }),
     async (req, res) => {
         const type =
@@ -10629,14 +10710,68 @@ app.all(
             );
         }
 
-        if (
-            type === 'catalog' &&
-            mode !== 'checkauth'
-        ) {
+        if (type === 'catalog') {
+            if (mode === 'init') {
+                resetOneCCatalogCapture();
+
+                return oneCText(
+                    res,
+                    200,
+                    [
+                        'zip=no',
+                        'file_limit=10485760'
+                    ].join('\n')
+                );
+            }
+
+            if (mode === 'file') {
+                try {
+                    const saved =
+                        saveOneCCatalogChunk(
+                            req.query?.filename,
+                            req.body
+                        );
+
+                    console.log(
+                        `1C catalog capture: ${saved.name}, ${saved.bytes} bytes total`
+                    );
+
+                    return oneCText(
+                        res,
+                        200,
+                        'success'
+                    );
+
+                } catch (error) {
+                    console.error(
+                        '1C catalog capture file error:',
+                        error.message
+                    );
+
+                    return oneCText(
+                        res,
+                        500,
+                        `failure\n${error.message}`
+                    );
+                }
+            }
+
+            if (
+                mode === 'import' ||
+                mode === 'complete' ||
+                mode === 'deactivate'
+            ) {
+                return oneCText(
+                    res,
+                    200,
+                    'success'
+                );
+            }
+
             return oneCText(
                 res,
-                200,
-                'success'
+                400,
+                `failure\nНеподдерживаемый catalog mode=${mode || 'empty'}`
             );
         }
 
@@ -10698,6 +10833,147 @@ app.all(
 );
 
 app.get(
+    '/api/admin/1c/catalog-capture',
+    requireBlogAdmin,
+    (req, res) => {
+        try {
+            if (
+                !fs.existsSync(
+                    ONEC_CATALOG_CAPTURE_DIR
+                )
+            ) {
+                return res.json({
+                    count: 0,
+                    files: []
+                });
+            }
+
+            const files =
+                fs.readdirSync(
+                    ONEC_CATALOG_CAPTURE_DIR,
+                    {
+                        withFileTypes: true
+                    }
+                )
+                .filter(entry =>
+                    entry.isFile()
+                )
+                .map(entry => {
+                    const fullPath =
+                        path.join(
+                            ONEC_CATALOG_CAPTURE_DIR,
+                            entry.name
+                        );
+
+                    const stat =
+                        fs.statSync(fullPath);
+
+                    return {
+                        name:
+                            entry.name,
+                        bytes:
+                            stat.size,
+                        updatedAt:
+                            stat.mtime.toISOString(),
+                        xml:
+                            /\.xml$/i.test(
+                                entry.name
+                            )
+                    };
+                })
+                .sort(
+                    (left, right) =>
+                        left.name.localeCompare(
+                            right.name,
+                            'ru'
+                        )
+                );
+
+            return res.json({
+                count:
+                    files.length,
+                files
+            });
+
+        } catch (error) {
+            return res.status(500).json({
+                error:
+                    error.message ||
+                    'Не удалось прочитать захваченные файлы 1С'
+            });
+        }
+    }
+);
+
+app.get(
+    '/api/admin/1c/catalog-capture/:filename',
+    requireBlogAdmin,
+    (req, res) => {
+        try {
+            const safeName =
+                sanitizeOneCCatalogFilename(
+                    req.params.filename
+                );
+
+            if (
+                !safeName ||
+                safeName !==
+                    String(
+                        req.params.filename ||
+                        ''
+                    )
+            ) {
+                return res.status(400).json({
+                    error:
+                        'Некорректное имя файла'
+                });
+            }
+
+            const fullPath =
+                path.join(
+                    ONEC_CATALOG_CAPTURE_DIR,
+                    safeName
+                );
+
+            if (
+                !fs.existsSync(fullPath) ||
+                !fs.statSync(fullPath).isFile()
+            ) {
+                return res.status(404).json({
+                    error:
+                        'Файл не найден'
+                });
+            }
+
+            res.set(
+                'Cache-Control',
+                'no-store'
+            );
+
+            if (/\.xml$/i.test(safeName)) {
+                res.type(
+                    'application/xml; charset=utf-8'
+                );
+            } else {
+                res.type(
+                    'application/octet-stream'
+                );
+            }
+
+            return res.sendFile(fullPath);
+
+        } catch (error) {
+            return res.status(500).json({
+                error:
+                    error.message ||
+                    'Не удалось отдать файл 1С'
+            });
+        }
+    }
+);
+
+
+app.get(
     '/api/admin/1c/status',
     requireBlogAdmin,
     (req, res) => {
@@ -10714,15 +10990,25 @@ app.get(
             exchangeUrl:
                 `${PUBLIC_API_URL}/api/1c/exchange`,
 
-            supportedType:
+            supportedTypes: [
                 'sale',
+                'catalog'
+            ],
+
+            catalogCapture:
+                true,
+
+            catalogCaptureDirectory:
+                ONEC_CATALOG_CAPTURE_DIR,
 
             modes: [
                 'checkauth',
                 'init',
                 'query',
-                'success',
-                'file'
+                'file',
+                'import',
+                'complete',
+                'success'
             ]
         });
     }
