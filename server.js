@@ -10386,6 +10386,7 @@ app.post('/api/create-payment', async (req, res) => {
 // ============================================================
 
 const onecSessions = new Map();
+const onecSaleDeliveredOrders = new Set();
 const ONEC_SESSION_TTL_MS = 60 * 60 * 1000;
 const ONEC_COOKIE_NAME = 'RTN1CSESSID';
 const ONEC_CATALOG_CAPTURE_DIR =
@@ -11171,6 +11172,37 @@ function oneCOrderXml(order) {
         ].join(''))
         .join('');
 
+    const paymentDocumentXml =
+        order.paymentId
+            ? [
+                '<ПодчиненныеДокументы>',
+                '<ПодчиненныйДокумент>',
+                `<Ид>${oneCXmlEscape(order.paymentId)}</Ид>`,
+                `<Номер>${oneCXmlEscape(order.paymentId)}</Номер>`,
+                `<Дата>${oneCXmlEscape(order.paidDate)}</Дата>`,
+                '<ХозОперация>Эквайринговая операция</ХозОперация>',
+                '<Валюта>руб</Валюта>',
+                '<Курс>1</Курс>',
+                `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
+                '<ЗначенияРеквизитов>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>Оплачено</Наименование>',
+                '<Значение>true</Значение>',
+                '</ЗначениеРеквизита>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>Метод оплаты ИД</Наименование>',
+                '<Значение>yookassa</Значение>',
+                '</ЗначениеРеквизита>',
+                '<ЗначениеРеквизита>',
+                '<Наименование>Метод оплаты</Наименование>',
+                '<Значение>ЮKassa</Значение>',
+                '</ЗначениеРеквизита>',
+                '</ЗначенияРеквизитов>',
+                '</ПодчиненныйДокумент>',
+                '</ПодчиненныеДокументы>'
+            ].join('')
+            : '';
+
     return [
         '<Документ>',
         `<Ид>${oneCXmlEscape(order.orderId)}</Ид>`,
@@ -11207,6 +11239,7 @@ function oneCOrderXml(order) {
         )}</Комментарий>`,
         `<Товары>${itemsXml}</Товары>`,
         `<ЗначенияРеквизитов>${requisites}</ЗначенияРеквизитов>`,
+        paymentDocumentXml,
         '</Документ>'
     ].join('');
 }
@@ -11471,7 +11504,15 @@ app.all(
         }
 
         if (mode === 'query') {
-            if (!ONEC_ORDER_EXPORT_ENABLED) {
+            if (
+                !ONEC_ORDER_EXPORT_ENABLED ||
+                (
+                    ONEC_ORDER_EXPORT_ORDER_ID &&
+                    onecSaleDeliveredOrders.has(
+                        ONEC_ORDER_EXPORT_ORDER_ID
+                    )
+                )
+            ) {
                 res
                     .status(200)
                     .type('application/xml; charset=utf-8');
@@ -11484,6 +11525,9 @@ app.all(
             try {
                 const generated =
                     await buildOneCTestOrderCommerceMl();
+
+                session.lastSaleOrderId =
+                    generated.order.orderId;
 
                 console.log(
                     `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines`
@@ -11519,6 +11563,18 @@ app.all(
         }
 
         if (mode === 'success') {
+            if (session.lastSaleOrderId) {
+                onecSaleDeliveredOrders.add(
+                    session.lastSaleOrderId
+                );
+
+                console.log(
+                    `1C sale success: marked ${session.lastSaleOrderId} as delivered for this process`
+                );
+
+                delete session.lastSaleOrderId;
+            }
+
             return oneCText(
                 res,
                 200,
@@ -11702,6 +11758,11 @@ app.get(
             orderExportOrderId:
                 ONEC_ORDER_EXPORT_ORDER_ID ||
                 null,
+
+            deliveredThisProcess:
+                Array.from(
+                    onecSaleDeliveredOrders
+                ),
 
             mappedProducts:
                 Object.keys(
