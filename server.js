@@ -11420,7 +11420,7 @@ function oneCOrderXml(order) {
         `<Дата>${oneCXmlEscape(order.date)}</Дата>`,
         '<ХозОперация>Заказ товара</ХозОперация>',
         '<Роль>Продавец</Роль>',
-        '<Валюта>RUB</Валюта>',
+        '<Валюта>643</Валюта>',
         '<Курс>1</Курс>',
         `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
         '<Контрагенты>',
@@ -11462,7 +11462,7 @@ function oneCOrdersCommerceMl(orders) {
 
     return [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        `<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_210" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="2.10" ДатаФормирования="${now}">`,
+        `<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_2" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="2.07" ДатаФормирования="${now}">`,
         ...orders.map(
             order =>
                 oneCOrderXml(order)
