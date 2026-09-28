@@ -3,8 +3,10 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { getPool, pingDatabase } = require('./db');
 const { getMailStatus, verifyMailConnection, sendVerificationCodeEmail } = require('./rtn-mail');
+const { getAccountOrders, ensureAccountBitrixContact } = require('./rtn-bitrix-account');
 
 const SESSION_COOKIE = 'rtn_session';
+const RTN_ADMIN_EMAIL = normalizeEmail(process.env.RTN_ADMIN_EMAIL || 'perervamax@yandex.ru');
 const SESSION_DAYS = Math.max(1, Number(process.env.RTN_SESSION_DAYS || 30));
 const SESSION_MAX_AGE = SESSION_DAYS * 24 * 60 * 60;
 
@@ -138,7 +140,7 @@ function getSessionToken(req) {
 function setSessionCookie(res, token) {
     const parts = [
         `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
-        'Path=/api/account',
+        'Path=/api',
         'HttpOnly',
         'Secure',
         'SameSite=None',
@@ -151,7 +153,7 @@ function setSessionCookie(res, token) {
 function clearSessionCookie(res) {
     res.setHeader(
         'Set-Cookie',
-        `${SESSION_COOKIE}=; Path=/api/account; HttpOnly; Secure; SameSite=None; Max-Age=0`
+        `${SESSION_COOKIE}=; Path=/api; HttpOnly; Secure; SameSite=None; Max-Age=0`
     );
 }
 
@@ -167,7 +169,8 @@ function publicUser(row) {
         phoneVerified: Boolean(row.phone_verified_at),
         status: row.status,
         rhinoCoins: Number(row.rhino_coin_balance || 0),
-        createdAt: row.created_at
+        createdAt: row.created_at,
+        isAdmin: normalizeEmail(row.email) === RTN_ADMIN_EMAIL
     };
 }
 
@@ -655,6 +658,13 @@ function createAccountRouter() {
 
             setSessionCookie(res, token);
 
+            ensureAccountBitrixContact({
+                ...publicRows[0],
+                id: user.id
+            }).catch(error => {
+                console.error('RTN account Bitrix contact link error:', error.message);
+            });
+
             return res.json({
                 ok: true,
                 user: publicUser(publicRows[0])
@@ -851,6 +861,32 @@ function createAccountRouter() {
         }
     });
 
+    router.get('/orders', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const history = await getAccountOrders(user);
+
+            return res.json({
+                ok: true,
+                bitrixContactId: history.contactId,
+                orders: history.orders
+            });
+        } catch (error) {
+            console.error('RTN account orders error:', error);
+
+            return res.status(502).json({
+                error: 'Не удалось получить историю заказов'
+            });
+        }
+    });
+
     router.get('/me', async (req, res) => {
         try {
             const user = await getAuthenticatedUser(req);
@@ -901,5 +937,7 @@ function createAccountRouter() {
 }
 
 module.exports = {
-    createAccountRouter
+    createAccountRouter,
+    getAuthenticatedUser,
+    RTN_ADMIN_EMAIL
 };
