@@ -1553,13 +1553,34 @@ async function getContactXpSummary(contactId) {
 }
 
 async function getReferralFriends(user) {
-    const referralCode = await getReferralCodeForUser(user);
+    let ownerProfile = null;
+
+    try {
+        ownerProfile = await getAccountBitrixProfile(user);
+    } catch (error) {
+        console.error(
+            'RTN referral owner profile error:',
+            error.message
+        );
+    }
+
+    const ownerStatuses = Array.isArray(ownerProfile?.memberStatuses)
+        ? ownerProfile.memberStatuses.map(value =>
+            String(value || '').toUpperCase()
+        )
+        : [];
+
+    const ownerIsAmbassador = ownerStatuses.includes('AMBASSADOR');
+    const referralCode =
+        clean(ownerProfile?.personalPromoCode, 80).toUpperCase() ||
+        referralCodeFromPublicId(user?.public_id);
+    const rewardCoins = ownerIsAmbassador ? 0 : 150;
 
     if (!user?.id || !referralCode) {
         return {
             referralCode,
             discountPercent: 5,
-            rewardCoins: 150,
+            rewardCoins,
             friends: []
         };
     }
@@ -1581,7 +1602,7 @@ async function getReferralFriends(user) {
         return {
             referralCode,
             discountPercent: 5,
-            rewardCoins: 150,
+            rewardCoins,
             friends: []
         };
     }
@@ -1672,7 +1693,7 @@ async function getReferralFriends(user) {
                 xp: 0,
                 pendingXp: 0,
                 joinedAt: firstDeal?.DATE_CREATE || null,
-                rewardCoins: 150,
+                rewardCoins,
                 rewardAwarded,
                 accountLinked: false
             });
@@ -1725,7 +1746,7 @@ async function getReferralFriends(user) {
             xp,
             pendingXp,
             joinedAt: friendUser.created_at || firstDeal?.DATE_CREATE || null,
-            rewardCoins: 150,
+            rewardCoins,
             rewardAwarded,
             accountLinked: true
         });
@@ -1734,7 +1755,7 @@ async function getReferralFriends(user) {
     return {
         referralCode,
         discountPercent: 5,
-        rewardCoins: 150,
+        rewardCoins,
         friends
     };
 }
