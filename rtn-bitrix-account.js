@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const { getPool } = require('./db');
 
 function clean(value, max = 500) {
@@ -66,6 +65,124 @@ async function bitrixCall(method, params = {}) {
     }
 }
 
+function pick(user, ...keys) {
+    for (const key of keys) {
+        const value = user?.[key];
+        if (value !== undefined && value !== null && String(value).trim()) {
+            return value;
+        }
+    }
+    return '';
+}
+
+function buildStandardContactFields(user = {}, extra = {}) {
+    const source = {
+        ...user,
+        ...extra
+    };
+
+    const firstName = clean(
+        pick(source, 'first_name', 'firstName'),
+        100
+    );
+    const lastName = clean(
+        pick(source, 'last_name', 'lastName'),
+        100
+    );
+    const email = normalizeEmail(
+        pick(source, 'email')
+    );
+    const phone = normalizePhone(
+        pick(source, 'phone')
+    );
+
+    const fields = {
+        SOURCE_ID: 'WEB',
+        SOURCE_DESCRIPTION: 'Личный кабинет RTN.PRO'
+    };
+
+    fields.NAME =
+        firstName ||
+        (email ? email.split('@')[0] : '') ||
+        'Покупатель RTN.PRO';
+
+    if (lastName) {
+        fields.LAST_NAME = lastName;
+    }
+
+    if (email) {
+        fields.EMAIL = [{
+            VALUE: email,
+            VALUE_TYPE: 'WORK'
+        }];
+    }
+
+    if (phone) {
+        fields.PHONE = [{
+            VALUE: phone,
+            VALUE_TYPE: 'MOBILE'
+        }];
+    }
+
+    const address = clean(
+        pick(source, 'address', 'address_line1', 'addressLine1'),
+        500
+    );
+    const address2 = clean(
+        pick(source, 'address_2', 'address_line2', 'addressLine2'),
+        500
+    );
+    const city = clean(
+        pick(source, 'address_city', 'city'),
+        150
+    );
+    const region = clean(
+        pick(source, 'address_region', 'region'),
+        150
+    );
+    const postalCode = clean(
+        pick(source, 'address_postal_code', 'postalCode'),
+        40
+    );
+    const country = clean(
+        pick(source, 'address_country', 'country'),
+        100
+    );
+    const birthDate = clean(
+        pick(source, 'birth_date', 'birthDate'),
+        40
+    );
+
+    if (address) fields.ADDRESS = address;
+    if (address2) fields.ADDRESS_2 = address2;
+    if (city) fields.ADDRESS_CITY = city;
+    if (region) fields.ADDRESS_REGION = region;
+    if (postalCode) fields.ADDRESS_POSTAL_CODE = postalCode;
+    if (country) fields.ADDRESS_COUNTRY = country;
+    if (birthDate) fields.BIRTHDATE = birthDate;
+
+    const photoBase64 = clean(
+        pick(source, 'photo_base64', 'photoBase64'),
+        20 * 1024 * 1024
+    );
+
+    if (photoBase64) {
+        const filename = clean(
+            pick(source, 'photo_filename', 'photoFilename') || 'rtn-profile.jpg',
+            180
+        );
+
+        fields.PHOTO = {
+            fileData: [
+                filename,
+                photoBase64.replace(/^data:[^;]+;base64,/, '')
+            ]
+        };
+    }
+
+    return fields;
+}
+
 async function findContactId({ email, phone }) {
     const normalizedPhone = normalizePhone(phone);
 
@@ -102,30 +219,136 @@ async function findContactId({ email, phone }) {
     return null;
 }
 
-async function ensureAccountBitrixContact(user) {
-    if (!user) return null;
-
-    if (Number(user.bitrix_contact_id || 0) > 0) {
-        return Number(user.bitrix_contact_id);
-    }
-
-    const contactId = await findContactId({
-        email: user.email,
-        phone: user.phone
+async function createAccountContact(user, extra = {}) {
+    const result = await bitrixCall('crm.contact.add', {
+        fields: buildStandardContactFields(user, extra),
+        params: {
+            REGISTER_SONET_EVENT: 'N'
+        }
     });
 
-    if (!contactId) return null;
+    return Number(result || 0) || null;
+}
+
+async function syncAccountContactFields(contactId, user, extra = {}) {
+    if (!contactId) return false;
+
+    await bitrixCall('crm.contact.update', {
+        id: Number(contactId),
+        fields: buildStandardContactFields(user, extra),
+        params: {
+            REGISTER_SONET_EVENT: 'N'
+        }
+    });
+
+    return true;
+}
+
+async function persistContactId(userId, contactId) {
+    if (!userId || !contactId) return;
 
     const db = getPool();
 
     await db.execute(
         'UPDATE users SET bitrix_contact_id = ?, updated_at = NOW() WHERE id = ?',
-        [contactId, user.id]
+        [Number(contactId), userId]
     );
+}
+
+async function ensureAccountBitrixContact(user, extra = {}) {
+    if (!user) return null;
+
+    let contactId = Number(user.bitrix_contact_id || 0) || null;
+
+    if (!contactId) {
+        contactId = await findContactId({
+            email: user.email,
+            phone: user.phone
+        });
+    }
+
+    if (!contactId) {
+        contactId = await createAccountContact(user, extra);
+    }
+
+    if (!contactId) {
+        return null;
+    }
+
+    if (user.id) {
+        await persistContactId(user.id, contactId);
+    }
 
     user.bitrix_contact_id = contactId;
 
+    // CRM-контакт является мастер-копией расширенного профиля.
+    // Каждый успешный вход освежает стандартные поля теми данными,
+    // которые уже есть у пользователя RTN.
+    try {
+        await syncAccountContactFields(contactId, user, extra);
+    } catch (error) {
+        console.error(
+            `RTN account Bitrix contact sync error for ${contactId}:`,
+            error.message
+        );
+    }
+
     return contactId;
+}
+
+async function getAccountBitrixProfile(user) {
+    const contactId = await ensureAccountBitrixContact(user);
+
+    if (!contactId) {
+        return null;
+    }
+
+    const contact = await bitrixCall('crm.contact.get', {
+        id: Number(contactId)
+    });
+
+    if (!contact) return null;
+
+    const email =
+        Array.isArray(contact.EMAIL) && contact.EMAIL[0]
+            ? contact.EMAIL[0].VALUE
+            : null;
+
+    const phone =
+        Array.isArray(contact.PHONE) && contact.PHONE[0]
+            ? contact.PHONE[0].VALUE
+            : null;
+
+    return {
+        bitrixContactId: contactId,
+        firstName: contact.NAME || '',
+        lastName: contact.LAST_NAME || '',
+        email: email || user.email || null,
+        phone: phone || user.phone || null,
+        address: contact.ADDRESS || '',
+        address2: contact.ADDRESS_2 || '',
+        city: contact.ADDRESS_CITY || '',
+        region: contact.ADDRESS_REGION || '',
+        postalCode: contact.ADDRESS_POSTAL_CODE || '',
+        country: contact.ADDRESS_COUNTRY || '',
+        birthDate: contact.BIRTHDATE || '',
+        hasPhoto: Boolean(contact.HAS_PHONE || contact.PHOTO)
+    };
+}
+
+async function updateAccountBitrixProfile(user, profile = {}) {
+    const contactId = await ensureAccountBitrixContact(user, profile);
+
+    if (!contactId) {
+        throw new Error('Не удалось создать контакт Bitrix24');
+    }
+
+    await syncAccountContactFields(contactId, user, profile);
+
+    return getAccountBitrixProfile({
+        ...user,
+        bitrix_contact_id: contactId
+    });
 }
 
 function mapDealStatus(stageId) {
@@ -203,7 +426,6 @@ async function getAccountOrders(user) {
     });
 
     const deals = Array.isArray(result) ? result : [];
-
     const orders = [];
 
     for (const deal of deals.slice(0, 100)) {
@@ -235,6 +457,11 @@ async function getAccountOrders(user) {
 module.exports = {
     bitrixCall,
     findContactId,
+    buildStandardContactFields,
+    createAccountContact,
+    syncAccountContactFields,
     ensureAccountBitrixContact,
+    getAccountBitrixProfile,
+    updateAccountBitrixProfile,
     getAccountOrders
 };
