@@ -8,7 +8,10 @@ const {
     ensureAccountBitrixContact,
     getAccountBitrixProfile,
     updateAccountBitrixProfile,
-    getAccountOrderReference
+    getAccountOrderReference,
+    referralCodeFromPublicId,
+    resolveReferralCode,
+    getReferralFriends
 } = require('./rtn-bitrix-account');
 const { getOrderReceipt } = require('./rtn-yookassa-account');
 
@@ -282,7 +285,8 @@ function publicUser(row) {
         status: row.status,
         rhinoCoins: Number(row.rhino_coin_balance || 0),
         createdAt: row.created_at,
-        isAdmin: normalizeEmail(row.email) === RTN_ADMIN_EMAIL
+        isAdmin: normalizeEmail(row.email) === RTN_ADMIN_EMAIL,
+        referralCode: referralCodeFromPublicId(row.public_id)
     };
 }
 
@@ -1075,6 +1079,57 @@ function createAccountRouter() {
 
             return res.status(500).json({
                 error: 'Не удалось выполнить вход'
+            });
+        }
+    });
+
+    router.get('/referral/resolve/:code', async (req, res) => {
+        try {
+            const referrer = await resolveReferralCode(req.params?.code);
+
+            if (!referrer) {
+                return res.status(404).json({
+                    ok: false,
+                    error: 'Реферальный промокод не найден'
+                });
+            }
+
+            return res.json({
+                ok: true,
+                code: referralCodeFromPublicId(referrer.public_id),
+                discountPercent: 5
+            });
+        } catch (error) {
+            console.error('RTN referral resolve error:', error.message);
+
+            return res.status(503).json({
+                ok: false,
+                error: 'Не удалось проверить промокод'
+            });
+        }
+    });
+
+    router.get('/friends', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const referral = await getReferralFriends(user);
+
+            return res.json({
+                ok: true,
+                ...referral
+            });
+        } catch (error) {
+            console.error('RTN friends error:', error);
+
+            return res.status(502).json({
+                error: 'Не удалось загрузить друзей'
             });
         }
     });
