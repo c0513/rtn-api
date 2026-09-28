@@ -341,7 +341,55 @@ function extractContactPhotoUrl(value) {
 }
 
 const RTN_MEMBER_STATUS_FIELD = 'UF_CRM_RTN_MEMBER_STATUS';
+const RTN_PERSONAL_PROMO_FIELD = 'UF_CRM_RTN_PERSONAL_PROMO';
 let memberStatusCache = { expiresAt: 0, options: new Map() };
+
+async function ensureContactSimpleField(fieldName, label) {
+    const existing = await bitrixCall('crm.contact.userfield.list', {
+        filter: {
+            FIELD_NAME: fieldName
+        }
+    });
+
+    const current = Array.isArray(existing) ? existing[0] : null;
+
+    if (current) {
+        return current;
+    }
+
+    await bitrixCall('crm.contact.userfield.add', {
+        fields: {
+            FIELD_NAME: fieldName,
+            USER_TYPE_ID: 'string',
+            MULTIPLE: 'N',
+            MANDATORY: 'N',
+            SHOW_FILTER: 'Y',
+            SHOW_IN_LIST: 'Y',
+            EDIT_IN_LIST: 'Y',
+            EDIT_FORM_LABEL: {
+                ru: label,
+                en: label
+            },
+            LIST_COLUMN_LABEL: {
+                ru: label,
+                en: label
+            },
+            LIST_FILTER_LABEL: {
+                ru: label,
+                en: label
+            },
+            SORT: 3100
+        }
+    });
+
+    const refreshed = await bitrixCall('crm.contact.userfield.list', {
+        filter: {
+            FIELD_NAME: fieldName
+        }
+    });
+
+    return Array.isArray(refreshed) ? refreshed[0] || null : null;
+}
 
 async function getContactMemberStatuses(contact = {}) {
     const raw = contact[RTN_MEMBER_STATUS_FIELD];
@@ -382,6 +430,65 @@ async function getContactMemberStatuses(contact = {}) {
         .map(id => memberStatusCache.options.get(id) || clean(id, 120))
         .filter(Boolean)
         .map(value => String(value).toUpperCase());
+}
+
+async function getOrCreateAmbassadorPromo({
+    contact,
+    contactId,
+    user,
+    memberStatuses
+}) {
+    const statuses = new Set(
+        (Array.isArray(memberStatuses) ? memberStatuses : [])
+            .map(value => String(value || '').toUpperCase())
+    );
+
+    if (!statuses.has('AMBASSADOR')) {
+        return '';
+    }
+
+    try {
+        await ensureContactSimpleField(
+            RTN_PERSONAL_PROMO_FIELD,
+            'Персональный промокод'
+        );
+    } catch (error) {
+        console.error(
+            'RTN personal promo field ensure error:',
+            error.message
+        );
+    }
+
+    const existing = clean(
+        contact?.[RTN_PERSONAL_PROMO_FIELD],
+        80
+    ).toUpperCase();
+
+    if (existing) {
+        return existing;
+    }
+
+    const generated = referralCodeFromPublicId(user?.public_id);
+
+    if (!generated || !contactId) {
+        return generated;
+    }
+
+    try {
+        await bitrixCall('crm.contact.update', {
+            id: Number(contactId),
+            fields: {
+                [RTN_PERSONAL_PROMO_FIELD]: generated
+            }
+        });
+    } catch (error) {
+        console.error(
+            `RTN personal promo save error for contact ${contactId}:`,
+            error.message
+        );
+    }
+
+    return generated;
 }
 
 function normalizeCrmDateOnly(value) {
@@ -768,6 +875,12 @@ async function getAccountBitrixProfile(user) {
 
     const secondaryAddress = parseSecondaryAddress(contact.ADDRESS_2 || '');
     const memberStatuses = await getContactMemberStatuses(contact);
+    const personalPromoCode = await getOrCreateAmbassadorPromo({
+        contact,
+        contactId,
+        user,
+        memberStatuses
+    });
 
     return {
         firstName: contact.NAME || '',
@@ -782,7 +895,9 @@ async function getAccountBitrixProfile(user) {
         birthDate: normalizeCrmDateOnly(contact.BIRTHDATE),
         avatarUrl: '',
         hasPhoto: Boolean(contact.PHOTO),
-        memberStatuses
+        memberStatuses,
+        personalPromoCode,
+        referralCode: personalPromoCode || referralCodeFromPublicId(user?.public_id)
     };
 }
 
@@ -1095,30 +1210,93 @@ function referralCodeFromPublicId(publicId) {
 async function resolveReferralCode(code) {
     const normalized = clean(code, 80).toUpperCase();
 
-    if (!/^RTN-[A-Z0-9]{8,32}$/.test(normalized)) {
+    if (!/^[A-Z0-9][A-Z0-9._-]{2,79}$/.test(normalized)) {
         return null;
     }
 
     const db = getPool();
-    const [rows] = await db.execute(
-        `SELECT
-            id,
-            public_id,
-            email,
-            phone,
-            bitrix_contact_id
-         FROM users
-         WHERE status = 'active'
-           AND CONCAT(
-                'RTN-',
-                LEFT(REPLACE(UPPER(public_id), '-', ''), 8),
-                RIGHT(REPLACE(UPPER(public_id), '-', ''), 8)
-           ) = ?
-         LIMIT 1`,
-        [normalized]
-    );
 
-    return rows[0] || null;
+    if (/^RTN-[A-Z0-9]{8,32}$/.test(normalized)) {
+        const [rows] = await db.execute(
+            `SELECT
+                id,
+                public_id,
+                email,
+                phone,
+                bitrix_contact_id
+             FROM users
+             WHERE status = 'active'
+               AND CONCAT(
+                    'RTN-',
+                    LEFT(REPLACE(UPPER(public_id), '-', ''), 8),
+                    RIGHT(REPLACE(UPPER(public_id), '-', ''), 8)
+               ) = ?
+             LIMIT 1`,
+            [normalized]
+        );
+
+        if (rows[0]) {
+            return rows[0];
+        }
+    }
+
+    try {
+        await ensureContactSimpleField(
+            RTN_PERSONAL_PROMO_FIELD,
+            'Персональный промокод'
+        );
+
+        const contacts = await bitrixCall('crm.contact.list', {
+            order: {
+                ID: 'ASC'
+            },
+            filter: {
+                [RTN_PERSONAL_PROMO_FIELD]: normalized
+            },
+            select: [
+                'ID',
+                RTN_MEMBER_STATUS_FIELD,
+                RTN_PERSONAL_PROMO_FIELD
+            ],
+            start: 0
+        });
+
+        for (const contact of Array.isArray(contacts) ? contacts : []) {
+            const statuses = await getContactMemberStatuses(contact);
+
+            if (!statuses.includes('AMBASSADOR')) {
+                continue;
+            }
+
+            const contactId = Number(contact.ID || contact.id || 0);
+            if (!contactId) continue;
+
+            const [rows] = await db.execute(
+                `SELECT
+                    id,
+                    public_id,
+                    email,
+                    phone,
+                    bitrix_contact_id
+                 FROM users
+                 WHERE status = 'active'
+                   AND bitrix_contact_id = ?
+                 LIMIT 1`,
+                [contactId]
+            );
+
+            if (rows[0]) {
+                return rows[0];
+            }
+        }
+    } catch (error) {
+        console.error(
+            `RTN personal promo resolve error for ${normalized}:`,
+            error.message
+        );
+    }
+
+    return null;
 }
 
 function referralLevelFromXp(xp, memberStatuses = []) {
@@ -1311,6 +1489,28 @@ async function awardReferralCoinsForPayment(payment, dealId) {
     }
 }
 
+async function getReferralCodeForUser(user) {
+    const fallback = referralCodeFromPublicId(user?.public_id);
+
+    if (!user?.id) {
+        return fallback;
+    }
+
+    try {
+        const profile = await getAccountBitrixProfile(user);
+        const personal = clean(profile?.personalPromoCode, 80).toUpperCase();
+
+        return personal || fallback;
+    } catch (error) {
+        console.error(
+            'RTN referral code profile lookup error:',
+            error.message
+        );
+
+        return fallback;
+    }
+}
+
 async function getContactXpSummary(contactId) {
     const result = await bitrixCall('crm.deal.list', {
         order: {
@@ -1353,7 +1553,7 @@ async function getContactXpSummary(contactId) {
 }
 
 async function getReferralFriends(user) {
-    const referralCode = referralCodeFromPublicId(user?.public_id);
+    const referralCode = await getReferralCodeForUser(user);
 
     if (!user?.id || !referralCode) {
         return {
@@ -1540,6 +1740,165 @@ async function getReferralFriends(user) {
 }
 
 
+async function getAmbassadorSales(user) {
+    const profile = await getAccountBitrixProfile(user);
+    const memberStatuses = Array.isArray(profile?.memberStatuses)
+        ? profile.memberStatuses
+        : [];
+
+    const isAmbassador = memberStatuses
+        .map(value => String(value || '').toUpperCase())
+        .includes('AMBASSADOR');
+
+    const personalPromoCode = clean(
+        profile?.personalPromoCode,
+        80
+    ).toUpperCase();
+
+    if (!isAmbassador || !personalPromoCode) {
+        return {
+            isAmbassador,
+            personalPromoCode,
+            commissionRate: 0.10,
+            totalCommission: 0,
+            confirmedCommission: 0,
+            pendingCommission: 0,
+            sales: []
+        };
+    }
+
+    const optionsByField = await getDealUserFieldOptions();
+    const promoOptions = optionsByField.get(DEAL_FIELD_NAMES.promoCode);
+    let promoOptionId = null;
+
+    if (promoOptions) {
+        for (const [id, value] of promoOptions.entries()) {
+            if (
+                String(value || '').trim().toUpperCase() ===
+                personalPromoCode
+            ) {
+                promoOptionId = Number(id);
+                break;
+            }
+        }
+    }
+
+    if (!promoOptionId) {
+        return {
+            isAmbassador: true,
+            personalPromoCode,
+            commissionRate: 0.10,
+            totalCommission: 0,
+            confirmedCommission: 0,
+            pendingCommission: 0,
+            sales: []
+        };
+    }
+
+    const result = await bitrixCall('crm.deal.list', {
+        order: {
+            DATE_CREATE: 'DESC'
+        },
+        filter: {
+            [DEAL_FIELD_NAMES.promoCode]: promoOptionId
+        },
+        select: [
+            'ID',
+            'TITLE',
+            'STAGE_ID',
+            'CATEGORY_ID',
+            'OPPORTUNITY',
+            'CURRENCY_ID',
+            'DATE_CREATE',
+            'DATE_MODIFY',
+            'CLOSEDATE',
+            'CONTACT_ID',
+            'ORIGIN_ID',
+            DEAL_FIELD_NAMES.orderNumber,
+            DEAL_FIELD_NAMES.paymentStatus,
+            DEAL_FIELD_NAMES.deliveryType
+        ],
+        start: 0
+    });
+
+    const sales = await Promise.all(
+        (Array.isArray(result) ? result : []).slice(0, 100).map(async deal => {
+            const id = Number(deal.ID || deal.id || 0);
+            const amount = Math.max(0, Number(deal.OPPORTUNITY || 0));
+            const status = mapDealStatus(deal.STAGE_ID);
+            const stage = await getDealStagePresentation(deal.STAGE_ID);
+            const commissionAmount = Math.round(amount * 0.10 * 100) / 100;
+            const items = id ? await getDealProductRows(id) : [];
+
+            const [paymentStatus, deliveryType] = await Promise.all([
+                resolveDealFieldValue(
+                    DEAL_FIELD_NAMES.paymentStatus,
+                    deal[DEAL_FIELD_NAMES.paymentStatus]
+                ),
+                resolveDealFieldValue(
+                    DEAL_FIELD_NAMES.deliveryType,
+                    deal[DEAL_FIELD_NAMES.deliveryType]
+                )
+            ]);
+
+            return {
+                dealId: String(id || ''),
+                orderNumber: clean(
+                    deal[DEAL_FIELD_NAMES.orderNumber] ||
+                    deal.ORIGIN_ID ||
+                    id ||
+                    '',
+                    100
+                ),
+                title: clean(deal.TITLE || 'ЗАКАЗ RTN.PRO', 300),
+                status,
+                statusLabel: stage.label,
+                stageId: clean(deal.STAGE_ID || '', 100),
+                amount,
+                currency: clean(deal.CURRENCY_ID || 'RUB', 10),
+                commissionAmount,
+                commissionRate: 0.10,
+                commissionStatus:
+                    status === 'completed'
+                        ? 'confirmed'
+                        : status === 'cancelled'
+                            ? 'cancelled'
+                            : 'pending',
+                paymentStatus,
+                deliveryType,
+                createdAt: deal.DATE_CREATE || null,
+                updatedAt: deal.DATE_MODIFY || null,
+                closedAt: deal.CLOSEDATE || null,
+                items
+            };
+        })
+    );
+
+    const activeSales = sales.filter(sale => sale.status !== 'cancelled');
+    const confirmedCommission = activeSales
+        .filter(sale => sale.commissionStatus === 'confirmed')
+        .reduce((sum, sale) => sum + sale.commissionAmount, 0);
+    const pendingCommission = activeSales
+        .filter(sale => sale.commissionStatus === 'pending')
+        .reduce((sum, sale) => sum + sale.commissionAmount, 0);
+
+    return {
+        isAmbassador: true,
+        personalPromoCode,
+        commissionRate: 0.10,
+        totalCommission:
+            Math.round(
+                (confirmedCommission + pendingCommission) * 100
+            ) / 100,
+        confirmedCommission:
+            Math.round(confirmedCommission * 100) / 100,
+        pendingCommission:
+            Math.round(pendingCommission * 100) / 100,
+        sales
+    };
+}
+
+
 
 module.exports = {
     bitrixCall,
@@ -1555,5 +1914,6 @@ module.exports = {
     referralCodeFromPublicId,
     resolveReferralCode,
     awardReferralCoinsForPayment,
-    getReferralFriends
+    getReferralFriends,
+    getAmbassadorSales
 };
