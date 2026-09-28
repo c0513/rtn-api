@@ -7,8 +7,10 @@ const {
     getAccountOrders,
     ensureAccountBitrixContact,
     getAccountBitrixProfile,
-    updateAccountBitrixProfile
+    updateAccountBitrixProfile,
+    getAccountOrderReference
 } = require('./rtn-bitrix-account');
+const { getOrderReceipt } = require('./rtn-yookassa-account');
 
 const SESSION_COOKIE = 'rtn_session';
 const RTN_ADMIN_EMAIL = normalizeEmail(process.env.RTN_ADMIN_EMAIL || 'perervamax@yandex.ru');
@@ -1083,6 +1085,55 @@ function createAccountRouter() {
 
             return res.status(502).json({
                 error: 'Не удалось сохранить профиль'
+            });
+        }
+    });
+
+    router.get('/orders/:dealId/receipt', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const order = await getAccountOrderReference(
+                user,
+                req.params?.dealId
+            );
+
+            if (!order) {
+                return res.status(404).json({
+                    error: 'Заказ не найден'
+                });
+            }
+
+            if (!order.orderId) {
+                return res.status(404).json({
+                    error: 'Для этого заказа нет номера оплаты'
+                });
+            }
+
+            const receipt = await getOrderReceipt(order.orderId);
+
+            if (!receipt) {
+                return res.status(404).json({
+                    error: 'Чек для этого заказа пока не найден'
+                });
+            }
+
+            return res.json({
+                ok: true,
+                order,
+                receipt
+            });
+        } catch (error) {
+            console.error('RTN account receipt error:', error);
+
+            return res.status(502).json({
+                error: 'Не удалось получить чек'
             });
         }
     });
