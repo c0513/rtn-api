@@ -307,6 +307,39 @@ async function ensureAccountBitrixContact(user, extra = {}) {
     return contactId;
 }
 
+function extractContactPhotoUrl(value) {
+    if (!value) return '';
+
+    const candidates = [];
+
+    if (typeof value === 'string') {
+        candidates.push(value);
+    } else if (Array.isArray(value)) {
+        candidates.push(...value);
+    } else if (typeof value === 'object') {
+        candidates.push(
+            value.url,
+            value.URL,
+            value.downloadUrl,
+            value.download_url,
+            value.showUrl,
+            value.show_url,
+            value.src,
+            value.SRC
+        );
+    }
+
+    for (const candidate of candidates) {
+        const photo = String(candidate || '').trim();
+
+        if (/^https?:\/\//i.test(photo) || /^data:image\//i.test(photo)) {
+            return photo;
+        }
+    }
+
+    return '';
+}
+
 function parseSecondaryAddress(value) {
     const text = clean(value, 500);
     const houseMatch = text.match(/(?:^|;\s*)Дом:\s*([^;]+)/i);
@@ -539,11 +572,22 @@ async function getCatalogProductPresentation(productId) {
     }
 
     try {
-        const result = await bitrixCall('catalog.product.get', {
-            id
+        const result = await bitrixCall('catalog.product.list', {
+            select: ['id', 'iblockId', 'name', 'xmlId'],
+            filter: {
+                id
+            }
         });
 
-        const product = result?.product || result || {};
+        const products =
+            result?.products ||
+            result?.items ||
+            (Array.isArray(result) ? result : []);
+
+        const product =
+            (Array.isArray(products) ? products[0] : null) ||
+            {};
+
         const xmlId = clean(product.xmlId || product.XML_ID || '', 200);
         const externalId = xmlId.replace(/^RTN:/i, '');
         const name = clean(product.name || product.NAME || '', 300);
@@ -614,6 +658,7 @@ async function getAccountBitrixProfile(user) {
         city: contact.ADDRESS_CITY || '',
         country: contact.ADDRESS_COUNTRY || '',
         birthDate: contact.BIRTHDATE || '',
+        avatarUrl: extractContactPhotoUrl(contact.PHOTO),
         hasPhoto: Boolean(contact.PHOTO)
     };
 }
