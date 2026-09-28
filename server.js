@@ -4,7 +4,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { createAccountRouter } = require('./account');
+const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 
 const app = express();
 
@@ -19,6 +19,16 @@ app.use(
         credentials: true
     }),
     createAccountRouter()
+);
+
+// Админка блога может работать по той же HttpOnly-сессии,
+// но доступ получает только RTN_ADMIN_EMAIL.
+app.use(
+    '/api/admin',
+    cors({
+        origin: true,
+        credentials: true
+    })
 );
 
 app.use(cors());
@@ -423,17 +433,41 @@ async function fetchAllYooKassaReceipts() {
     };
 }
 
-function requireBlogAdmin(req, res, next) {
-    if (!BLOG_ADMIN_TOKEN) {
-        return res.status(503).json({ error: 'BLOG_ADMIN_TOKEN не настроен на сервере' });
+async function requireBlogAdmin(req, res, next) {
+    try {
+        const supplied = String(req.get('authorization') || '')
+            .replace(/^Bearer\s+/i, '')
+            .trim();
+
+        if (BLOG_ADMIN_TOKEN && supplied) {
+            const expected = Buffer.from(BLOG_ADMIN_TOKEN);
+            const actual = Buffer.from(supplied);
+
+            if (
+                actual.length === expected.length &&
+                crypto.timingSafeEqual(actual, expected)
+            ) {
+                return next();
+            }
+        }
+
+        const user = await getAuthenticatedUser(req);
+        const email = String(user?.email || '').trim().toLowerCase();
+
+        if (user && email === RTN_ADMIN_EMAIL) {
+            return next();
+        }
+
+        return res.status(401).json({
+            error: 'Требуется вход администратора'
+        });
+    } catch (error) {
+        console.error('RTN blog admin auth error:', error.message);
+
+        return res.status(500).json({
+            error: 'Не удалось проверить доступ администратора'
+        });
     }
-    const supplied = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
-    const expected = Buffer.from(BLOG_ADMIN_TOKEN);
-    const actual = Buffer.from(supplied);
-    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
-        return res.status(401).json({ error: 'Неверный ключ администратора' });
-    }
-    next();
 }
 
 function normalizeBlogArticle(input, existing = {}) {
