@@ -345,7 +345,14 @@ function createAccountRouter() {
             const [[windowUsage]] = await db.execute(
                 `SELECT
                     COUNT(*) AS total,
-                    MIN(created_at) AS first_created_at
+                    LEAST(
+                        ${EMAIL_CODE_WINDOW_MINUTES * 60},
+                        GREATEST(
+                            1,
+                            ${EMAIL_CODE_WINDOW_MINUTES * 60} -
+                            TIMESTAMPDIFF(SECOND, MIN(created_at), NOW())
+                        )
+                    ) AS retry_after_seconds
                  FROM verification_codes
                  WHERE channel = 'email'
                    AND target = ?
@@ -360,15 +367,11 @@ function createAccountRouter() {
             const sentInWindow = Number(windowUsage?.total || 0);
 
             if (sentInWindow >= EMAIL_CODE_WINDOW_LIMIT) {
-                const firstCreatedAt = windowUsage?.first_created_at
-                    ? new Date(windowUsage.first_created_at).getTime()
-                    : Date.now();
-
-                const windowMs = EMAIL_CODE_WINDOW_MINUTES * 60 * 1000;
                 const retryAfterSeconds = Math.max(
                     1,
-                    Math.ceil(
-                        (windowMs - (Date.now() - firstCreatedAt)) / 1000
+                    Math.min(
+                        EMAIL_CODE_WINDOW_MINUTES * 60,
+                        Number(windowUsage?.retry_after_seconds || 1)
                     )
                 );
 
@@ -385,7 +388,15 @@ function createAccountRouter() {
             }
 
             const [[lastCode]] = await db.execute(
-                `SELECT created_at
+                `SELECT
+                    LEAST(
+                        ${EMAIL_CODE_RESEND_SECONDS},
+                        GREATEST(
+                            0,
+                            ${EMAIL_CODE_RESEND_SECONDS} -
+                            TIMESTAMPDIFF(SECOND, created_at, NOW())
+                        )
+                    ) AS retry_after_seconds
                  FROM verification_codes
                  WHERE channel = 'email'
                    AND target = ?
@@ -395,14 +406,16 @@ function createAccountRouter() {
                 [email]
             );
 
-            if (lastCode?.created_at) {
-                const ageMs = Date.now() - new Date(lastCode.created_at).getTime();
+            const lastRetryAfterSeconds = Number(
+                lastCode?.retry_after_seconds || 0
+            );
 
-                if (ageMs < EMAIL_CODE_RESEND_SECONDS * 1000) {
+            if (lastRetryAfterSeconds > 0) {
                     const retryAfterSeconds = Math.max(
                         1,
-                        Math.ceil(
-                            (EMAIL_CODE_RESEND_SECONDS * 1000 - ageMs) / 1000
+                        Math.min(
+                            EMAIL_CODE_RESEND_SECONDS,
+                            lastRetryAfterSeconds
                         )
                     );
 
@@ -414,7 +427,6 @@ function createAccountRouter() {
                         retryAfterSeconds,
                         retryAfter: retryAfterSeconds
                     });
-                }
             }
 
             const code = String(
@@ -524,6 +536,7 @@ function createAccountRouter() {
                     code_hash,
                     attempts,
                     expires_at,
+                    TIMESTAMPDIFF(SECOND, NOW(), expires_at) AS expires_in_seconds,
                     used_at
                  FROM verification_codes
                  WHERE channel = 'email'
@@ -540,7 +553,15 @@ function createAccountRouter() {
 
             if (!verification) {
                 const [[lastIssued]] = await connection.execute(
-                    `SELECT created_at
+                    `SELECT
+                        LEAST(
+                            ${EMAIL_CODE_RESEND_SECONDS},
+                            GREATEST(
+                                0,
+                                ${EMAIL_CODE_RESEND_SECONDS} -
+                                TIMESTAMPDIFF(SECOND, created_at, NOW())
+                            )
+                        ) AS retry_after_seconds
                      FROM verification_codes
                      WHERE channel = 'email'
                        AND target = ?
@@ -550,14 +571,11 @@ function createAccountRouter() {
                     [email]
                 );
 
-                const ageMs = lastIssued?.created_at
-                    ? Date.now() - new Date(lastIssued.created_at).getTime()
-                    : EMAIL_CODE_RESEND_SECONDS * 1000;
-
                 const canResendInSeconds = Math.max(
                     0,
-                    Math.ceil(
-                        (EMAIL_CODE_RESEND_SECONDS * 1000 - ageMs) / 1000
+                    Math.min(
+                        EMAIL_CODE_RESEND_SECONDS,
+                        Number(lastIssued?.retry_after_seconds || 0)
                     )
                 );
 
@@ -570,7 +588,7 @@ function createAccountRouter() {
                 });
             }
 
-            if (new Date(verification.expires_at).getTime() <= Date.now()) {
+            if (Number(verification.expires_in_seconds || 0) <= 0) {
                 await connection.execute(
                     'UPDATE verification_codes SET used_at = NOW() WHERE id = ?',
                     [verification.id]
@@ -736,6 +754,7 @@ function createAccountRouter() {
 
             return res.json({
                 ok: true,
+                sessionToken: token,
                 user: publicUser(publicRows[0])
             });
         } catch (error) {
@@ -852,6 +871,7 @@ function createAccountRouter() {
 
             return res.status(201).json({
                 ok: true,
+                sessionToken: token,
                 user: {
                     id: publicId,
                     email: email || null,
@@ -923,9 +943,10 @@ function createAccountRouter() {
             }
 
             const connection = await db.getConnection();
+            let token = '';
 
             try {
-                const token = await createSession(connection, user.id, req);
+                token = await createSession(connection, user.id, req);
                 setSessionCookie(res, token);
             } finally {
                 connection.release();
@@ -940,6 +961,7 @@ function createAccountRouter() {
 
             return res.json({
                 ok: true,
+                sessionToken: token,
                 user: publicUser(user)
             });
         } catch (error) {
@@ -1025,11 +1047,16 @@ function createAccountRouter() {
             const profile = await updateAccountBitrixProfile(
                 updatedUser,
                 {
-                    address: cleanText(req.body?.address, 500),
-                    address2: cleanText(req.body?.address2, 500),
+                    street: cleanText(
+                        req.body?.street ?? req.body?.address,
+                        300
+                    ),
+                    house: cleanText(req.body?.house, 80),
+                    apartmentOffice: cleanText(
+                        req.body?.apartmentOffice ?? req.body?.address2,
+                        120
+                    ),
                     city: cleanText(req.body?.city, 150),
-                    region: cleanText(req.body?.region, 150),
-                    postalCode: cleanText(req.body?.postalCode, 40),
                     country: cleanText(req.body?.country, 100),
                     birthDate: cleanText(req.body?.birthDate, 40),
                     photoBase64: String(req.body?.photoBase64 || ''),
