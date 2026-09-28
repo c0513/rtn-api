@@ -10407,7 +10407,10 @@ app.post('/api/create-payment', async (req, res) => {
 
         const referralPromo = normalizePromoCode(promoCode);
 
-        if (referralPromo.startsWith('RTN-')) {
+        if (
+            referralPromo &&
+            !RTN_KNOWN_PROMO_CODES.includes(referralPromo)
+        ) {
             const referrer =
                 await resolveReferralCode(
                     referralPromo
@@ -10415,7 +10418,7 @@ app.post('/api/create-payment', async (req, res) => {
 
             if (!referrer) {
                 return res.status(400).json({
-                    error: 'Реферальный промокод не найден'
+                    error: 'Персональный промокод не найден'
                 });
             }
 
