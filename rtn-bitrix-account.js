@@ -322,51 +322,261 @@ function parseSecondaryAddress(value) {
     };
 }
 
-const stageLabelCache = new Map();
+const ORDER_STAGE_SEQUENCE = [
+    'NEW',
+    'PREPARATION',
+    'PREPAYMENT_INVOICE',
+    'EXECUTING',
+    'FINAL_INVOICE',
+    'UC_QOL0Q0',
+    'WON'
+];
 
-async function getDealStageLabel(stageId) {
+const DEAL_FIELD_NAMES = {
+    orderNumber: 'UF_CRM_RTN_ORDER_NUMBER',
+    amountBeforeDiscount: 'UF_CRM_RTN_AMOUNT_BEFORE_DISCOUNT',
+    discountAmount: 'UF_CRM_RTN_DISCOUNT_AMOUNT',
+    deliveryType: 'UF_CRM_RTN_DELIVERY_TYPE',
+    deliveryAddress: 'UF_CRM_RTN_DELIVERY_ADDRESS',
+    deliveryCost: 'UF_CRM_RTN_DELIVERY_COST',
+    clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
+    paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
+    promoCode: 'UF_CRM_RTN_PROMO_CODE'
+};
+
+const PRODUCT_IMAGE_BY_EXTERNAL_ID = {
+    'whey-caramel': '/images/Whey/salted caramel.png',
+    'whey-lemon': '/images/Whey/lemon mousse.png',
+    'whey-raspberry': '/images/Whey/white chocolate.png',
+    'mass-choco': '/images/Gainer/chocolate.png',
+    'mass-lemon': '/images/Gainer/lemon mousse.png',
+    'mass-caramel': '/images/Gainer/salted caramel.png',
+    'mass-raspberry': '/images/Gainer/chocolate raspberry.png',
+    'bcaa-wildberries': '/images/BCAA/wildberries.png',
+    'bcaa-lime': '/images/BCAA/lemon lime.png',
+    'bcaa-grapefruit': '/images/BCAA/grapefruit.png',
+    'bcaa-currant': '/images/BCAA/black currant.png',
+    'arg-wildberries': '/images/AAKG/wildberries.png',
+    'arg-lime': '/images/AAKG/lemon lime.png',
+    'arg-grapefruit': '/images/AAKG/grapefruit.png',
+    'arg-currant': '/images/AAKG/black currant.png',
+    'pre-cola': '/images/Rage/marmalade.png',
+    'pre-orange': '/images/Rage/orange.png',
+    'pre-bubblegum': '/images/Rage/bubble gum.png',
+    'creatine-orange': '/images/Creatine/orange.png',
+    'creatine-wildberries': '/images/Creatine/wildberries.png',
+    'creatine-apple': '/images/Creatine/apple.png',
+    'creatine-neutral': '/images/Creatine/neutral.png',
+    'amylo-neutral': '/images/Amylopectin_1000.jpg',
+    'magnesium-caps': '/images/magnesium.jpg',
+    'chondro-caps': '/images/joint support.jpg',
+    'omega3-caps': '/images/omega 3.jpg'
+};
+
+const stageCache = new Map();
+const dealFieldOptionsCache = {
+    expiresAt: 0,
+    fields: new Map()
+};
+const catalogProductCache = new Map();
+
+function stageEntityId(stageId) {
+    const match = clean(stageId, 100).match(/^C(\d+):/i);
+    return match ? `DEAL_STAGE_${match[1]}` : 'DEAL_STAGE';
+}
+
+async function getStageMap(stageId) {
+    const entityId = stageEntityId(stageId);
+    const cached = stageCache.get(entityId);
+    const now = Date.now();
+
+    if (cached && cached.expiresAt > now) {
+        return cached.map;
+    }
+
+    try {
+        const rows = await bitrixCall('crm.status.list', {
+            order: {
+                SORT: 'ASC'
+            },
+            filter: {
+                ENTITY_ID: entityId
+            }
+        });
+
+        const map = new Map();
+        const categoryMatch = clean(stageId, 100).match(/^C(\d+):/i);
+
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const rawId = clean(row.STATUS_ID || row.statusId || '', 100);
+            const name = clean(row.NAME || row.name || '', 200);
+
+            if (!rawId) continue;
+
+            map.set(rawId, name || rawId);
+
+            if (categoryMatch && !rawId.includes(':')) {
+                map.set(`C${categoryMatch[1]}:${rawId}`, name || rawId);
+            }
+        }
+
+        stageCache.set(entityId, {
+            map,
+            expiresAt: now + 15000
+        });
+
+        return map;
+    } catch (error) {
+        console.error(
+            `RTN account Bitrix stage map error for ${entityId}:`,
+            error.message
+        );
+
+        return cached?.map || new Map();
+    }
+}
+
+async function getDealStagePresentation(stageId) {
     const stage = clean(stageId, 100);
-    if (!stage) return '';
+    const map = await getStageMap(stage);
+    const label = map.get(stage) || stage;
 
     const categoryMatch = stage.match(/^C(\d+):/i);
-    const entityId = categoryMatch
-        ? `DEAL_STAGE_${categoryMatch[1]}`
-        : 'DEAL_STAGE';
+    const prefix = categoryMatch ? `C${categoryMatch[1]}:` : '';
+    const sequence = ORDER_STAGE_SEQUENCE.map(id => `${prefix}${id}`);
+    const steps = sequence.map((id, index) => ({
+        id,
+        label: map.get(id) || id,
+        index
+    }));
 
-    if (!stageLabelCache.has(entityId)) {
-        try {
-            const rows = await bitrixCall('crm.status.list', {
-                filter: {
-                    ENTITY_ID: entityId
-                }
-            });
+    return {
+        label,
+        steps,
+        currentIndex: sequence.indexOf(stage)
+    };
+}
 
-            const map = new Map();
+async function getDealUserFieldOptions() {
+    const now = Date.now();
 
-            for (const row of Array.isArray(rows) ? rows : []) {
-                const statusId = clean(row.STATUS_ID || row.statusId || '', 100);
-                const name = clean(row.NAME || row.name || '', 200);
+    if (
+        dealFieldOptionsCache.expiresAt > now &&
+        dealFieldOptionsCache.fields.size
+    ) {
+        return dealFieldOptionsCache.fields;
+    }
 
-                if (statusId) {
-                    map.set(statusId, name);
-                    if (!statusId.includes(':') && categoryMatch) {
-                        map.set(`C${categoryMatch[1]}:${statusId}`, name);
-                    }
+    try {
+        const rows = await bitrixCall('crm.deal.userfield.list', {
+            order: {
+                SORT: 'ASC'
+            }
+        });
+
+        const fields = new Map();
+
+        for (const field of Array.isArray(rows) ? rows : []) {
+            const fieldName = clean(
+                field.FIELD_NAME || field.fieldName || '',
+                150
+            );
+
+            if (!fieldName) continue;
+
+            const options = new Map();
+
+            for (const option of Array.isArray(field.LIST) ? field.LIST : []) {
+                const id = String(option.ID || option.id || '');
+                const value = clean(option.VALUE || option.value || '', 300);
+
+                if (id) {
+                    options.set(id, value || id);
                 }
             }
 
-            stageLabelCache.set(entityId, map);
-        } catch (error) {
-            console.error(
-                `RTN account Bitrix stage label error for ${stage}:`,
-                error.message
-            );
-            return stage;
+            fields.set(fieldName, options);
         }
+
+        dealFieldOptionsCache.fields = fields;
+        dealFieldOptionsCache.expiresAt = now + 60000;
+
+        return fields;
+    } catch (error) {
+        console.error(
+            'RTN account Bitrix deal user fields error:',
+            error.message
+        );
+
+        return dealFieldOptionsCache.fields;
+    }
+}
+
+async function resolveDealFieldValue(fieldName, value) {
+    if (value === undefined || value === null || value === '') return '';
+
+    const optionsByField = await getDealUserFieldOptions();
+    const options = optionsByField.get(fieldName);
+
+    if (!options || !options.size) {
+        return clean(Array.isArray(value) ? value[0] : value, 300);
     }
 
-    return stageLabelCache.get(entityId)?.get(stage) || stage;
+    const values = Array.isArray(value) ? value : [value];
+
+    return values
+        .map(item => options.get(String(item)) || clean(item, 300))
+        .filter(Boolean)
+        .join(', ');
 }
+
+async function getCatalogProductPresentation(productId) {
+    const id = Number(productId || 0);
+    if (!id) return null;
+
+    if (catalogProductCache.has(id)) {
+        return catalogProductCache.get(id);
+    }
+
+    try {
+        const result = await bitrixCall('catalog.product.get', {
+            id
+        });
+
+        const product = result?.product || result || {};
+        const xmlId = clean(product.xmlId || product.XML_ID || '', 200);
+        const externalId = xmlId.replace(/^RTN:/i, '');
+        const name = clean(product.name || product.NAME || '', 300);
+
+        const presentation = {
+            externalId,
+            name,
+            imageUrl: PRODUCT_IMAGE_BY_EXTERNAL_ID[externalId] || ''
+        };
+
+        catalogProductCache.set(id, presentation);
+
+        return presentation;
+    } catch (error) {
+        console.error(
+            `RTN account Bitrix catalog product error for ${id}:`,
+            error.message
+        );
+
+        return null;
+    }
+}
+
+function splitProductName(value) {
+    const text = clean(value, 300);
+    const parts = text.split(/\s+[—-]\s+/);
+
+    return {
+        name: clean(parts.shift() || text, 200),
+        flavor: clean(parts.join(' — '), 160)
+    };
+}
+
 
 async function getAccountBitrixProfile(user) {
     const contactId = await ensureAccountBitrixContact(user);
@@ -429,10 +639,10 @@ function mapDealStatus(stageId) {
     const paidStage = String(process.env.BITRIX_STAGE_PAID || 'PREPARATION');
     const newStage = String(process.env.BITRIX_STAGE_NEW || 'NEW');
 
+    if (/WON$/i.test(stage)) return 'completed';
+    if (/LOSE|LOST|FAIL|APOLOGY/i.test(stage)) return 'cancelled';
     if (stage === paidStage) return 'paid';
     if (stage === newStage) return 'new';
-    if (/WON$/i.test(stage)) return 'completed';
-    if (/LOSE|LOST|FAIL/i.test(stage)) return 'cancelled';
 
     return 'processing';
 }
@@ -443,15 +653,56 @@ async function getDealProductRows(dealId) {
             id: Number(dealId)
         });
 
-        return (Array.isArray(rows) ? rows : []).map(row => ({
-            id: String(row.ID || row.id || ''),
-            productId: String(row.PRODUCT_ID || row.productId || ''),
-            name: clean(row.PRODUCT_NAME || row.productName || '', 300),
-            price: Number(row.PRICE || row.price || 0),
-            quantity: Number(row.QUANTITY || row.quantity || 0),
-            measureName: clean(row.MEASURE_NAME || row.measureName || '', 100),
-            discountSum: Number(row.DISCOUNT_SUM || row.discountSum || 0)
-        }));
+        const items = [];
+
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const rawName = clean(
+                row.PRODUCT_NAME || row.productName || '',
+                300
+            );
+
+            if (/^ДОСТАВКА\s*[—-]/i.test(rawName)) {
+                continue;
+            }
+
+            const productId = String(row.PRODUCT_ID || row.productId || '');
+            const product = productId
+                ? await getCatalogProductPresentation(productId)
+                : null;
+
+            const parsed = splitProductName(product?.name || rawName);
+            const externalId = product?.externalId || '';
+
+            items.push({
+                id: String(row.ID || row.id || ''),
+                productId,
+                externalId,
+                name: parsed.name || rawName || 'Товар RTN.PRO',
+                flavor: parsed.flavor,
+                imageUrl:
+                    product?.imageUrl ||
+                    PRODUCT_IMAGE_BY_EXTERNAL_ID[externalId] ||
+                    '',
+                price: Number(row.PRICE || row.price || 0),
+                originalPrice:
+                    Number(row.PRICE || row.price || 0) +
+                    Number(row.DISCOUNT_SUM || row.discountSum || 0),
+                finalPrice: Number(row.PRICE || row.price || 0),
+                quantity: Math.max(
+                    1,
+                    Number(row.QUANTITY || row.quantity || 1)
+                ),
+                measureName: clean(
+                    row.MEASURE_NAME || row.measureName || '',
+                    100
+                ),
+                discountSum: Number(
+                    row.DISCOUNT_SUM || row.discountSum || 0
+                )
+            });
+        }
+
+        return items;
     } catch (error) {
         console.error(
             `RTN account Bitrix product rows error for deal ${dealId}:`,
@@ -460,6 +711,29 @@ async function getDealProductRows(dealId) {
 
         return [];
     }
+}
+
+async function getAccountDealForUser(user, dealId) {
+    const contactId = await ensureAccountBitrixContact(user);
+    const id = Number(dealId || 0);
+
+    if (!contactId || !id) return null;
+
+    const deal = await bitrixCall('crm.deal.get', {
+        id
+    });
+
+    const dealContactId = Number(
+        deal?.CONTACT_ID ||
+        deal?.contactId ||
+        0
+    );
+
+    if (!deal || dealContactId !== Number(contactId)) {
+        return null;
+    }
+
+    return deal;
 }
 
 async function getAccountOrders(user) {
@@ -493,7 +767,16 @@ async function getAccountOrders(user) {
             'CONTACT_ID',
             'ORIGINATOR_ID',
             'ORIGIN_ID',
-            'COMMENTS'
+            'COMMENTS',
+            DEAL_FIELD_NAMES.orderNumber,
+            DEAL_FIELD_NAMES.amountBeforeDiscount,
+            DEAL_FIELD_NAMES.discountAmount,
+            DEAL_FIELD_NAMES.deliveryType,
+            DEAL_FIELD_NAMES.deliveryAddress,
+            DEAL_FIELD_NAMES.deliveryCost,
+            DEAL_FIELD_NAMES.clientComment,
+            DEAL_FIELD_NAMES.paymentStatus,
+            DEAL_FIELD_NAMES.promoCode
         ],
         start: 0
     });
@@ -504,21 +787,87 @@ async function getAccountOrders(user) {
     for (const deal of deals.slice(0, 100)) {
         const id = Number(deal.ID || deal.id || 0);
         const items = id ? await getDealProductRows(id) : [];
-        const statusLabel = await getDealStageLabel(deal.STAGE_ID);
+        const stage = await getDealStagePresentation(deal.STAGE_ID);
+        const status = mapDealStatus(deal.STAGE_ID);
+        const amount = Number(deal.OPPORTUNITY || 0);
+
+        const [
+            deliveryType,
+            paymentStatus,
+            promoCode
+        ] = await Promise.all([
+            resolveDealFieldValue(
+                DEAL_FIELD_NAMES.deliveryType,
+                deal[DEAL_FIELD_NAMES.deliveryType]
+            ),
+            resolveDealFieldValue(
+                DEAL_FIELD_NAMES.paymentStatus,
+                deal[DEAL_FIELD_NAMES.paymentStatus]
+            ),
+            resolveDealFieldValue(
+                DEAL_FIELD_NAMES.promoCode,
+                deal[DEAL_FIELD_NAMES.promoCode]
+            )
+        ]);
 
         orders.push({
+            dealId: String(id || ''),
             id: String(id || ''),
-            number: clean(deal.ORIGIN_ID || deal.ID || '', 100),
+            number: clean(
+                deal[DEAL_FIELD_NAMES.orderNumber] ||
+                deal.ORIGIN_ID ||
+                '',
+                100
+            ),
             title: clean(deal.TITLE || '', 300),
-            status: mapDealStatus(deal.STAGE_ID),
-            statusLabel,
+            status,
+            statusLabel: stage.label,
             stageId: clean(deal.STAGE_ID || '', 100),
-            amount: Number(deal.OPPORTUNITY || 0),
+            stageIndex: stage.currentIndex,
+            stageSteps: stage.steps,
+            amount,
+            amountBeforeDiscount: Number(
+                deal[DEAL_FIELD_NAMES.amountBeforeDiscount] || amount
+            ),
+            discountAmount: Number(
+                deal[DEAL_FIELD_NAMES.discountAmount] || 0
+            ),
             currency: clean(deal.CURRENCY_ID || 'RUB', 10),
             createdAt: deal.DATE_CREATE || null,
             updatedAt: deal.DATE_MODIFY || null,
             closedAt: deal.CLOSEDATE || null,
             originatorId: clean(deal.ORIGINATOR_ID || '', 100),
+            deliveryType,
+            deliveryAddress: clean(
+                deal[DEAL_FIELD_NAMES.deliveryAddress] || '',
+                1000
+            ),
+            deliveryCost: Number(
+                deal[DEAL_FIELD_NAMES.deliveryCost] || 0
+            ),
+            paymentStatus,
+            promoCode,
+            clientComment: clean(
+                deal[DEAL_FIELD_NAMES.clientComment] || '',
+                1000
+            ),
+            xpEarned:
+                status === 'completed'
+                    ? Math.max(0, Math.round(amount))
+                    : 0,
+            xpPending:
+                status !== 'completed' && status !== 'cancelled'
+                    ? Math.max(0, Math.round(amount))
+                    : 0,
+            receiptAvailable:
+                Boolean(
+                    clean(
+                        deal[DEAL_FIELD_NAMES.orderNumber] ||
+                        deal.ORIGIN_ID ||
+                        '',
+                        100
+                    )
+                ),
             items
         });
     }
@@ -529,6 +878,24 @@ async function getAccountOrders(user) {
     };
 }
 
+async function getAccountOrderReference(user, dealId) {
+    const deal = await getAccountDealForUser(user, dealId);
+
+    if (!deal) return null;
+
+    return {
+        dealId: String(deal.ID || deal.id || ''),
+        orderId: clean(
+            deal[DEAL_FIELD_NAMES.orderNumber] ||
+            deal.ORIGIN_ID ||
+            '',
+            100
+        ),
+        title: clean(deal.TITLE || '', 300)
+    };
+}
+
+
 module.exports = {
     bitrixCall,
     findContactId,
@@ -538,5 +905,6 @@ module.exports = {
     ensureAccountBitrixContact,
     getAccountBitrixProfile,
     updateAccountBitrixProfile,
-    getAccountOrders
+    getAccountOrders,
+    getAccountOrderReference
 };
