@@ -351,7 +351,7 @@ const PRODUCT_IMAGE_BY_EXTERNAL_ID = {
     'mass-choco': '/images/Gainer/chocolate.png',
     'mass-lemon': '/images/Gainer/lemon mousse.png',
     'mass-caramel': '/images/Gainer/salted caramel.png',
-    'mass-raspberry': '/images/Gainer/chocolate raspberry.png',
+    'mass-raspberry': '/images/Gainer/white chocolate.png',
     'bcaa-wildberries': '/images/BCAA/wildberries.png',
     'bcaa-lime': '/images/BCAA/lemon lime.png',
     'bcaa-grapefruit': '/images/BCAA/grapefruit.png',
@@ -368,9 +368,9 @@ const PRODUCT_IMAGE_BY_EXTERNAL_ID = {
     'creatine-apple': '/images/Creatine/apple.png',
     'creatine-neutral': '/images/Creatine/neutral.png',
     'amylo-neutral': '/images/Amylopectin_1000.jpg',
-    'magnesium-caps': '/images/magnesium.jpg',
-    'chondro-caps': '/images/joint support.jpg',
-    'omega3-caps': '/images/omega 3.jpg'
+    'magnesium-caps': '/images/Magnesium.png',
+    'chondro-caps': '/images/Joint Support.png',
+    'omega3-caps': '/images/Omega 3.png'
 };
 
 const stageCache = new Map();
