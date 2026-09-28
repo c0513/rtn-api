@@ -340,6 +340,50 @@ function extractContactPhotoUrl(value) {
     return '';
 }
 
+const RTN_MEMBER_STATUS_FIELD = 'UF_CRM_RTN_MEMBER_STATUS';
+let memberStatusCache = { expiresAt: 0, options: new Map() };
+
+async function getContactMemberStatuses(contact = {}) {
+    const raw = contact[RTN_MEMBER_STATUS_FIELD];
+    const ids = Array.isArray(raw)
+        ? raw.map(String)
+        : raw !== undefined && raw !== null && raw !== ''
+            ? [String(raw)]
+            : [];
+
+    if (!ids.length) return [];
+
+    const now = Date.now();
+
+    if (memberStatusCache.expiresAt <= now) {
+        try {
+            const fields = await bitrixCall('crm.contact.userfield.list', {
+                filter: { FIELD_NAME: RTN_MEMBER_STATUS_FIELD }
+            });
+            const field = Array.isArray(fields) ? fields[0] : null;
+            const options = new Map();
+
+            for (const option of Array.isArray(field?.LIST) ? field.LIST : []) {
+                const id = String(option.ID || option.id || '');
+                const value = clean(option.VALUE || option.value || '', 120);
+                if (id) options.set(id, value || id);
+            }
+
+            memberStatusCache = {
+                expiresAt: now + 15000,
+                options
+            };
+        } catch (error) {
+            console.error('RTN member status lookup error:', error.message);
+        }
+    }
+
+    return ids
+        .map(id => memberStatusCache.options.get(id) || clean(id, 120))
+        .filter(Boolean)
+        .map(value => String(value).toUpperCase());
+}
+
 function normalizeCrmDateOnly(value) {
     const raw = String(value || '').trim();
     const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
@@ -652,6 +696,7 @@ async function getAccountBitrixProfile(user) {
             : null;
 
     const secondaryAddress = parseSecondaryAddress(contact.ADDRESS_2 || '');
+    const memberStatuses = await getContactMemberStatuses(contact);
 
     return {
         firstName: contact.NAME || '',
@@ -665,7 +710,8 @@ async function getAccountBitrixProfile(user) {
         country: contact.ADDRESS_COUNTRY || '',
         birthDate: normalizeCrmDateOnly(contact.BIRTHDATE),
         avatarUrl: '',
-        hasPhoto: Boolean(contact.PHOTO)
+        hasPhoto: Boolean(contact.PHOTO),
+        memberStatuses
     };
 }
 
