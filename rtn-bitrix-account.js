@@ -2104,18 +2104,18 @@ async function getBossSales(user, requestedPromo = '') {
         80
     ).toUpperCase();
 
-    const selected = requested
-        ? ambassadors.filter(item => item.promoCode === requested)
-        : ambassadors;
-
     const dashboards = await Promise.all(
-        selected.map(async ambassador => ({
+        ambassadors.map(async ambassador => ({
             ...ambassador,
             ...(await getSalesByPromoCode(ambassador.promoCode))
         }))
     );
 
-    const allSales = dashboards.flatMap(item =>
+    const selectedDashboards = requested
+        ? dashboards.filter(item => item.promoCode === requested)
+        : dashboards;
+
+    const allSales = selectedDashboards.flatMap(item =>
         item.sales.map(sale => ({
             ...sale,
             ambassadorContactId: item.contactId,
@@ -2144,28 +2144,28 @@ async function getBossSales(user, requestedPromo = '') {
         selectedPromoCode: requested,
         totalSalesAmount:
             Math.round(
-                decoratedAmbassadors.reduce(
+                selectedDashboards.reduce(
                     (sum, item) => sum + item.totalSalesAmount,
                     0
                 ) * 100
             ) / 100,
         totalCommission:
             Math.round(
-                decoratedAmbassadors.reduce(
+                selectedDashboards.reduce(
                     (sum, item) => sum + item.totalCommission,
                     0
                 ) * 100
             ) / 100,
         confirmedCommission:
             Math.round(
-                decoratedAmbassadors.reduce(
+                selectedDashboards.reduce(
                     (sum, item) => sum + item.confirmedCommission,
                     0
                 ) * 100
             ) / 100,
         pendingCommission:
             Math.round(
-                decoratedAmbassadors.reduce(
+                selectedDashboards.reduce(
                     (sum, item) => sum + item.pendingCommission,
                     0
                 ) * 100
