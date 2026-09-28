@@ -11,7 +11,8 @@ const {
     getAccountOrderReference,
     referralCodeFromPublicId,
     resolveReferralCode,
-    getReferralFriends
+    getReferralFriends,
+    getAmbassadorSales
 } = require('./rtn-bitrix-account');
 const { getOrderReceipt } = require('./rtn-yookassa-account');
 
@@ -1094,9 +1095,15 @@ function createAccountRouter() {
                 });
             }
 
+            let resolvedCode = cleanText(req.params?.code, 80).toUpperCase();
+
+            if (!resolvedCode) {
+                resolvedCode = referralCodeFromPublicId(referrer.public_id);
+            }
+
             return res.json({
                 ok: true,
-                code: referralCodeFromPublicId(referrer.public_id),
+                code: resolvedCode,
                 discountPercent: 5
             });
         } catch (error) {
@@ -1105,6 +1112,37 @@ function createAccountRouter() {
             return res.status(503).json({
                 ok: false,
                 error: 'Не удалось проверить промокод'
+            });
+        }
+    });
+
+    router.get('/ambassador/sales', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const dashboard = await getAmbassadorSales(user);
+
+            if (!dashboard?.isAmbassador) {
+                return res.status(403).json({
+                    error: 'Раздел доступен только амбассадорам'
+                });
+            }
+
+            return res.json({
+                ok: true,
+                ...dashboard
+            });
+        } catch (error) {
+            console.error('RTN ambassador sales error:', error);
+
+            return res.status(502).json({
+                error: 'Не удалось загрузить продажи'
             });
         }
     });
