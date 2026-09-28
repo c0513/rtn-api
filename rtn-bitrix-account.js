@@ -326,27 +326,35 @@ async function getDealStageLabel(stageId) {
         : 'DEAL_STAGE';
 
     if (!stageLabelCache.has(entityId)) {
-        const rows = await bitrixCall('crm.status.list', {
-            filter: {
-                ENTITY_ID: entityId
-            }
-        });
+        try {
+            const rows = await bitrixCall('crm.status.list', {
+                filter: {
+                    ENTITY_ID: entityId
+                }
+            });
 
-        const map = new Map();
+            const map = new Map();
 
-        for (const row of Array.isArray(rows) ? rows : []) {
-            const statusId = clean(row.STATUS_ID || row.statusId || '', 100);
-            const name = clean(row.NAME || row.name || '', 200);
+            for (const row of Array.isArray(rows) ? rows : []) {
+                const statusId = clean(row.STATUS_ID || row.statusId || '', 100);
+                const name = clean(row.NAME || row.name || '', 200);
 
-            if (statusId) {
-                map.set(statusId, name);
-                if (!statusId.includes(':') && categoryMatch) {
-                    map.set(`C${categoryMatch[1]}:${statusId}`, name);
+                if (statusId) {
+                    map.set(statusId, name);
+                    if (!statusId.includes(':') && categoryMatch) {
+                        map.set(`C${categoryMatch[1]}:${statusId}`, name);
+                    }
                 }
             }
-        }
 
-        stageLabelCache.set(entityId, map);
+            stageLabelCache.set(entityId, map);
+        } catch (error) {
+            console.error(
+                `RTN account Bitrix stage label error for ${stage}:`,
+                error.message
+            );
+            return stage;
+        }
     }
 
     return stageLabelCache.get(entityId)?.get(stage) || stage;
