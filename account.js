@@ -23,7 +23,8 @@ function normalizeEmail(value) {
 const EMAIL_CODE_TTL_MINUTES = 10;
 const EMAIL_CODE_MAX_ATTEMPTS = 5;
 const EMAIL_CODE_RESEND_SECONDS = 60;
-const EMAIL_CODE_HOURLY_LIMIT = 5;
+const EMAIL_CODE_WINDOW_MINUTES = 10;
+const EMAIL_CODE_WINDOW_LIMIT = 5;
 
 const memoryRateLimits = new Map();
 
@@ -318,11 +319,13 @@ function createAccountRouter() {
 
         if (!consumeMemoryRateLimit(
             `email-send-ip:${ip}`,
-            10,
-            60 * 60 * 1000
+            40,
+            10 * 60 * 1000
         )) {
             return res.status(429).json({
-                error: 'Слишком много запросов. Попробуйте позже'
+                code: 'IP_COOLDOWN',
+                error: 'Слишком много запросов с этого адреса. Попробуйте позже',
+                retryAfterSeconds: 600
             });
         }
 
@@ -333,6 +336,48 @@ function createAccountRouter() {
                 'SELECT id FROM users WHERE email = ? LIMIT 1',
                 [email]
             );
+
+            const [[windowUsage]] = await db.execute(
+                `SELECT
+                    COUNT(*) AS total,
+                    MIN(created_at) AS first_created_at
+                 FROM verification_codes
+                 WHERE channel = 'email'
+                   AND target = ?
+                   AND purpose = 'login'
+                   AND created_at >= DATE_SUB(
+                       NOW(),
+                       INTERVAL ${EMAIL_CODE_WINDOW_MINUTES} MINUTE
+                   )`,
+                [email]
+            );
+
+            const sentInWindow = Number(windowUsage?.total || 0);
+
+            if (sentInWindow >= EMAIL_CODE_WINDOW_LIMIT) {
+                const firstCreatedAt = windowUsage?.first_created_at
+                    ? new Date(windowUsage.first_created_at).getTime()
+                    : Date.now();
+
+                const windowMs = EMAIL_CODE_WINDOW_MINUTES * 60 * 1000;
+                const retryAfterSeconds = Math.max(
+                    1,
+                    Math.ceil(
+                        (windowMs - (Date.now() - firstCreatedAt)) / 1000
+                    )
+                );
+
+                res.setHeader('Retry-After', String(retryAfterSeconds));
+
+                return res.status(429).json({
+                    code: 'EMAIL_COOLDOWN',
+                    error: 'EMAIL ПЕРЕГРЕЛСЯ. СЛИШКОМ МНОГО КОДОВ ЗА КОРОТКОЕ ВРЕМЯ.',
+                    retryAfterSeconds,
+                    retryAfterMinutes: Math.ceil(retryAfterSeconds / 60),
+                    windowMinutes: EMAIL_CODE_WINDOW_MINUTES,
+                    limit: EMAIL_CODE_WINDOW_LIMIT
+                });
+            }
 
             const [[lastCode]] = await db.execute(
                 `SELECT created_at
@@ -349,36 +394,22 @@ function createAccountRouter() {
                 const ageMs = Date.now() - new Date(lastCode.created_at).getTime();
 
                 if (ageMs < EMAIL_CODE_RESEND_SECONDS * 1000) {
-                    const retryAfter = Math.max(
+                    const retryAfterSeconds = Math.max(
                         1,
                         Math.ceil(
                             (EMAIL_CODE_RESEND_SECONDS * 1000 - ageMs) / 1000
                         )
                     );
 
-                    res.setHeader('Retry-After', String(retryAfter));
+                    res.setHeader('Retry-After', String(retryAfterSeconds));
 
                     return res.status(429).json({
-                        error: 'Код уже отправлен. Подождите перед повторной отправкой',
-                        retryAfter
+                        code: 'RESEND_WAIT',
+                        error: 'КОД УЖЕ ОТПРАВЛЕН. ПОДОЖДИТЕ ПЕРЕД ПОВТОРНОЙ ОТПРАВКОЙ.',
+                        retryAfterSeconds,
+                        retryAfter: retryAfterSeconds
                     });
                 }
-            }
-
-            const [[hourly]] = await db.execute(
-                `SELECT COUNT(*) AS total
-                 FROM verification_codes
-                 WHERE channel = 'email'
-                   AND target = ?
-                   AND purpose = 'login'
-                   AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
-                [email]
-            );
-
-            if (Number(hourly?.total || 0) >= EMAIL_CODE_HOURLY_LIMIT) {
-                return res.status(429).json({
-                    error: 'Слишком много кодов для этого email. Попробуйте позже'
-                });
             }
 
             const code = String(
@@ -436,7 +467,12 @@ function createAccountRouter() {
             return res.json({
                 ok: true,
                 expiresMinutes: EMAIL_CODE_TTL_MINUTES,
-                resendAfterSeconds: EMAIL_CODE_RESEND_SECONDS
+                resendAfterSeconds: EMAIL_CODE_RESEND_SECONDS,
+                remainingSendsInWindow: Math.max(
+                    0,
+                    EMAIL_CODE_WINDOW_LIMIT - sentInWindow - 1
+                ),
+                windowMinutes: EMAIL_CODE_WINDOW_MINUTES
             });
         } catch (error) {
             console.error('RTN email send code error:', error);
@@ -498,10 +534,34 @@ function createAccountRouter() {
             const verification = codeRows[0];
 
             if (!verification) {
+                const [[lastIssued]] = await connection.execute(
+                    `SELECT created_at
+                     FROM verification_codes
+                     WHERE channel = 'email'
+                       AND target = ?
+                       AND purpose = 'login'
+                     ORDER BY id DESC
+                     LIMIT 1`,
+                    [email]
+                );
+
+                const ageMs = lastIssued?.created_at
+                    ? Date.now() - new Date(lastIssued.created_at).getTime()
+                    : EMAIL_CODE_RESEND_SECONDS * 1000;
+
+                const canResendInSeconds = Math.max(
+                    0,
+                    Math.ceil(
+                        (EMAIL_CODE_RESEND_SECONDS * 1000 - ageMs) / 1000
+                    )
+                );
+
                 await connection.rollback();
 
                 return res.status(400).json({
-                    error: 'Код не найден или уже использован'
+                    code: 'CODE_NOT_FOUND',
+                    error: 'КОД НЕ НАЙДЕН ИЛИ УЖЕ ИСПОЛЬЗОВАН.',
+                    canResendInSeconds
                 });
             }
 
@@ -513,7 +573,9 @@ function createAccountRouter() {
                 await connection.commit();
 
                 return res.status(400).json({
-                    error: 'Срок действия кода истёк'
+                    code: 'CODE_EXPIRED',
+                    error: 'СРОК ДЕЙСТВИЯ КОДА ИСТЁК.',
+                    canResendInSeconds: 0
                 });
             }
 
@@ -525,7 +587,9 @@ function createAccountRouter() {
                 await connection.commit();
 
                 return res.status(429).json({
-                    error: 'Превышено количество попыток. Запросите новый код'
+                    code: 'CODE_ATTEMPTS_EXCEEDED',
+                    error: 'ПРЕВЫШЕНО КОЛИЧЕСТВО ПОПЫТОК. ЗАПРОСИТЕ НОВЫЙ КОД.',
+                    canResendInSeconds: 0
                 });
             }
 
