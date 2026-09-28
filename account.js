@@ -112,6 +112,110 @@ function normalizePhone(value) {
     return '+' + digits;
 }
 
+let profileMediaReadyPromise = null;
+
+function normalizeDateOnly(value) {
+    const raw = String(value || '').trim();
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : '';
+}
+
+function validateAvatarDataUrl(value) {
+    const raw = String(value || '').trim();
+
+    if (!raw) return '';
+
+    if (
+        raw.length > 8 * 1024 * 1024 ||
+        !/^data:image\/(?:jpeg|jpg|png|webp);base64,[a-z0-9+/=\r\n]+$/i.test(raw)
+    ) {
+        const error = new Error('Некорректный формат фотографии');
+        error.code = 'INVALID_AVATAR';
+        throw error;
+    }
+
+    return raw;
+}
+
+async function ensureProfileMediaTable() {
+    if (profileMediaReadyPromise) {
+        return profileMediaReadyPromise;
+    }
+
+    profileMediaReadyPromise = (async () => {
+        const db = getPool();
+
+        await db.execute(
+            `CREATE TABLE IF NOT EXISTS user_profile_media (
+                user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+                avatar_data_url MEDIUMTEXT NULL,
+                updated_at TIMESTAMP NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_profile_media_updated_at (updated_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+        );
+    })().catch(error => {
+        profileMediaReadyPromise = null;
+        throw error;
+    });
+
+    return profileMediaReadyPromise;
+}
+
+async function getStoredAvatarDataUrl(userId) {
+    if (!userId) return '';
+
+    await ensureProfileMediaTable();
+
+    const db = getPool();
+    const [[row]] = await db.execute(
+        `SELECT avatar_data_url
+         FROM user_profile_media
+         WHERE user_id = ?
+         LIMIT 1`,
+        [userId]
+    );
+
+    return String(row?.avatar_data_url || '');
+}
+
+async function saveStoredAvatarDataUrl(userId, value) {
+    if (!userId) return '';
+
+    const avatarDataUrl = validateAvatarDataUrl(value);
+
+    if (!avatarDataUrl) {
+        return getStoredAvatarDataUrl(userId);
+    }
+
+    await ensureProfileMediaTable();
+
+    const db = getPool();
+
+    await db.execute(
+        `INSERT INTO user_profile_media
+            (user_id, avatar_data_url)
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE
+            avatar_data_url = VALUES(avatar_data_url),
+            updated_at = CURRENT_TIMESTAMP`,
+        [userId, avatarDataUrl]
+    );
+
+    return avatarDataUrl;
+}
+
+function normalizeAccountProfile(profile, avatarUrl = '') {
+    if (!profile) return profile;
+
+    return {
+        ...profile,
+        birthDate: normalizeDateOnly(profile.birthDate),
+        avatarUrl: avatarUrl || profile.avatarUrl || ''
+    };
+}
+
 function hashSessionToken(token) {
     return crypto.createHash('sha256').update(token).digest();
 }
@@ -985,7 +1089,15 @@ function createAccountRouter() {
                 });
             }
 
-            const profile = await getAccountBitrixProfile(user);
+            const [bitrixProfile, storedAvatarUrl] = await Promise.all([
+                getAccountBitrixProfile(user),
+                getStoredAvatarDataUrl(user.id)
+            ]);
+
+            const profile = normalizeAccountProfile(
+                bitrixProfile,
+                storedAvatarUrl
+            );
 
             return res.json({
                 ok: true,
@@ -1006,6 +1118,8 @@ function createAccountRouter() {
         const lastName = cleanText(req.body?.lastName, 100);
         const rawPhone = cleanText(req.body?.phone, 40);
         const phone = rawPhone ? normalizePhone(rawPhone) : '';
+        const birthDate = normalizeDateOnly(req.body?.birthDate);
+        const photoBase64 = String(req.body?.photoBase64 || '');
 
         if (rawPhone && !phone) {
             return res.status(400).json({
@@ -1060,8 +1174,8 @@ function createAccountRouter() {
                     ),
                     city: cleanText(req.body?.city, 150),
                     country: cleanText(req.body?.country, 100),
-                    birthDate: cleanText(req.body?.birthDate, 40),
-                    photoBase64: String(req.body?.photoBase64 || ''),
+                    birthDate,
+                    photoBase64,
                     photoFilename: cleanText(
                         req.body?.photoFilename || 'rtn-profile.jpg',
                         180
@@ -1069,10 +1183,19 @@ function createAccountRouter() {
                 }
             );
 
+            const storedAvatarUrl = photoBase64
+                ? await saveStoredAvatarDataUrl(user.id, photoBase64)
+                : await getStoredAvatarDataUrl(user.id);
+
+            const normalizedProfile = normalizeAccountProfile(
+                profile,
+                storedAvatarUrl
+            );
+
             return res.json({
                 ok: true,
                 user: publicUser(updatedUser),
-                profile
+                profile: normalizedProfile
             });
         } catch (error) {
             console.error('RTN account profile update error:', error);
