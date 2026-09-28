@@ -1222,7 +1222,8 @@ const RTN_MEMBER_STATUSES = [
     'BRONZE',
     'SILVER',
     'GOLD',
-    'AMBASSADOR'
+    'AMBASSADOR',
+    'BOSS'
 ];
 
 const RTN_PROMO_AMBASSADORS = {
