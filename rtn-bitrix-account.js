@@ -463,6 +463,10 @@ const dealFieldOptionsCache = {
     fields: new Map()
 };
 const catalogProductCache = new Map();
+let catalogContextCache = {
+    expiresAt: 0,
+    iblockId: 0
+};
 
 function stageEntityId(stageId) {
     const match = clean(stageId, 100).match(/^C(\d+):/i);
@@ -614,6 +618,59 @@ async function resolveDealFieldValue(fieldName, value) {
         .join(', ');
 }
 
+async function getAccountCatalogIblockId() {
+    const now = Date.now();
+
+    if (
+        catalogContextCache.iblockId > 0 &&
+        catalogContextCache.expiresAt > now
+    ) {
+        return catalogContextCache.iblockId;
+    }
+
+    const result = await bitrixCall('catalog.catalog.list', {
+        select: ['id', 'iblockId', 'name', 'productIblockId'],
+        order: { id: 'asc' }
+    });
+
+    const catalogs =
+        result?.catalogs ||
+        (Array.isArray(result) ? result : []);
+
+    if (!catalogs.length) {
+        throw new Error('Bitrix24 не вернул торговый каталог');
+    }
+
+    const preferredIblockId = Number(
+        process.env.BITRIX_CATALOG_IBLOCK_ID || 0
+    );
+
+    let catalog = preferredIblockId > 0
+        ? catalogs.find(
+            item => Number(item.iblockId) === preferredIblockId
+        )
+        : null;
+
+    if (!catalog) {
+        catalog =
+            catalogs.find(item => !Number(item.productIblockId || 0)) ||
+            catalogs[0];
+    }
+
+    const iblockId = Number(catalog?.iblockId || 0);
+
+    if (!iblockId) {
+        throw new Error('Не удалось определить iblockId каталога Bitrix24');
+    }
+
+    catalogContextCache = {
+        iblockId,
+        expiresAt: now + 10 * 60 * 1000
+    };
+
+    return iblockId;
+}
+
 async function getCatalogProductPresentation(productId) {
     const id = Number(productId || 0);
     if (!id) return null;
@@ -623,11 +680,16 @@ async function getCatalogProductPresentation(productId) {
     }
 
     try {
+        const iblockId = await getAccountCatalogIblockId();
+
         const result = await bitrixCall('catalog.product.list', {
             select: ['id', 'iblockId', 'name', 'xmlId'],
             filter: {
+                iblockId,
                 id
-            }
+            },
+            order: { id: 'asc' },
+            start: 0
         });
 
         const products =
@@ -658,7 +720,15 @@ async function getCatalogProductPresentation(productId) {
             error.message
         );
 
-        return null;
+        const fallback = {
+            externalId: '',
+            name: '',
+            imageUrl: ''
+        };
+
+        catalogProductCache.set(id, fallback);
+
+        return fallback;
     }
 }
 
@@ -751,54 +821,70 @@ async function getDealProductRows(dealId) {
             id: Number(dealId)
         });
 
-        const items = [];
+        const sourceRows = (Array.isArray(rows) ? rows : [])
+            .filter(row => {
+                const rawName = clean(
+                    row.PRODUCT_NAME || row.productName || '',
+                    300
+                );
 
-        for (const row of Array.isArray(rows) ? rows : []) {
-            const rawName = clean(
-                row.PRODUCT_NAME || row.productName || '',
-                300
-            );
-
-            if (/^ДОСТАВКА\s*[—-]/i.test(rawName)) {
-                continue;
-            }
-
-            const productId = String(row.PRODUCT_ID || row.productId || '');
-            const product = productId
-                ? await getCatalogProductPresentation(productId)
-                : null;
-
-            const parsed = splitProductName(product?.name || rawName);
-            const externalId = product?.externalId || '';
-
-            items.push({
-                id: String(row.ID || row.id || ''),
-                productId,
-                externalId,
-                name: parsed.name || rawName || 'Товар RTN.PRO',
-                flavor: parsed.flavor,
-                imageUrl:
-                    product?.imageUrl ||
-                    PRODUCT_IMAGE_BY_EXTERNAL_ID[externalId] ||
-                    '',
-                price: Number(row.PRICE || row.price || 0),
-                originalPrice:
-                    Number(row.PRICE || row.price || 0) +
-                    Number(row.DISCOUNT_SUM || row.discountSum || 0),
-                finalPrice: Number(row.PRICE || row.price || 0),
-                quantity: Math.max(
-                    1,
-                    Number(row.QUANTITY || row.quantity || 1)
-                ),
-                measureName: clean(
-                    row.MEASURE_NAME || row.measureName || '',
-                    100
-                ),
-                discountSum: Number(
-                    row.DISCOUNT_SUM || row.discountSum || 0
-                )
+                return !/^ДОСТАВКА\s*[—-]/i.test(rawName);
             });
-        }
+
+        const items = await Promise.all(
+            sourceRows.map(async row => {
+                const rawName = clean(
+                    row.PRODUCT_NAME || row.productName || '',
+                    300
+                );
+
+                const productId = String(
+                    row.PRODUCT_ID || row.productId || ''
+                );
+
+                const product = productId
+                    ? await getCatalogProductPresentation(productId)
+                    : null;
+
+                const parsed = splitProductName(
+                    product?.name || rawName
+                );
+
+                const externalId = product?.externalId || '';
+
+                return {
+                    id: String(row.ID || row.id || ''),
+                    productId,
+                    externalId,
+                    name: parsed.name || rawName || 'Товар RTN.PRO',
+                    flavor: parsed.flavor,
+                    imageUrl:
+                        product?.imageUrl ||
+                        PRODUCT_IMAGE_BY_EXTERNAL_ID[externalId] ||
+                        '',
+                    price: Number(row.PRICE || row.price || 0),
+                    originalPrice:
+                        Number(row.PRICE || row.price || 0) +
+                        Number(
+                            row.DISCOUNT_SUM ||
+                            row.discountSum ||
+                            0
+                        ),
+                    finalPrice: Number(row.PRICE || row.price || 0),
+                    quantity: Math.max(
+                        1,
+                        Number(row.QUANTITY || row.quantity || 1)
+                    ),
+                    measureName: clean(
+                        row.MEASURE_NAME || row.measureName || '',
+                        100
+                    ),
+                    discountSum: Number(
+                        row.DISCOUNT_SUM || row.discountSum || 0
+                    )
+                };
+            })
+        );
 
         return items;
     } catch (error) {
@@ -1225,6 +1311,47 @@ async function awardReferralCoinsForPayment(payment, dealId) {
     }
 }
 
+async function getContactXpSummary(contactId) {
+    const result = await bitrixCall('crm.deal.list', {
+        order: {
+            DATE_CREATE: 'DESC'
+        },
+        filter: {
+            CONTACT_ID: Number(contactId)
+        },
+        select: [
+            'ID',
+            'STAGE_ID',
+            'OPPORTUNITY',
+            'DATE_CREATE'
+        ],
+        start: 0
+    });
+
+    let xp = 0;
+    let pendingXp = 0;
+
+    for (const deal of Array.isArray(result) ? result : []) {
+        const amount = Math.max(
+            0,
+            Math.round(Number(deal.OPPORTUNITY || 0))
+        );
+
+        const status = mapDealStatus(deal.STAGE_ID);
+
+        if (status === 'completed') {
+            xp += amount;
+        } else if (status !== 'cancelled') {
+            pendingXp += amount;
+        }
+    }
+
+    return {
+        xp,
+        pendingXp
+    };
+}
+
 async function getReferralFriends(user) {
     const referralCode = referralCodeFromPublicId(user?.public_id);
 
@@ -1354,12 +1481,15 @@ async function getReferralFriends(user) {
         }
 
         let profile = null;
-        let history = { orders: [] };
+        let xpSummary = {
+            xp: 0,
+            pendingXp: 0
+        };
 
         try {
-            [profile, history] = await Promise.all([
+            [profile, xpSummary] = await Promise.all([
                 getAccountBitrixProfile(friendUser),
-                getAccountOrders(friendUser)
+                getContactXpSummary(contactId)
             ]);
         } catch (error) {
             console.error(
@@ -1368,29 +1498,8 @@ async function getReferralFriends(user) {
             );
         }
 
-        const orders = Array.isArray(history?.orders)
-            ? history.orders
-            : [];
-
-        const xp = orders
-            .filter(order => order.status === 'completed')
-            .reduce(
-                (sum, order) =>
-                    sum + Number(order.xpEarned || order.amount || 0),
-                0
-            );
-
-        const pendingXp = orders
-            .filter(
-                order =>
-                    order.status !== 'completed' &&
-                    order.status !== 'cancelled'
-            )
-            .reduce(
-                (sum, order) =>
-                    sum + Number(order.xpPending || order.amount || 0),
-                0
-            );
+        const xp = Number(xpSummary?.xp || 0);
+        const pendingXp = Number(xpSummary?.pendingXp || 0);
 
         const memberStatuses = Array.isArray(profile?.memberStatuses)
             ? profile.memberStatuses
