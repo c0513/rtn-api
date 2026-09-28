@@ -4,11 +4,24 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { createAccountRouter } = require('./account');
 
 const app = express();
 
-app.use(cors());
 app.use(express.json({ limit: '12mb' }));
+
+// Личный кабинет RTN.PRO: отдельный CORS с credentials для серверной сессии.
+// Маршрут ставим до общего permissive CORS, чтобы preflight не перехватывался им.
+app.use(
+    '/api/account',
+    cors({
+        origin: true,
+        credentials: true
+    }),
+    createAccountRouter()
+);
+
+app.use(cors());
 
 // ============================================================
 // НАСТРОЙКИ
