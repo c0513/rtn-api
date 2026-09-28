@@ -10245,11 +10245,18 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                 );
 
                 try {
-                    const referralReward =
-                        await awardReferralCoinsForPayment(
-                            payment,
+                    const alreadyRewardedFriend =
+                        await hasPreviousReferralReward(
                             dealId
                         );
+
+                    const referralReward =
+                        alreadyRewardedFriend
+                            ? { ok: true, ignored: true, rewardCoins: 0 }
+                            : await awardReferralCoinsForPayment(
+                                payment,
+                                dealId
+                            );
 
                     if (referralReward?.rewardCoins > 0) {
                         console.log(
