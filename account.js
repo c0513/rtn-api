@@ -12,7 +12,8 @@ const {
     referralCodeFromPublicId,
     resolveReferralCode,
     getReferralFriends,
-    getAmbassadorSales
+    getAmbassadorSales,
+    getBossSales
 } = require('./rtn-bitrix-account');
 const { getOrderReceipt } = require('./rtn-yookassa-account');
 
@@ -1128,9 +1129,9 @@ function createAccountRouter() {
 
             const dashboard = await getAmbassadorSales(user);
 
-            if (!dashboard?.isAmbassador) {
+            if (!dashboard?.isAmbassador && !dashboard?.isBoss) {
                 return res.status(403).json({
-                    error: 'Раздел доступен только амбассадорам'
+                    error: 'Раздел доступен только партнёрам RTN'
                 });
             }
 
@@ -1143,6 +1144,40 @@ function createAccountRouter() {
 
             return res.status(502).json({
                 error: 'Не удалось загрузить продажи'
+            });
+        }
+    });
+
+    router.get('/boss/sales', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const dashboard = await getBossSales(
+                user,
+                cleanText(req.query?.promo, 80)
+            );
+
+            if (!dashboard?.isBoss) {
+                return res.status(403).json({
+                    error: 'Раздел доступен только BOSS'
+                });
+            }
+
+            return res.json({
+                ok: true,
+                ...dashboard
+            });
+        } catch (error) {
+            console.error('RTN boss sales error:', error);
+
+            return res.status(502).json({
+                error: 'Не удалось загрузить продажи амбассадоров'
             });
         }
     });
