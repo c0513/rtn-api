@@ -185,7 +185,7 @@ function createAccountRouter() {
             return res.status(503).json({
                 ok: false,
                 ...status,
-                error: 'RTN SMTP is not configured'
+                error: 'RTN mail relay is not configured'
             });
         }
 
@@ -203,7 +203,7 @@ function createAccountRouter() {
             return res.status(503).json({
                 ok: false,
                 ...status,
-                error: 'SMTP connection failed',
+                error: 'Mail relay connection failed',
                 debug: {
                     code: error?.code || null,
                     command: error?.command || null,
