@@ -2500,6 +2500,54 @@ async function applyPromoToBitrixDeal(
     }
 }
 
+async function hasPreviousReferralReward(dealId) {
+    try {
+        const deal = await bitrixCall('crm.deal.get', {
+            id: Number(dealId)
+        });
+
+        const contactId = Number(
+            deal?.CONTACT_ID ||
+            deal?.contactId ||
+            0
+        );
+
+        if (!contactId) return false;
+
+        const deals = await bitrixCall('crm.deal.list', {
+            order: {
+                DATE_CREATE: 'DESC'
+            },
+            filter: {
+                CONTACT_ID: contactId
+            },
+            select: [
+                'ID',
+                BITRIX_PROMO_FIELDS.dealReferralReward
+            ],
+            start: 0
+        });
+
+        return (Array.isArray(deals) ? deals : []).some(item => (
+            Number(item.ID || item.id || 0) !== Number(dealId) &&
+            Boolean(
+                String(
+                    item?.[
+                        BITRIX_PROMO_FIELDS.dealReferralReward
+                    ] || ''
+                ).trim()
+            )
+        ));
+    } catch (error) {
+        console.error(
+            'RTN referral history check error:',
+            error.message
+        );
+
+        return false;
+    }
+}
+
 function normalizeBitrixPhone(value) {
     const digits = String(value || '').replace(/\D/g, '');
 
@@ -3427,11 +3475,18 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             );
 
             try {
-                const referralReward =
-                    await awardReferralCoinsForPayment(
-                        payment,
+                const alreadyRewardedFriend =
+                    await hasPreviousReferralReward(
                         dealId
                     );
+
+                const referralReward =
+                    alreadyRewardedFriend
+                        ? { ok: true, ignored: true, rewardCoins: 0 }
+                        : await awardReferralCoinsForPayment(
+                            payment,
+                            dealId
+                        );
 
                 if (referralReward?.rewardCoins > 0) {
                     console.log(
