@@ -424,7 +424,8 @@ const DEAL_FIELD_NAMES = {
     deliveryCost: 'UF_CRM_RTN_DELIVERY_COST',
     clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
     paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
-    promoCode: 'UF_CRM_RTN_PROMO_CODE'
+    promoCode: 'UF_CRM_RTN_PROMO_CODE',
+    referralReward: 'UF_CRM_RTN_REFERRAL_REWARD'
 };
 
 const PRODUCT_IMAGE_BY_EXTERNAL_ID = {
@@ -1048,6 +1049,100 @@ function referralLevelFromXp(xp, memberStatuses = []) {
     return 'bronze';
 }
 
+const referralRewardLocks = new Set();
+
+async function awardReferralCoinsForPayment(payment, dealId) {
+    const promoCode = clean(
+        payment?.metadata?.promoCode,
+        80
+    ).toUpperCase();
+
+    const paymentId = clean(payment?.id, 100);
+
+    if (
+        !/^RTN-[A-Z0-9]{8,32}$/.test(promoCode) ||
+        !dealId ||
+        !paymentId
+    ) {
+        return { ok: true, ignored: true };
+    }
+
+    if (referralRewardLocks.has(paymentId)) {
+        return { ok: true, ignored: true, reason: 'locked' };
+    }
+
+    referralRewardLocks.add(paymentId);
+
+    try {
+        const referrer = await resolveReferralCode(promoCode);
+
+        if (!referrer?.id) {
+            return { ok: true, ignored: true, reason: 'unknown_code' };
+        }
+
+        const buyerEmail = normalizeEmail(
+            payment?.metadata?.customerEmail
+        );
+        const buyerPhone = normalizePhone(
+            payment?.metadata?.customerPhone
+        );
+
+        if (
+            (buyerEmail &&
+                normalizeEmail(referrer.email) === buyerEmail) ||
+            (buyerPhone &&
+                normalizePhone(referrer.phone) === buyerPhone)
+        ) {
+            return { ok: true, ignored: true, reason: 'self_referral' };
+        }
+
+        const deal = await bitrixCall('crm.deal.get', {
+            id: Number(dealId)
+        });
+
+        const existingMarker = clean(
+            deal?.[DEAL_FIELD_NAMES.referralReward],
+            200
+        );
+
+        if (existingMarker) {
+            return {
+                ok: true,
+                ignored: true,
+                reason: 'already_awarded'
+            };
+        }
+
+        const db = getPool();
+
+        await db.execute(
+            `INSERT INTO rhino_coin_accounts
+                (user_id, balance)
+             VALUES (?, ?)
+             ON DUPLICATE KEY UPDATE
+                balance = COALESCE(balance, 0) + VALUES(balance)`,
+            [Number(referrer.id), 150]
+        );
+
+        await bitrixCall('crm.deal.update', {
+            id: Number(dealId),
+            fields: {
+                [DEAL_FIELD_NAMES.referralReward]:
+                    `150 RC · ${paymentId}`
+            }
+        });
+
+        return {
+            ok: true,
+            ignored: false,
+            rewardCoins: 150,
+            referrerUserId: Number(referrer.id)
+        };
+    } finally {
+        referralRewardLocks.delete(paymentId);
+    }
+}
+
 async function getReferralFriends(user) {
     const referralCode = referralCodeFromPublicId(user?.public_id);
 
@@ -1094,7 +1189,8 @@ async function getReferralFriends(user) {
             'OPPORTUNITY',
             'DATE_CREATE',
             'CLOSEDATE',
-            DEAL_FIELD_NAMES.promoCode
+            DEAL_FIELD_NAMES.promoCode,
+            DEAL_FIELD_NAMES.referralReward
         ],
         start: 0
     });
@@ -1107,15 +1203,26 @@ async function getReferralFriends(user) {
         if (!contactId) continue;
         if (Number(user.bitrix_contact_id || 0) === contactId) continue;
 
+        const rewardAwarded = Boolean(
+            clean(deal?.[DEAL_FIELD_NAMES.referralReward], 200)
+        );
+
         if (!byContact.has(contactId)) {
-            byContact.set(contactId, deal);
+            byContact.set(contactId, {
+                firstDeal: deal,
+                rewardAwarded
+            });
+        } else if (rewardAwarded) {
+            byContact.get(contactId).rewardAwarded = true;
         }
     }
 
     const db = getPool();
     const friends = [];
 
-    for (const [contactId, firstDeal] of byContact.entries()) {
+    for (const [contactId, referralInfo] of byContact.entries()) {
+        const firstDeal = referralInfo.firstDeal;
+        const rewardAwarded = Boolean(referralInfo.rewardAwarded);
         const [rows] = await db.execute(
             `SELECT
                 id,
@@ -1157,7 +1264,7 @@ async function getReferralFriends(user) {
                 pendingXp: 0,
                 joinedAt: firstDeal?.DATE_CREATE || null,
                 rewardCoins: 150,
-                rewardAwarded: false,
+                rewardAwarded,
                 accountLinked: false
             });
 
@@ -1228,7 +1335,7 @@ async function getReferralFriends(user) {
             pendingXp,
             joinedAt: friendUser.created_at || firstDeal?.DATE_CREATE || null,
             rewardCoins: 150,
-            rewardAwarded: false,
+            rewardAwarded,
             accountLinked: true
         });
     }
@@ -1256,5 +1363,6 @@ module.exports = {
     getAccountOrderReference,
     referralCodeFromPublicId,
     resolveReferralCode,
+    awardReferralCoinsForPayment,
     getReferralFriends
 };
