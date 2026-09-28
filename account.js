@@ -3,7 +3,12 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { getPool, pingDatabase } = require('./db');
 const { getMailStatus, verifyMailConnection, sendVerificationCodeEmail } = require('./rtn-mail');
-const { getAccountOrders, ensureAccountBitrixContact } = require('./rtn-bitrix-account');
+const {
+    getAccountOrders,
+    ensureAccountBitrixContact,
+    getAccountBitrixProfile,
+    updateAccountBitrixProfile
+} = require('./rtn-bitrix-account');
 
 const SESSION_COOKIE = 'rtn_session';
 const RTN_ADMIN_EMAIL = normalizeEmail(process.env.RTN_ADMIN_EMAIL || 'perervamax@yandex.ru');
@@ -831,6 +836,20 @@ function createAccountRouter() {
 
             setSessionCookie(res, token);
 
+            ensureAccountBitrixContact({
+                id: userId,
+                public_id: publicId,
+                email: email || null,
+                phone: phone || null,
+                first_name: firstName || null,
+                last_name: lastName || null
+            }).catch(error => {
+                console.error(
+                    'RTN account register Bitrix sync error:',
+                    error.message
+                );
+            });
+
             return res.status(201).json({
                 ok: true,
                 user: {
@@ -912,6 +931,13 @@ function createAccountRouter() {
                 connection.release();
             }
 
+            ensureAccountBitrixContact(user).catch(error => {
+                console.error(
+                    'RTN account password login Bitrix sync error:',
+                    error.message
+                );
+            });
+
             return res.json({
                 ok: true,
                 user: publicUser(user)
@@ -921,6 +947,115 @@ function createAccountRouter() {
 
             return res.status(500).json({
                 error: 'Не удалось выполнить вход'
+            });
+        }
+    });
+
+    router.get('/profile', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const profile = await getAccountBitrixProfile(user);
+
+            return res.json({
+                ok: true,
+                user: publicUser(user),
+                profile
+            });
+        } catch (error) {
+            console.error('RTN account profile get error:', error);
+
+            return res.status(502).json({
+                error: 'Не удалось получить профиль'
+            });
+        }
+    });
+
+    router.patch('/profile', async (req, res) => {
+        const firstName = cleanText(req.body?.firstName, 100);
+        const lastName = cleanText(req.body?.lastName, 100);
+        const rawPhone = cleanText(req.body?.phone, 40);
+        const phone = rawPhone ? normalizePhone(rawPhone) : '';
+
+        if (rawPhone && !phone) {
+            return res.status(400).json({
+                error: 'Укажите корректный телефон'
+            });
+        }
+
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const db = getPool();
+
+            await db.execute(
+                `UPDATE users
+                 SET first_name = ?,
+                     last_name = ?,
+                     phone = ?,
+                     updated_at = NOW()
+                 WHERE id = ?`,
+                [
+                    firstName || null,
+                    lastName || null,
+                    phone || null,
+                    user.id
+                ]
+            );
+
+            const updatedUser = {
+                ...user,
+                first_name: firstName || null,
+                last_name: lastName || null,
+                phone: phone || null
+            };
+
+            const profile = await updateAccountBitrixProfile(
+                updatedUser,
+                {
+                    address: cleanText(req.body?.address, 500),
+                    address2: cleanText(req.body?.address2, 500),
+                    city: cleanText(req.body?.city, 150),
+                    region: cleanText(req.body?.region, 150),
+                    postalCode: cleanText(req.body?.postalCode, 40),
+                    country: cleanText(req.body?.country, 100),
+                    birthDate: cleanText(req.body?.birthDate, 40),
+                    photoBase64: String(req.body?.photoBase64 || ''),
+                    photoFilename: cleanText(
+                        req.body?.photoFilename || 'rtn-profile.jpg',
+                        180
+                    )
+                }
+            );
+
+            return res.json({
+                ok: true,
+                user: publicUser(updatedUser),
+                profile
+            });
+        } catch (error) {
+            console.error('RTN account profile update error:', error);
+
+            if (error?.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({
+                    error: 'Этот телефон уже используется другим аккаунтом'
+                });
+            }
+
+            return res.status(502).json({
+                error: 'Не удалось сохранить профиль'
             });
         }
     });
