@@ -1189,7 +1189,8 @@ const BITRIX_PROMO_FIELDS = {
     dealAmbassador: 'UF_CRM_RTN_AMBASSADOR',
     contactPromoHistory: 'UF_CRM_RTN_PROMO_HISTORY',
     contactAmbassadorHistory: 'UF_CRM_RTN_AMBASSADOR_HISTORY',
-    memberStatus: 'UF_CRM_RTN_MEMBER_STATUS'
+    memberStatus: 'UF_CRM_RTN_MEMBER_STATUS',
+    dealReferralReward: 'UF_CRM_RTN_REFERRAL_REWARD'
 };
 
 const BITRIX_ORDER_FIELDS = {
@@ -1873,6 +1874,14 @@ async function syncPromoFieldsToBitrix() {
                 multiple: true,
                 initialValues: RTN_MEMBER_STATUSES,
                 sort: 3120
+            });
+
+            await ensureBitrixSimpleField({
+                entity: 'deal',
+                fieldName: BITRIX_PROMO_FIELDS.dealReferralReward,
+                label: 'Реферальная награда RTN',
+                userTypeId: 'string',
+                sort: 3130
             });
 
             // Проверяем варианты списков пакетно, а не десятками REST-запросов.
