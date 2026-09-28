@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { getPool, pingDatabase } = require('./db');
-const { getMailStatus, verifyMailConnection } = require('./rtn-mail');
+const { getMailStatus, verifyMailConnection, sendVerificationCodeEmail } = require('./rtn-mail');
 
 const SESSION_COOKIE = 'rtn_session';
 const SESSION_DAYS = Math.max(1, Number(process.env.RTN_SESSION_DAYS || 30));
@@ -15,6 +15,72 @@ function cleanText(value, max = 255) {
 function normalizeEmail(value) {
     const email = cleanText(value, 254).toLowerCase();
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+
+const EMAIL_CODE_TTL_MINUTES = 10;
+const EMAIL_CODE_MAX_ATTEMPTS = 5;
+const EMAIL_CODE_RESEND_SECONDS = 60;
+const EMAIL_CODE_HOURLY_LIMIT = 5;
+
+const memoryRateLimits = new Map();
+
+function getClientIp(req) {
+    const forwarded = String(req.get('x-forwarded-for') || '')
+        .split(',')[0]
+        .trim();
+
+    return cleanText(forwarded || req.ip || req.socket?.remoteAddress || 'unknown', 100);
+}
+
+function consumeMemoryRateLimit(key, limit, windowMs) {
+    const now = Date.now();
+    const current = memoryRateLimits.get(key);
+
+    if (!current || current.resetAt <= now) {
+        memoryRateLimits.set(key, {
+            count: 1,
+            resetAt: now + windowMs
+        });
+        return true;
+    }
+
+    if (current.count >= limit) {
+        return false;
+    }
+
+    current.count += 1;
+    return true;
+}
+
+function hashVerificationCode(code) {
+    const pepper = String(
+        process.env.RTN_OTP_PEPPER ||
+        process.env.RTN_MAILER_API_KEY ||
+        ''
+    );
+
+    if (!pepper) {
+        const error = new Error('RTN OTP pepper is not configured');
+        error.code = 'RTN_OTP_PEPPER_NOT_CONFIGURED';
+        throw error;
+    }
+
+    return crypto
+        .createHmac('sha256', pepper)
+        .update(String(code))
+        .digest();
+}
+
+function safeEqualBuffers(a, b) {
+    const left = Buffer.from(a || []);
+    const right = Buffer.from(b || []);
+
+    return (
+        left.length === right.length &&
+        left.length > 0 &&
+        crypto.timingSafeEqual(left, right)
+    );
 }
 
 function normalizePhone(value) {
@@ -233,6 +299,380 @@ function createAccountRouter() {
                 ok: false,
                 error: 'Database unavailable'
             });
+        }
+    });
+
+    router.post('/email/send-code', async (req, res) => {
+        const email = normalizeEmail(req.body?.email);
+
+        if (!email) {
+            return res.status(400).json({
+                error: 'Укажите корректный email'
+            });
+        }
+
+        const ip = getClientIp(req);
+
+        if (!consumeMemoryRateLimit(
+            `email-send-ip:${ip}`,
+            10,
+            60 * 60 * 1000
+        )) {
+            return res.status(429).json({
+                error: 'Слишком много запросов. Попробуйте позже'
+            });
+        }
+
+        try {
+            const db = getPool();
+
+            const [[existingUser]] = await db.execute(
+                'SELECT id FROM users WHERE email = ? LIMIT 1',
+                [email]
+            );
+
+            const [[lastCode]] = await db.execute(
+                `SELECT created_at
+                 FROM verification_codes
+                 WHERE channel = 'email'
+                   AND target = ?
+                   AND purpose = 'login'
+                 ORDER BY id DESC
+                 LIMIT 1`,
+                [email]
+            );
+
+            if (lastCode?.created_at) {
+                const ageMs = Date.now() - new Date(lastCode.created_at).getTime();
+
+                if (ageMs < EMAIL_CODE_RESEND_SECONDS * 1000) {
+                    const retryAfter = Math.max(
+                        1,
+                        Math.ceil(
+                            (EMAIL_CODE_RESEND_SECONDS * 1000 - ageMs) / 1000
+                        )
+                    );
+
+                    res.setHeader('Retry-After', String(retryAfter));
+
+                    return res.status(429).json({
+                        error: 'Код уже отправлен. Подождите перед повторной отправкой',
+                        retryAfter
+                    });
+                }
+            }
+
+            const [[hourly]] = await db.execute(
+                `SELECT COUNT(*) AS total
+                 FROM verification_codes
+                 WHERE channel = 'email'
+                   AND target = ?
+                   AND purpose = 'login'
+                   AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
+                [email]
+            );
+
+            if (Number(hourly?.total || 0) >= EMAIL_CODE_HOURLY_LIMIT) {
+                return res.status(429).json({
+                    error: 'Слишком много кодов для этого email. Попробуйте позже'
+                });
+            }
+
+            const code = String(
+                crypto.randomInt(0, 1000000)
+            ).padStart(6, '0');
+
+            const codeHash = hashVerificationCode(code);
+
+            await db.execute(
+                `UPDATE verification_codes
+                 SET used_at = NOW()
+                 WHERE channel = 'email'
+                   AND target = ?
+                   AND purpose = 'login'
+                   AND used_at IS NULL`,
+                [email]
+            );
+
+            const [insertResult] = await db.execute(
+                `INSERT INTO verification_codes
+                    (
+                        user_id,
+                        channel,
+                        target,
+                        purpose,
+                        code_hash,
+                        attempts,
+                        expires_at
+                    )
+                 VALUES (?, 'email', ?, 'login', ?, 0,
+                         DATE_ADD(NOW(), INTERVAL ? MINUTE))`,
+                [
+                    existingUser?.id || null,
+                    email,
+                    codeHash,
+                    EMAIL_CODE_TTL_MINUTES
+                ]
+            );
+
+            try {
+                await sendVerificationCodeEmail({
+                    to: email,
+                    code,
+                    expiresMinutes: EMAIL_CODE_TTL_MINUTES
+                });
+            } catch (mailError) {
+                await db.execute(
+                    'UPDATE verification_codes SET used_at = NOW() WHERE id = ?',
+                    [insertResult.insertId]
+                ).catch(() => {});
+
+                throw mailError;
+            }
+
+            return res.json({
+                ok: true,
+                expiresMinutes: EMAIL_CODE_TTL_MINUTES,
+                resendAfterSeconds: EMAIL_CODE_RESEND_SECONDS
+            });
+        } catch (error) {
+            console.error('RTN email send code error:', error);
+
+            return res.status(500).json({
+                error: 'Не удалось отправить код'
+            });
+        }
+    });
+
+    router.post('/email/verify', async (req, res) => {
+        const email = normalizeEmail(req.body?.email);
+        const code = String(req.body?.code || '').replace(/\D/g, '').slice(0, 6);
+
+        if (!email || !/^\d{6}$/.test(code)) {
+            return res.status(400).json({
+                error: 'Укажите email и шестизначный код'
+            });
+        }
+
+        const ip = getClientIp(req);
+
+        if (!consumeMemoryRateLimit(
+            `email-verify-ip:${ip}`,
+            30,
+            60 * 60 * 1000
+        )) {
+            return res.status(429).json({
+                error: 'Слишком много попыток. Попробуйте позже'
+            });
+        }
+
+        let connection;
+
+        try {
+            const db = getPool();
+            connection = await db.getConnection();
+            await connection.beginTransaction();
+
+            const [codeRows] = await connection.execute(
+                `SELECT
+                    id,
+                    user_id,
+                    code_hash,
+                    attempts,
+                    expires_at,
+                    used_at
+                 FROM verification_codes
+                 WHERE channel = 'email'
+                   AND target = ?
+                   AND purpose = 'login'
+                   AND used_at IS NULL
+                 ORDER BY id DESC
+                 LIMIT 1
+                 FOR UPDATE`,
+                [email]
+            );
+
+            const verification = codeRows[0];
+
+            if (!verification) {
+                await connection.rollback();
+
+                return res.status(400).json({
+                    error: 'Код не найден или уже использован'
+                });
+            }
+
+            if (new Date(verification.expires_at).getTime() <= Date.now()) {
+                await connection.execute(
+                    'UPDATE verification_codes SET used_at = NOW() WHERE id = ?',
+                    [verification.id]
+                );
+                await connection.commit();
+
+                return res.status(400).json({
+                    error: 'Срок действия кода истёк'
+                });
+            }
+
+            if (Number(verification.attempts || 0) >= EMAIL_CODE_MAX_ATTEMPTS) {
+                await connection.execute(
+                    'UPDATE verification_codes SET used_at = NOW() WHERE id = ?',
+                    [verification.id]
+                );
+                await connection.commit();
+
+                return res.status(429).json({
+                    error: 'Превышено количество попыток. Запросите новый код'
+                });
+            }
+
+            const incomingHash = hashVerificationCode(code);
+
+            if (!safeEqualBuffers(verification.code_hash, incomingHash)) {
+                const attempts = Number(verification.attempts || 0) + 1;
+                const lockCode = attempts >= EMAIL_CODE_MAX_ATTEMPTS;
+
+                await connection.execute(
+                    `UPDATE verification_codes
+                     SET attempts = ?,
+                         used_at = CASE WHEN ? THEN NOW() ELSE used_at END
+                     WHERE id = ?`,
+                    [attempts, lockCode ? 1 : 0, verification.id]
+                );
+
+                await connection.commit();
+
+                return res.status(400).json({
+                    error: lockCode
+                        ? 'Превышено количество попыток. Запросите новый код'
+                        : 'Неверный код',
+                    attemptsLeft: Math.max(
+                        0,
+                        EMAIL_CODE_MAX_ATTEMPTS - attempts
+                    )
+                });
+            }
+
+            const [userRows] = await connection.execute(
+                `SELECT *
+                 FROM users
+                 WHERE email = ?
+                 LIMIT 1
+                 FOR UPDATE`,
+                [email]
+            );
+
+            let user = userRows[0];
+
+            if (user && user.status !== 'active') {
+                await connection.rollback();
+
+                return res.status(403).json({
+                    error: 'Аккаунт недоступен'
+                });
+            }
+
+            if (!user) {
+                const publicId = crypto.randomUUID();
+                const unusablePasswordHash = await bcrypt.hash(
+                    crypto.randomBytes(32).toString('hex'),
+                    12
+                );
+
+                const [userResult] = await connection.execute(
+                    `INSERT INTO users
+                        (
+                            public_id,
+                            email,
+                            password_hash,
+                            email_verified_at,
+                            status
+                        )
+                     VALUES (?, ?, ?, NOW(), 'active')`,
+                    [
+                        publicId,
+                        email,
+                        unusablePasswordHash
+                    ]
+                );
+
+                await connection.execute(
+                    'INSERT INTO rhino_coin_accounts (user_id) VALUES (?)',
+                    [userResult.insertId]
+                );
+
+                const [createdRows] = await connection.execute(
+                    'SELECT * FROM users WHERE id = ? LIMIT 1',
+                    [userResult.insertId]
+                );
+
+                user = createdRows[0];
+            } else {
+                await connection.execute(
+                    `UPDATE users
+                     SET email_verified_at = COALESCE(email_verified_at, NOW()),
+                         updated_at = NOW()
+                     WHERE id = ?`,
+                    [user.id]
+                );
+
+                user.email_verified_at =
+                    user.email_verified_at || new Date();
+            }
+
+            await connection.execute(
+                `UPDATE verification_codes
+                 SET used_at = NOW(),
+                     user_id = ?
+                 WHERE id = ?`,
+                [user.id, verification.id]
+            );
+
+            const token = await createSession(connection, user.id, req);
+
+            const [publicRows] = await connection.execute(
+                `SELECT
+                    u.id,
+                    u.public_id,
+                    u.email,
+                    u.phone,
+                    u.first_name,
+                    u.last_name,
+                    u.bitrix_contact_id,
+                    u.email_verified_at,
+                    u.phone_verified_at,
+                    u.status,
+                    u.created_at,
+                    COALESCE(a.balance, 0) AS rhino_coin_balance
+                 FROM users u
+                 LEFT JOIN rhino_coin_accounts a ON a.user_id = u.id
+                 WHERE u.id = ?
+                 LIMIT 1`,
+                [user.id]
+            );
+
+            await connection.commit();
+
+            setSessionCookie(res, token);
+
+            return res.json({
+                ok: true,
+                user: publicUser(publicRows[0])
+            });
+        } catch (error) {
+            if (connection) {
+                try {
+                    await connection.rollback();
+                } catch (_) {}
+            }
+
+            console.error('RTN email verify error:', error);
+
+            return res.status(500).json({
+                error: 'Не удалось подтвердить код'
+            });
+        } finally {
+            connection?.release();
         }
     });
 
