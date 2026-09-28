@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { getPool, pingDatabase } = require('./db');
+const { getMailStatus, verifyMailConnection } = require('./rtn-mail');
 
 const SESSION_COOKIE = 'rtn_session';
 const SESSION_DAYS = Math.max(1, Number(process.env.RTN_SESSION_DAYS || 30));
@@ -168,6 +169,44 @@ async function getAuthenticatedUser(req) {
 
 function createAccountRouter() {
     const router = express.Router();
+
+    router.get('/mail/health', async (req, res) => {
+        const status = getMailStatus();
+        const verify = String(req.query?.verify || '') === '1';
+
+        if (!verify) {
+            return res.json({
+                ok: true,
+                ...status
+            });
+        }
+
+        if (!status.configured) {
+            return res.status(503).json({
+                ok: false,
+                ...status,
+                error: 'RTN SMTP is not configured'
+            });
+        }
+
+        try {
+            await verifyMailConnection();
+
+            return res.json({
+                ok: true,
+                ...status,
+                connection: 'verified'
+            });
+        } catch (error) {
+            console.error('RTN mail health error:', error.message);
+
+            return res.status(503).json({
+                ok: false,
+                ...status,
+                error: 'SMTP connection failed'
+            });
+        }
+    });
 
     router.get('/health', async (req, res) => {
         try {
