@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
+const { awardReferralCoinsForPayment } = require('./rtn-bitrix-account');
 
 const app = express();
 
@@ -3421,6 +3422,25 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             console.log(
                 `YooKassa payment ${paymentId}: paid order synced to Bitrix24 deal ${dealId}`
             );
+
+            try {
+                const referralReward =
+                    await awardReferralCoinsForPayment(
+                        payment,
+                        dealId
+                    );
+
+                if (referralReward?.rewardCoins > 0) {
+                    console.log(
+                        `RTN referral reward: +${referralReward.rewardCoins} RC for payment ${paymentId}`
+                    );
+                }
+            } catch (referralError) {
+                console.error(
+                    'RTN referral reward error:',
+                    referralError.message
+                );
+            }
         } catch (bitrixError) {
             console.error(
                 'YooKassa Bitrix24 paid sync error:',
@@ -10165,6 +10185,25 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                 console.log(
                     `YooKassa payment ${paymentId}: paid order synced to Bitrix24 by success-page fallback, deal ${dealId}`
                 );
+
+                try {
+                    const referralReward =
+                        await awardReferralCoinsForPayment(
+                            payment,
+                            dealId
+                        );
+
+                    if (referralReward?.rewardCoins > 0) {
+                        console.log(
+                            `RTN referral reward fallback: +${referralReward.rewardCoins} RC for payment ${paymentId}`
+                        );
+                    }
+                } catch (referralError) {
+                    console.error(
+                        'RTN referral reward fallback error:',
+                        referralError.message
+                    );
+                }
             } catch (bitrixError) {
                 console.error(
                     'RTN paid order Bitrix24 fallback error:',
