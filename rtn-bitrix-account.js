@@ -862,7 +862,6 @@ async function getAccountOrders(user) {
             receiptAvailable:
                 Boolean(
                     clean(
-                        deal[DEAL_FIELD_NAMES.orderNumber] ||
                         deal.ORIGIN_ID ||
                         '',
                         100
@@ -886,8 +885,8 @@ async function getAccountOrderReference(user, dealId) {
     return {
         dealId: String(deal.ID || deal.id || ''),
         orderId: clean(
-            deal[DEAL_FIELD_NAMES.orderNumber] ||
             deal.ORIGIN_ID ||
+            deal[DEAL_FIELD_NAMES.orderNumber] ||
             '',
             100
         ),
