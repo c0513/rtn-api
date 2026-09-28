@@ -198,12 +198,21 @@ function createAccountRouter() {
                 connection: 'verified'
             });
         } catch (error) {
-            console.error('RTN mail health error:', error.message);
+            console.error('RTN mail health error:', error);
 
             return res.status(503).json({
                 ok: false,
                 ...status,
-                error: 'SMTP connection failed'
+                error: 'SMTP connection failed',
+                debug: {
+                    code: error?.code || null,
+                    command: error?.command || null,
+                    responseCode: error?.responseCode || null,
+                    syscall: error?.syscall || null,
+                    address: error?.address || null,
+                    port: error?.port || null,
+                    message: String(error?.message || '').slice(0, 300)
+                }
             });
         }
     });
