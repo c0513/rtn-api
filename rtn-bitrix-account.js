@@ -101,10 +101,9 @@ function buildStandardContactFields(user = {}, extra = {}) {
         SOURCE_DESCRIPTION: 'Личный кабинет RTN.PRO'
     };
 
-    fields.NAME =
-        firstName ||
-        (email ? email.split('@')[0] : '') ||
-        'Покупатель RTN.PRO';
+    if (firstName) {
+        fields.NAME = firstName;
+    }
 
     if (lastName) {
         fields.LAST_NAME = lastName;
@@ -223,8 +222,17 @@ async function findContactId({ email, phone }) {
 }
 
 async function createAccountContact(user, extra = {}) {
+    const fields = buildStandardContactFields(user, extra);
+
+    if (!fields.NAME) {
+        const email = normalizeEmail(user?.email || extra?.email);
+        fields.NAME =
+            (email ? email.split('@')[0] : '') ||
+            'Покупатель RTN.PRO';
+    }
+
     const result = await bitrixCall('crm.contact.add', {
-        fields: buildStandardContactFields(user, extra),
+        fields,
         params: {
             REGISTER_SONET_EVENT: 'N'
         }
