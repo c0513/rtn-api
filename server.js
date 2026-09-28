@@ -5,7 +5,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
-const { awardReferralCoinsForPayment } = require('./rtn-bitrix-account');
+const {
+    awardReferralCoinsForPayment,
+    resolveReferralCode
+} = require('./rtn-bitrix-account');
 
 const app = express();
 
@@ -10338,6 +10341,40 @@ app.post('/api/create-payment', async (req, res) => {
             return res.status(400).json({
                 error: 'Укажите корректный email для отправки электронного чека'
             });
+        }
+
+        const referralPromo = normalizePromoCode(promoCode);
+
+        if (referralPromo.startsWith('RTN-')) {
+            const referrer =
+                await resolveReferralCode(
+                    referralPromo
+                );
+
+            if (!referrer) {
+                return res.status(400).json({
+                    error: 'Реферальный промокод не найден'
+                });
+            }
+
+            const referrerEmail =
+                normalizeEmailForYooKassa(
+                    referrer.email
+                );
+
+            const referrerPhone =
+                normalizeRuPhoneForYooKassa(
+                    referrer.phone
+                );
+
+            if (
+                (referrerEmail && referrerEmail === normalizedEmail) ||
+                (referrerPhone && referrerPhone === normalizedPhone)
+            ) {
+                return res.status(400).json({
+                    error: 'Свой реферальный промокод использовать нельзя'
+                });
+            }
         }
 
         const customerFullName =
