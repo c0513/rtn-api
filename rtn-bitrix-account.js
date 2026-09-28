@@ -354,6 +354,35 @@ async function ensureContactSimpleField(fieldName, label) {
     const current = Array.isArray(existing) ? existing[0] : null;
 
     if (current) {
+        try {
+            await bitrixCall('crm.contact.userfield.update', {
+                id: Number(current.ID || current.id || 0),
+                fields: {
+                    SHOW_FILTER: 'Y',
+                    SHOW_IN_LIST: 'Y',
+                    EDIT_IN_LIST: 'Y',
+                    EDIT_FORM_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+                    LIST_COLUMN_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+                    LIST_FILTER_LABEL: {
+                        ru: label,
+                        en: label
+                    },
+                    SORT: 3100
+                }
+            });
+        } catch (error) {
+            console.error(
+                `RTN contact field editability sync error for ${fieldName}:`,
+                error.message
+            );
+        }
+
         return current;
     }
 
@@ -432,21 +461,11 @@ async function getContactMemberStatuses(contact = {}) {
         .map(value => String(value).toUpperCase());
 }
 
-async function getOrCreateAmbassadorPromo({
+async function getOrCreatePersonalPromo({
     contact,
     contactId,
-    user,
-    memberStatuses
+    user
 }) {
-    const statuses = new Set(
-        (Array.isArray(memberStatuses) ? memberStatuses : [])
-            .map(value => String(value || '').toUpperCase())
-    );
-
-    if (!statuses.has('AMBASSADOR')) {
-        return '';
-    }
-
     try {
         await ensureContactSimpleField(
             RTN_PERSONAL_PROMO_FIELD,
@@ -875,12 +894,17 @@ async function getAccountBitrixProfile(user) {
 
     const secondaryAddress = parseSecondaryAddress(contact.ADDRESS_2 || '');
     const memberStatuses = await getContactMemberStatuses(contact);
-    const personalPromoCode = await getOrCreateAmbassadorPromo({
+    const personalPromoCode = await getOrCreatePersonalPromo({
         contact,
         contactId,
-        user,
-        memberStatuses
+        user
     });
+
+    const normalizedStatuses = memberStatuses.map(value =>
+        String(value || '').toUpperCase()
+    );
+    const isAmbassador = normalizedStatuses.includes('AMBASSADOR');
+    const isBoss = normalizedStatuses.includes('BOSS');
 
     return {
         firstName: contact.NAME || '',
@@ -897,7 +921,9 @@ async function getAccountBitrixProfile(user) {
         hasPhoto: Boolean(contact.PHOTO),
         memberStatuses,
         personalPromoCode,
-        referralCode: personalPromoCode || referralCodeFromPublicId(user?.public_id)
+        referralCode: personalPromoCode || referralCodeFromPublicId(user?.public_id),
+        isAmbassador,
+        isBoss
     };
 }
 
@@ -1264,7 +1290,10 @@ async function resolveReferralCode(code) {
         for (const contact of Array.isArray(contacts) ? contacts : []) {
             const statuses = await getContactMemberStatuses(contact);
 
-            if (!statuses.includes('AMBASSADOR')) {
+            if (
+                !statuses.includes('AMBASSADOR') &&
+                !statuses.includes('BOSS')
+            ) {
                 continue;
             }
 
@@ -1571,10 +1600,14 @@ async function getReferralFriends(user) {
         : [];
 
     const ownerIsAmbassador = ownerStatuses.includes('AMBASSADOR');
+    const ownerIsBoss = ownerStatuses.includes('BOSS');
     const referralCode =
         clean(ownerProfile?.personalPromoCode, 80).toUpperCase() ||
         referralCodeFromPublicId(user?.public_id);
-    const rewardCoins = ownerIsAmbassador ? 0 : 150;
+    const rewardCoins =
+        ownerIsAmbassador || ownerIsBoss
+            ? 0
+            : 150;
 
     if (!user?.id || !referralCode) {
         return {
@@ -1761,26 +1794,17 @@ async function getReferralFriends(user) {
 }
 
 
-async function getAmbassadorSales(user) {
-    const profile = await getAccountBitrixProfile(user);
-    const memberStatuses = Array.isArray(profile?.memberStatuses)
-        ? profile.memberStatuses
-        : [];
-
-    const isAmbassador = memberStatuses
-        .map(value => String(value || '').toUpperCase())
-        .includes('AMBASSADOR');
-
-    const personalPromoCode = clean(
-        profile?.personalPromoCode,
+async function getSalesByPromoCode(personalPromoCode) {
+    const normalizedPromo = clean(
+        personalPromoCode,
         80
     ).toUpperCase();
 
-    if (!isAmbassador || !personalPromoCode) {
+    if (!normalizedPromo) {
         return {
-            isAmbassador,
-            personalPromoCode,
+            personalPromoCode: '',
             commissionRate: 0.10,
+            totalSalesAmount: 0,
             totalCommission: 0,
             confirmedCommission: 0,
             pendingCommission: 0,
@@ -1796,7 +1820,7 @@ async function getAmbassadorSales(user) {
         for (const [id, value] of promoOptions.entries()) {
             if (
                 String(value || '').trim().toUpperCase() ===
-                personalPromoCode
+                normalizedPromo
             ) {
                 promoOptionId = Number(id);
                 break;
@@ -1806,9 +1830,9 @@ async function getAmbassadorSales(user) {
 
     if (!promoOptionId) {
         return {
-            isAmbassador: true,
-            personalPromoCode,
+            personalPromoCode: normalizedPromo,
             commissionRate: 0.10,
+            totalSalesAmount: 0,
             totalCommission: 0,
             confirmedCommission: 0,
             pendingCommission: 0,
@@ -1848,7 +1872,8 @@ async function getAmbassadorSales(user) {
             const amount = Math.max(0, Number(deal.OPPORTUNITY || 0));
             const status = mapDealStatus(deal.STAGE_ID);
             const stage = await getDealStagePresentation(deal.STAGE_ID);
-            const commissionAmount = Math.round(amount * 0.10 * 100) / 100;
+            const commissionAmount =
+                Math.round(amount * 0.10 * 100) / 100;
             const items = id ? await getDealProductRows(id) : [];
 
             const [paymentStatus, deliveryType] = await Promise.all([
@@ -1896,6 +1921,10 @@ async function getAmbassadorSales(user) {
     );
 
     const activeSales = sales.filter(sale => sale.status !== 'cancelled');
+    const totalSalesAmount = activeSales.reduce(
+        (sum, sale) => sum + sale.amount,
+        0
+    );
     const confirmedCommission = activeSales
         .filter(sale => sale.commissionStatus === 'confirmed')
         .reduce((sum, sale) => sum + sale.commissionAmount, 0);
@@ -1904,9 +1933,10 @@ async function getAmbassadorSales(user) {
         .reduce((sum, sale) => sum + sale.commissionAmount, 0);
 
     return {
-        isAmbassador: true,
-        personalPromoCode,
+        personalPromoCode: normalizedPromo,
         commissionRate: 0.10,
+        totalSalesAmount:
+            Math.round(totalSalesAmount * 100) / 100,
         totalCommission:
             Math.round(
                 (confirmedCommission + pendingCommission) * 100
@@ -1916,6 +1946,232 @@ async function getAmbassadorSales(user) {
         pendingCommission:
             Math.round(pendingCommission * 100) / 100,
         sales
+    };
+}
+
+async function getAmbassadorSales(user) {
+    const profile = await getAccountBitrixProfile(user);
+    const memberStatuses = Array.isArray(profile?.memberStatuses)
+        ? profile.memberStatuses.map(value =>
+            String(value || '').toUpperCase()
+        )
+        : [];
+
+    const isAmbassador = memberStatuses.includes('AMBASSADOR');
+    const isBoss = memberStatuses.includes('BOSS');
+    const personalPromoCode = clean(
+        profile?.personalPromoCode,
+        80
+    ).toUpperCase();
+
+    if (!isAmbassador && !isBoss) {
+        return {
+            isAmbassador: false,
+            isBoss: false,
+            personalPromoCode,
+            commissionRate: 0.10,
+            totalSalesAmount: 0,
+            totalCommission: 0,
+            confirmedCommission: 0,
+            pendingCommission: 0,
+            sales: []
+        };
+    }
+
+    return {
+        isAmbassador,
+        isBoss,
+        ...(await getSalesByPromoCode(personalPromoCode))
+    };
+}
+
+async function getMemberStatusOptionId(statusName) {
+    const target = String(statusName || '').trim().toUpperCase();
+    if (!target) return null;
+
+    await getContactMemberStatuses({
+        [RTN_MEMBER_STATUS_FIELD]: []
+    });
+
+    const now = Date.now();
+
+    if (
+        memberStatusCache.expiresAt <= now ||
+        !memberStatusCache.options.size
+    ) {
+        const fields = await bitrixCall('crm.contact.userfield.list', {
+            filter: {
+                FIELD_NAME: RTN_MEMBER_STATUS_FIELD
+            }
+        });
+
+        const field = Array.isArray(fields) ? fields[0] : null;
+        const options = new Map();
+
+        for (const option of Array.isArray(field?.LIST) ? field.LIST : []) {
+            const id = String(option.ID || option.id || '');
+            const value = clean(option.VALUE || option.value || '', 120);
+            if (id) options.set(id, value || id);
+        }
+
+        memberStatusCache = {
+            expiresAt: now + 15000,
+            options
+        };
+    }
+
+    for (const [id, value] of memberStatusCache.options.entries()) {
+        if (String(value || '').toUpperCase() === target) {
+            return Number(id);
+        }
+    }
+
+    return null;
+}
+
+async function getBossSales(user, requestedPromo = '') {
+    const profile = await getAccountBitrixProfile(user);
+    const memberStatuses = Array.isArray(profile?.memberStatuses)
+        ? profile.memberStatuses.map(value =>
+            String(value || '').toUpperCase()
+        )
+        : [];
+
+    const isBoss = memberStatuses.includes('BOSS');
+
+    if (!isBoss) {
+        return {
+            isBoss: false,
+            selectedPromoCode: '',
+            totalSalesAmount: 0,
+            totalCommission: 0,
+            confirmedCommission: 0,
+            pendingCommission: 0,
+            ambassadors: [],
+            sales: []
+        };
+    }
+
+    const ambassadorOptionId =
+        await getMemberStatusOptionId('AMBASSADOR');
+
+    const contactsResult = ambassadorOptionId
+        ? await bitrixCall('crm.contact.list', {
+            order: {
+                ID: 'ASC'
+            },
+            filter: {
+                [RTN_MEMBER_STATUS_FIELD]: ambassadorOptionId
+            },
+            select: [
+                'ID',
+                'NAME',
+                'LAST_NAME',
+                RTN_MEMBER_STATUS_FIELD,
+                RTN_PERSONAL_PROMO_FIELD
+            ],
+            start: 0
+        })
+        : [];
+
+    const ambassadors = [];
+
+    for (const contact of Array.isArray(contactsResult) ? contactsResult : []) {
+        const contactId = Number(contact.ID || contact.id || 0);
+        const promoCode = clean(
+            contact?.[RTN_PERSONAL_PROMO_FIELD],
+            80
+        ).toUpperCase();
+
+        if (!contactId || !promoCode) {
+            continue;
+        }
+
+        ambassadors.push({
+            contactId,
+            displayName: clean(
+                [contact.NAME, contact.LAST_NAME]
+                    .filter(Boolean)
+                    .join(' ') || `AMBASSADOR #${contactId}`,
+                180
+            ),
+            promoCode
+        });
+    }
+
+    const requested = clean(
+        requestedPromo,
+        80
+    ).toUpperCase();
+
+    const selected = requested
+        ? ambassadors.filter(item => item.promoCode === requested)
+        : ambassadors;
+
+    const dashboards = await Promise.all(
+        selected.map(async ambassador => ({
+            ...ambassador,
+            ...(await getSalesByPromoCode(ambassador.promoCode))
+        }))
+    );
+
+    const allSales = dashboards.flatMap(item =>
+        item.sales.map(sale => ({
+            ...sale,
+            ambassadorContactId: item.contactId,
+            ambassadorName: item.displayName,
+            promoCode: item.promoCode
+        }))
+    ).sort((a, b) => {
+        const aTime = new Date(a.createdAt || 0).getTime();
+        const bTime = new Date(b.createdAt || 0).getTime();
+        return bTime - aTime;
+    });
+
+    const decoratedAmbassadors = dashboards.map(item => ({
+        contactId: item.contactId,
+        displayName: item.displayName,
+        promoCode: item.promoCode,
+        totalSalesAmount: item.totalSalesAmount,
+        totalCommission: item.totalCommission,
+        confirmedCommission: item.confirmedCommission,
+        pendingCommission: item.pendingCommission,
+        ordersCount: item.sales.length
+    }));
+
+    return {
+        isBoss: true,
+        selectedPromoCode: requested,
+        totalSalesAmount:
+            Math.round(
+                decoratedAmbassadors.reduce(
+                    (sum, item) => sum + item.totalSalesAmount,
+                    0
+                ) * 100
+            ) / 100,
+        totalCommission:
+            Math.round(
+                decoratedAmbassadors.reduce(
+                    (sum, item) => sum + item.totalCommission,
+                    0
+                ) * 100
+            ) / 100,
+        confirmedCommission:
+            Math.round(
+                decoratedAmbassadors.reduce(
+                    (sum, item) => sum + item.confirmedCommission,
+                    0
+                ) * 100
+            ) / 100,
+        pendingCommission:
+            Math.round(
+                decoratedAmbassadors.reduce(
+                    (sum, item) => sum + item.pendingCommission,
+                    0
+                ) * 100
+            ) / 100,
+        ambassadors: decoratedAmbassadors,
+        sales: allSales
     };
 }
 
@@ -1936,5 +2192,6 @@ module.exports = {
     resolveReferralCode,
     awardReferralCoinsForPayment,
     getReferralFriends,
-    getAmbassadorSales
+    getAmbassadorSales,
+    getBossSales
 };
