@@ -124,25 +124,21 @@ function buildStandardContactFields(user = {}, extra = {}) {
         }];
     }
 
-    const address = clean(
-        pick(source, 'address', 'address_line1', 'addressLine1'),
-        500
+    const street = clean(
+        pick(source, 'street', 'address', 'address_line1', 'addressLine1'),
+        300
     );
-    const address2 = clean(
-        pick(source, 'address_2', 'address_line2', 'addressLine2'),
-        500
+    const house = clean(
+        pick(source, 'house'),
+        80
+    );
+    const apartmentOffice = clean(
+        pick(source, 'apartmentOffice', 'address_2', 'address_line2', 'addressLine2'),
+        120
     );
     const city = clean(
         pick(source, 'address_city', 'city'),
         150
-    );
-    const region = clean(
-        pick(source, 'address_region', 'region'),
-        150
-    );
-    const postalCode = clean(
-        pick(source, 'address_postal_code', 'postalCode'),
-        40
     );
     const country = clean(
         pick(source, 'address_country', 'country'),
@@ -153,11 +149,18 @@ function buildStandardContactFields(user = {}, extra = {}) {
         40
     );
 
-    if (address) fields.ADDRESS = address;
-    if (address2) fields.ADDRESS_2 = address2;
+    if (street) fields.ADDRESS = street;
+
+    const address2Parts = [];
+    if (house) address2Parts.push(`Дом: ${house}`);
+    if (apartmentOffice) {
+        address2Parts.push(`Квартира/офис: ${apartmentOffice}`);
+    }
+    if (address2Parts.length) {
+        fields.ADDRESS_2 = address2Parts.join('; ');
+    }
+
     if (city) fields.ADDRESS_CITY = city;
-    if (region) fields.ADDRESS_REGION = region;
-    if (postalCode) fields.ADDRESS_POSTAL_CODE = postalCode;
     if (country) fields.ADDRESS_COUNTRY = country;
     if (birthDate) fields.BIRTHDATE = birthDate;
 
@@ -296,6 +299,59 @@ async function ensureAccountBitrixContact(user, extra = {}) {
     return contactId;
 }
 
+function parseSecondaryAddress(value) {
+    const text = clean(value, 500);
+    const houseMatch = text.match(/(?:^|;\s*)Дом:\s*([^;]+)/i);
+    const apartmentMatch = text.match(
+        /(?:^|;\s*)Квартира\/офис:\s*([^;]+)/i
+    );
+
+    return {
+        house: houseMatch ? clean(houseMatch[1], 80) : '',
+        apartmentOffice: apartmentMatch
+            ? clean(apartmentMatch[1], 120)
+            : ''
+    };
+}
+
+const stageLabelCache = new Map();
+
+async function getDealStageLabel(stageId) {
+    const stage = clean(stageId, 100);
+    if (!stage) return '';
+
+    const categoryMatch = stage.match(/^C(\d+):/i);
+    const entityId = categoryMatch
+        ? `DEAL_STAGE_${categoryMatch[1]}`
+        : 'DEAL_STAGE';
+
+    if (!stageLabelCache.has(entityId)) {
+        const rows = await bitrixCall('crm.status.list', {
+            filter: {
+                ENTITY_ID: entityId
+            }
+        });
+
+        const map = new Map();
+
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const statusId = clean(row.STATUS_ID || row.statusId || '', 100);
+            const name = clean(row.NAME || row.name || '', 200);
+
+            if (statusId) {
+                map.set(statusId, name);
+                if (!statusId.includes(':') && categoryMatch) {
+                    map.set(`C${categoryMatch[1]}:${statusId}`, name);
+                }
+            }
+        }
+
+        stageLabelCache.set(entityId, map);
+    }
+
+    return stageLabelCache.get(entityId)?.get(stage) || stage;
+}
+
 async function getAccountBitrixProfile(user) {
     const contactId = await ensureAccountBitrixContact(user);
 
@@ -319,20 +375,20 @@ async function getAccountBitrixProfile(user) {
             ? contact.PHONE[0].VALUE
             : null;
 
+    const secondaryAddress = parseSecondaryAddress(contact.ADDRESS_2 || '');
+
     return {
-        bitrixContactId: contactId,
         firstName: contact.NAME || '',
         lastName: contact.LAST_NAME || '',
         email: email || user.email || null,
         phone: phone || user.phone || null,
-        address: contact.ADDRESS || '',
-        address2: contact.ADDRESS_2 || '',
+        street: contact.ADDRESS || '',
+        house: secondaryAddress.house,
+        apartmentOffice: secondaryAddress.apartmentOffice,
         city: contact.ADDRESS_CITY || '',
-        region: contact.ADDRESS_REGION || '',
-        postalCode: contact.ADDRESS_POSTAL_CODE || '',
         country: contact.ADDRESS_COUNTRY || '',
         birthDate: contact.BIRTHDATE || '',
-        hasPhoto: Boolean(contact.HAS_PHONE || contact.PHOTO)
+        hasPhoto: Boolean(contact.PHOTO)
     };
 }
 
@@ -411,6 +467,7 @@ async function getAccountOrders(user) {
             'ID',
             'TITLE',
             'STAGE_ID',
+            'CATEGORY_ID',
             'OPPORTUNITY',
             'CURRENCY_ID',
             'DATE_CREATE',
@@ -431,12 +488,14 @@ async function getAccountOrders(user) {
     for (const deal of deals.slice(0, 100)) {
         const id = Number(deal.ID || deal.id || 0);
         const items = id ? await getDealProductRows(id) : [];
+        const statusLabel = await getDealStageLabel(deal.STAGE_ID);
 
         orders.push({
             id: String(id || ''),
             number: clean(deal.ORIGIN_ID || deal.ID || '', 100),
             title: clean(deal.TITLE || '', 300),
             status: mapDealStatus(deal.STAGE_ID),
+            statusLabel,
             stageId: clean(deal.STAGE_ID || '', 100),
             amount: Number(deal.OPPORTUNITY || 0),
             currency: clean(deal.CURRENCY_ID || 'RUB', 10),
