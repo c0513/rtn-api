@@ -1194,6 +1194,7 @@ const BITRIX_PROMO_FIELDS = {
     contactPromoHistory: 'UF_CRM_RTN_PROMO_HISTORY',
     contactAmbassadorHistory: 'UF_CRM_RTN_AMBASSADOR_HISTORY',
     memberStatus: 'UF_CRM_RTN_MEMBER_STATUS',
+    personalPromo: 'UF_CRM_RTN_PERSONAL_PROMO',
     dealReferralReward: 'UF_CRM_RTN_REFERRAL_REWARD'
 };
 
@@ -1879,6 +1880,14 @@ async function syncPromoFieldsToBitrix() {
                 multiple: true,
                 initialValues: RTN_MEMBER_STATUSES,
                 sort: 3120
+            });
+
+            await ensureBitrixSimpleField({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.personalPromo,
+                label: 'Персональный промокод',
+                userTypeId: 'string',
+                sort: 3125
             });
 
             await ensureBitrixSimpleField({
