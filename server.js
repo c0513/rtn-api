@@ -1188,7 +1188,8 @@ const BITRIX_PROMO_FIELDS = {
     dealPromo: 'UF_CRM_RTN_PROMO_CODE',
     dealAmbassador: 'UF_CRM_RTN_AMBASSADOR',
     contactPromoHistory: 'UF_CRM_RTN_PROMO_HISTORY',
-    contactAmbassadorHistory: 'UF_CRM_RTN_AMBASSADOR_HISTORY'
+    contactAmbassadorHistory: 'UF_CRM_RTN_AMBASSADOR_HISTORY',
+    memberStatus: 'UF_CRM_RTN_MEMBER_STATUS'
 };
 
 const BITRIX_ORDER_FIELDS = {
@@ -1210,6 +1211,13 @@ const RTN_DELIVERY_TYPES = [
 const RTN_PAYMENT_STATUSES = [
     'Ожидает оплаты',
     'Оплачен'
+];
+
+const RTN_MEMBER_STATUSES = [
+    'BRONZE',
+    'SILVER',
+    'GOLD',
+    'AMBASSADOR'
 ];
 
 const RTN_PROMO_AMBASSADORS = {
@@ -1858,6 +1866,15 @@ async function syncPromoFieldsToBitrix() {
                 sort: 3110
             });
 
+            await ensureBitrixEnumerationField({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.memberStatus,
+                label: 'Статус RTN',
+                multiple: true,
+                initialValues: RTN_MEMBER_STATUSES,
+                sort: 3120
+            });
+
             // Проверяем варианты списков пакетно, а не десятками REST-запросов.
             await ensureBitrixEnumOptionsBatch({
                 entity: 'deal',
@@ -1885,6 +1902,13 @@ async function syncPromoFieldsToBitrix() {
                 fieldName: BITRIX_PROMO_FIELDS.contactAmbassadorHistory,
                 values: knownAmbassadors,
                 xmlPrefix: 'RTN_AMB_CONTACT'
+            });
+
+            await ensureBitrixEnumOptionsBatch({
+                entity: 'contact',
+                fieldName: BITRIX_PROMO_FIELDS.memberStatus,
+                values: RTN_MEMBER_STATUSES,
+                xmlPrefix: 'RTN_MEMBER_STATUS'
             });
 
             bitrixPromoFieldsReady = true;
