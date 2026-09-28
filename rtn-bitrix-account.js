@@ -1050,6 +1050,37 @@ function referralLevelFromXp(xp, memberStatuses = []) {
 }
 
 const referralRewardLocks = new Set();
+let referralRewardTableReadyPromise = null;
+
+async function ensureReferralRewardTable() {
+    if (referralRewardTableReadyPromise) {
+        return referralRewardTableReadyPromise;
+    }
+
+    referralRewardTableReadyPromise = (async () => {
+        const db = getPool();
+
+        await db.execute(
+            `CREATE TABLE IF NOT EXISTS rtn_referral_rewards (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                payment_id VARCHAR(100) NOT NULL,
+                deal_id BIGINT UNSIGNED NOT NULL,
+                referrer_user_id BIGINT UNSIGNED NOT NULL,
+                promo_code VARCHAR(80) NOT NULL,
+                coins INT UNSIGNED NOT NULL DEFAULT 150,
+                awarded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_rtn_referral_payment (payment_id),
+                KEY idx_rtn_referral_user (referrer_user_id),
+                KEY idx_rtn_referral_deal (deal_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+        );
+    })().catch(error => {
+        referralRewardTableReadyPromise = null;
+        throw error;
+    });
+
+    return referralRewardTableReadyPromise;
+}
 
 async function awardReferralCoinsForPayment(payment, dealId) {
     const promoCode = clean(
@@ -1113,29 +1144,80 @@ async function awardReferralCoinsForPayment(payment, dealId) {
             };
         }
 
+        await ensureReferralRewardTable();
+
         const db = getPool();
+        const connection = await db.getConnection();
+        let awarded = false;
 
-        await db.execute(
-            `INSERT INTO rhino_coin_accounts
-                (user_id, balance)
-             VALUES (?, ?)
-             ON DUPLICATE KEY UPDATE
-                balance = COALESCE(balance, 0) + VALUES(balance)`,
-            [Number(referrer.id), 150]
-        );
+        try {
+            await connection.beginTransaction();
 
-        await bitrixCall('crm.deal.update', {
-            id: Number(dealId),
-            fields: {
-                [DEAL_FIELD_NAMES.referralReward]:
-                    `150 RC · ${paymentId}`
+            const [rewardInsert] = await connection.execute(
+                `INSERT IGNORE INTO rtn_referral_rewards
+                    (
+                        payment_id,
+                        deal_id,
+                        referrer_user_id,
+                        promo_code,
+                        coins
+                    )
+                 VALUES (?, ?, ?, ?, ?)`,
+                [
+                    paymentId,
+                    Number(dealId),
+                    Number(referrer.id),
+                    promoCode,
+                    150
+                ]
+            );
+
+            if (Number(rewardInsert?.affectedRows || 0) > 0) {
+                await connection.execute(
+                    `INSERT INTO rhino_coin_accounts
+                        (user_id, balance)
+                     VALUES (?, ?)
+                     ON DUPLICATE KEY UPDATE
+                        balance = COALESCE(balance, 0) + VALUES(balance)`,
+                    [Number(referrer.id), 150]
+                );
+
+                awarded = true;
             }
-        });
+
+            await connection.commit();
+        } catch (error) {
+            try {
+                await connection.rollback();
+            } catch {}
+
+            throw error;
+        } finally {
+            connection.release();
+        }
+
+        if (!existingMarker) {
+            try {
+                await bitrixCall('crm.deal.update', {
+                    id: Number(dealId),
+                    fields: {
+                        [DEAL_FIELD_NAMES.referralReward]:
+                            `150 RC · ${paymentId}`
+                    }
+                });
+            } catch (markerError) {
+                console.error(
+                    'RTN referral reward marker error:',
+                    markerError.message
+                );
+            }
+        }
 
         return {
             ok: true,
-            ignored: false,
-            rewardCoins: 150,
+            ignored: !awarded,
+            reason: awarded ? null : 'already_awarded',
+            rewardCoins: awarded ? 150 : 0,
             referrerUserId: Number(referrer.id)
         };
     } finally {
