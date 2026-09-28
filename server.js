@@ -3126,6 +3126,141 @@ async function moveBitrixDealToPaid({ dealId, payment }) {
     }
 }
 
+async function buildPaidOrderPayload(payment) {
+    const orderId =
+        String(
+            payment?.metadata?.orderId ||
+            ''
+        ).trim();
+
+    const localOrder =
+        readOrders().find(order =>
+            (
+                orderId &&
+                String(order?.orderId || '') === orderId
+            ) ||
+            (
+                payment?.id &&
+                String(order?.paymentId || '') ===
+                    String(payment.id)
+            )
+        );
+
+    if (
+        localOrder &&
+        Array.isArray(localOrder.items) &&
+        localOrder.items.length
+    ) {
+        return {
+            orderId:
+                localOrder.orderId ||
+                orderId,
+
+            amount:
+                Number(
+                    payment?.amount?.value ||
+                    localOrder.amount ||
+                    0
+                ),
+
+            items:
+                localOrder.items,
+
+            customer:
+                localOrder.customer ||
+                {},
+
+            delivery:
+                localOrder.delivery ||
+                {},
+
+            comment:
+                localOrder.comment ||
+                '',
+
+            promoCode:
+                localOrder.promoCode ||
+                normalizePromoCode(
+                    payment?.metadata?.promoCode
+                )
+        };
+    }
+
+    const receiptResult =
+        await fetchAllYooKassaReceipts();
+
+    const receipt =
+        receiptResult.receipts.find(
+            candidate =>
+                candidate?.type ===
+                    'payment' &&
+                candidate?.status ===
+                    'succeeded' &&
+                String(
+                    candidate?.payment_id ||
+                    ''
+                ) ===
+                    String(
+                        payment?.id ||
+                        ''
+                    )
+        );
+
+    if (!receipt) {
+        throw new Error(
+            `Не найден успешный чек YooKassa для оплаты ${payment?.id || 'UNKNOWN'}`
+        );
+    }
+
+    return legacyOrderFromYooKassaReceipt(
+        payment,
+        receipt
+    );
+}
+
+async function syncPaidOrderToBitrix(payment) {
+    const order =
+        await buildPaidOrderPayload(
+            payment
+        );
+
+    const dealId =
+        await syncOrderToBitrix(
+            order
+        );
+
+    if (!dealId) {
+        throw new Error(
+            'Bitrix24 не вернул ID сделки для оплаченного заказа'
+        );
+    }
+
+    await moveBitrixDealToPaid({
+        dealId,
+        payment
+    });
+
+    upsertLocalOrder({
+        orderId:
+            order.orderId,
+
+        paymentId:
+            payment?.id,
+
+        bitrixDealId:
+            Number(dealId),
+
+        paymentStatus:
+            'succeeded',
+
+        paid:
+            true
+    });
+
+    return Number(dealId);
+}
+
+
 app.post('/api/yookassa/webhook', async (req, res) => {
     try {
         const event = req.body?.event;
@@ -3196,41 +3331,16 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             );
         }
 
-        // Bitrix24 сейчас может быть недоступен по тарифу.
-        // CRM-синхронизацию оставляем best-effort и не ломаем webhook.
+        // В Bitrix24 передаем заказ только после подтвержденной оплаты.
         try {
-            let dealId =
-                Number(
-                    payment?.metadata?.bitrixDealId ||
-                    0
-                );
-
-            if (!dealId) {
-                const orderId =
-                    payment?.metadata?.orderId;
-
-                if (orderId) {
-                    dealId =
-                        await findExistingBitrixDeal(
-                            orderId
-                        );
-                }
-            }
-
-            if (dealId) {
-                await moveBitrixDealToPaid({
-                    dealId,
+            const dealId =
+                await syncPaidOrderToBitrix(
                     payment
-                });
+                );
 
-                console.log(
-                    `YooKassa payment ${paymentId}: Bitrix24 deal ${dealId} moved to ${BITRIX_STAGE_PAID}`
-                );
-            } else {
-                console.warn(
-                    `YooKassa payment ${paymentId}: Bitrix24 deal not found; Telegram notification already processed`
-                );
-            }
+            console.log(
+                `YooKassa payment ${paymentId}: paid order synced to Bitrix24 deal ${dealId}`
+            );
         } catch (bitrixError) {
             console.error(
                 'YooKassa Bitrix24 paid sync error:',
@@ -9964,6 +10074,24 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                     telegramError.message
                 );
             }
+
+
+            try {
+                const dealId =
+                    await syncPaidOrderToBitrix(
+                        payment
+                    );
+
+                console.log(
+                    `YooKassa payment ${paymentId}: paid order synced to Bitrix24 by success-page fallback, deal ${dealId}`
+                );
+            } catch (bitrixError) {
+                console.error(
+                    'RTN paid order Bitrix24 fallback error:',
+                    bitrixError.response?.data ||
+                    bitrixError.message
+                );
+            }
         }
 
         return res.json({
@@ -10123,47 +10251,9 @@ app.post('/api/create-payment', async (req, res) => {
             `YooKassa receipt prepared: order=${String(orderId || 'NO_ID')}, email=yes, phone=yes, items=${receiptItems.length}`
         );
 
-        // Сразу фиксируем попытку заказа в Telegram.
-        // Ошибка Telegram НЕ должна ломать оплату.
-        sendOrderAttemptToTelegram({
-            amount: paymentAmount,
-            items,
-            customer,
-            delivery,
-            orderId,
-            promoCode,
-            comment
-        }).catch(error => {
-            console.error(
-                'RTN order attempt Telegram error:',
-                error.response?.data ||
-                error.message
-            );
-        });
-
-        // Сначала фиксируем заказ в Bitrix24.
-        // Даже если ЮKassa временно не работает, заявка не потеряется.
-        let bitrixDealId = null;
-
-        try {
-            bitrixDealId =
-                await syncOrderToBitrix({
-                    orderId,
-                    amount: paymentAmount,
-                    items,
-                    customer,
-                    delivery,
-                    comment,
-                    promoCode
-                });
-        } catch (bitrixError) {
-            // Ошибка CRM не должна блокировать оплату.
-            console.error(
-                'Bitrix24 order sync error:',
-                bitrixError.response?.data ||
-                bitrixError.message
-            );
-        }
+        // До подтвержденной оплаты заказ не отправляем
+        // ни в Telegram, ни в Bitrix24, ни в 1С.
+        const bitrixDealId = null;
 
         const paymentData = {
             amount: {
@@ -10286,19 +10376,6 @@ app.post('/api/create-payment', async (req, res) => {
             return res.status(500).json({
                 error:
                     'ЮKassa не вернула ссылку на оплату'
-            });
-        }
-
-        if (bitrixDealId) {
-            markBitrixPaymentCreated(
-                bitrixDealId,
-                response.data
-            ).catch(error => {
-                console.error(
-                    'Bitrix24 payment update error:',
-                    error.response?.data ||
-                    error.message
-                );
             });
         }
 
