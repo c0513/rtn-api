@@ -340,6 +340,12 @@ function extractContactPhotoUrl(value) {
     return '';
 }
 
+function normalizeCrmDateOnly(value) {
+    const raw = String(value || '').trim();
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : '';
+}
+
 function parseSecondaryAddress(value) {
     const text = clean(value, 500);
     const houseMatch = text.match(/(?:^|;\s*)Дом:\s*([^;]+)/i);
@@ -657,8 +663,8 @@ async function getAccountBitrixProfile(user) {
         apartmentOffice: secondaryAddress.apartmentOffice,
         city: contact.ADDRESS_CITY || '',
         country: contact.ADDRESS_COUNTRY || '',
-        birthDate: contact.BIRTHDATE || '',
-        avatarUrl: extractContactPhotoUrl(contact.PHOTO),
+        birthDate: normalizeCrmDateOnly(contact.BIRTHDATE),
+        avatarUrl: '',
         hasPhoto: Boolean(contact.PHOTO)
     };
 }
