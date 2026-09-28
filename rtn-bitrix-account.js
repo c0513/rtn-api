@@ -991,6 +991,257 @@ async function getAccountOrderReference(user, dealId) {
     };
 }
 
+function referralCodeFromPublicId(publicId) {
+    const raw = String(publicId || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
+
+    if (!raw) return '';
+
+    const compact = raw.length > 16
+        ? raw.slice(0, 8) + raw.slice(-8)
+        : raw;
+
+    return `RTN-${compact}`;
+}
+
+async function resolveReferralCode(code) {
+    const normalized = clean(code, 80).toUpperCase();
+
+    if (!/^RTN-[A-Z0-9]{8,32}$/.test(normalized)) {
+        return null;
+    }
+
+    const db = getPool();
+    const [rows] = await db.execute(
+        `SELECT
+            id,
+            public_id,
+            email,
+            phone,
+            bitrix_contact_id
+         FROM users
+         WHERE status = 'active'
+           AND CONCAT(
+                'RTN-',
+                LEFT(REPLACE(UPPER(public_id), '-', ''), 8),
+                RIGHT(REPLACE(UPPER(public_id), '-', ''), 8)
+           ) = ?
+         LIMIT 1`,
+        [normalized]
+    );
+
+    return rows[0] || null;
+}
+
+function referralLevelFromXp(xp, memberStatuses = []) {
+    const set = new Set(
+        (Array.isArray(memberStatuses) ? memberStatuses : [])
+            .map(value => String(value || '').toUpperCase())
+    );
+
+    if (set.has('GOLD')) return 'gold';
+    if (set.has('SILVER')) return 'silver';
+    if (set.has('BRONZE')) return 'bronze';
+    if (xp >= 50000) return 'gold';
+    if (xp >= 15000) return 'silver';
+    return 'bronze';
+}
+
+async function getReferralFriends(user) {
+    const referralCode = referralCodeFromPublicId(user?.public_id);
+
+    if (!user?.id || !referralCode) {
+        return {
+            referralCode,
+            discountPercent: 5,
+            rewardCoins: 150,
+            friends: []
+        };
+    }
+
+    const optionsByField = await getDealUserFieldOptions();
+    const promoOptions = optionsByField.get(DEAL_FIELD_NAMES.promoCode);
+    let promoOptionId = null;
+
+    if (promoOptions) {
+        for (const [id, value] of promoOptions.entries()) {
+            if (String(value || '').toUpperCase() === referralCode) {
+                promoOptionId = Number(id);
+                break;
+            }
+        }
+    }
+
+    if (!promoOptionId) {
+        return {
+            referralCode,
+            discountPercent: 5,
+            rewardCoins: 150,
+            friends: []
+        };
+    }
+
+    const deals = await bitrixCall('crm.deal.list', {
+        order: { DATE_CREATE: 'DESC' },
+        filter: {
+            [DEAL_FIELD_NAMES.promoCode]: promoOptionId
+        },
+        select: [
+            'ID',
+            'CONTACT_ID',
+            'STAGE_ID',
+            'OPPORTUNITY',
+            'DATE_CREATE',
+            'CLOSEDATE',
+            DEAL_FIELD_NAMES.promoCode
+        ],
+        start: 0
+    });
+
+    const byContact = new Map();
+
+    for (const deal of Array.isArray(deals) ? deals : []) {
+        const contactId = Number(deal.CONTACT_ID || deal.contactId || 0);
+
+        if (!contactId) continue;
+        if (Number(user.bitrix_contact_id || 0) === contactId) continue;
+
+        if (!byContact.has(contactId)) {
+            byContact.set(contactId, deal);
+        }
+    }
+
+    const db = getPool();
+    const friends = [];
+
+    for (const [contactId, firstDeal] of byContact.entries()) {
+        const [rows] = await db.execute(
+            `SELECT
+                id,
+                public_id,
+                email,
+                phone,
+                first_name,
+                last_name,
+                bitrix_contact_id,
+                created_at,
+                status
+             FROM users
+             WHERE bitrix_contact_id = ?
+               AND status = 'active'
+             LIMIT 1`,
+            [contactId]
+        );
+
+        const friendUser = rows[0] || null;
+
+        if (!friendUser) {
+            const contact = await bitrixCall('crm.contact.get', {
+                id: contactId
+            });
+
+            friends.push({
+                id: `crm-${contactId}`,
+                displayName: clean(
+                    [contact?.NAME, contact?.LAST_NAME]
+                        .filter(Boolean)
+                        .join(' ') || 'ДРУГ RTN',
+                    180
+                ),
+                avatarUrl: '',
+                level: 'bronze',
+                memberStatuses: [],
+                ambassador: false,
+                xp: 0,
+                pendingXp: 0,
+                joinedAt: firstDeal?.DATE_CREATE || null,
+                rewardCoins: 150,
+                rewardAwarded: false,
+                accountLinked: false
+            });
+
+            continue;
+        }
+
+        let profile = null;
+        let history = { orders: [] };
+
+        try {
+            [profile, history] = await Promise.all([
+                getAccountBitrixProfile(friendUser),
+                getAccountOrders(friendUser)
+            ]);
+        } catch (error) {
+            console.error(
+                `RTN referral friend data error for ${contactId}:`,
+                error.message
+            );
+        }
+
+        const orders = Array.isArray(history?.orders)
+            ? history.orders
+            : [];
+
+        const xp = orders
+            .filter(order => order.status === 'completed')
+            .reduce(
+                (sum, order) =>
+                    sum + Number(order.xpEarned || order.amount || 0),
+                0
+            );
+
+        const pendingXp = orders
+            .filter(
+                order =>
+                    order.status !== 'completed' &&
+                    order.status !== 'cancelled'
+            )
+            .reduce(
+                (sum, order) =>
+                    sum + Number(order.xpPending || order.amount || 0),
+                0
+            );
+
+        const memberStatuses = Array.isArray(profile?.memberStatuses)
+            ? profile.memberStatuses
+            : [];
+
+        const displayName = [
+            friendUser.first_name,
+            friendUser.last_name
+                ? `${String(friendUser.last_name).slice(0, 1)}.`
+                : ''
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || 'ПОЛЬЗОВАТЕЛЬ RTN';
+
+        friends.push({
+            id: String(friendUser.public_id || friendUser.id),
+            displayName,
+            avatarUrl: '',
+            level: referralLevelFromXp(xp, memberStatuses),
+            memberStatuses,
+            ambassador: memberStatuses.includes('AMBASSADOR'),
+            xp,
+            pendingXp,
+            joinedAt: friendUser.created_at || firstDeal?.DATE_CREATE || null,
+            rewardCoins: 150,
+            rewardAwarded: false,
+            accountLinked: true
+        });
+    }
+
+    return {
+        referralCode,
+        discountPercent: 5,
+        rewardCoins: 150,
+        friends
+    };
+}
+
+
 
 module.exports = {
     bitrixCall,
@@ -1002,5 +1253,8 @@ module.exports = {
     getAccountBitrixProfile,
     updateAccountBitrixProfile,
     getAccountOrders,
-    getAccountOrderReference
+    getAccountOrderReference,
+    referralCodeFromPublicId,
+    resolveReferralCode,
+    getReferralFriends
 };
