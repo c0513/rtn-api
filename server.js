@@ -1882,13 +1882,40 @@ async function syncPromoFieldsToBitrix() {
                 sort: 3120
             });
 
-            await ensureBitrixSimpleField({
-                entity: 'contact',
-                fieldName: BITRIX_PROMO_FIELDS.personalPromo,
-                label: 'Персональный промокод',
-                userTypeId: 'string',
-                sort: 3125
-            });
+            const personalPromoField =
+                await ensureBitrixSimpleField({
+                    entity: 'contact',
+                    fieldName: BITRIX_PROMO_FIELDS.personalPromo,
+                    label: 'Персональный промокод',
+                    userTypeId: 'string',
+                    sort: 3125
+                });
+
+            if (personalPromoField?.ID) {
+                await bitrixCall(
+                    'crm.contact.userfield.update',
+                    {
+                        id: Number(personalPromoField.ID),
+                        fields: {
+                            SHOW_FILTER: 'Y',
+                            SHOW_IN_LIST: 'Y',
+                            EDIT_IN_LIST: 'Y',
+                            EDIT_FORM_LABEL: {
+                                ru: 'Персональный промокод',
+                                en: 'Personal promo code'
+                            },
+                            LIST_COLUMN_LABEL: {
+                                ru: 'Персональный промокод',
+                                en: 'Personal promo code'
+                            },
+                            LIST_FILTER_LABEL: {
+                                ru: 'Персональный промокод',
+                                en: 'Personal promo code'
+                            }
+                        }
+                    }
+                );
+            }
 
             await ensureBitrixSimpleField({
                 entity: 'deal',
