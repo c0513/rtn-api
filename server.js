@@ -7,7 +7,8 @@ const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const {
     awardReferralCoinsForPayment,
-    resolveReferralCode
+    resolveReferralCode,
+    getReferralCheckoutTerms
 } = require('./rtn-bitrix-account');
 
 const app = express();
@@ -10461,6 +10462,26 @@ app.post('/api/create-payment', async (req, res) => {
             ) {
                 return res.status(400).json({
                     error: 'Свой реферальный промокод использовать нельзя'
+                });
+            }
+
+            const referralTerms =
+                await getReferralCheckoutTerms(
+                    referralPromo,
+                    {
+                        email: normalizedEmail,
+                        phone: normalizedPhone
+                    }
+                );
+
+            if (
+                referralTerms?.firstOrderOnly &&
+                referralTerms?.eligible === false
+            ) {
+                return res.status(400).json({
+                    code: 'REFERRAL_FIRST_ORDER_ONLY',
+                    error:
+                        'Реферальная скидка действует только на первый заказ'
                 });
             }
         }
