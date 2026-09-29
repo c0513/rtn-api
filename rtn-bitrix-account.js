@@ -1,4 +1,11 @@
 const { getPool } = require('./db');
+const crypto = require('crypto');
+const {
+    calculateLoyaltyFromPurchases,
+    getLoyaltyBenefits,
+    upsertLoyaltyProfile,
+    awardReferralRewards
+} = require('./loyalty');
 
 function clean(value, max = 500) {
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -1306,6 +1313,151 @@ async function resolveReferralCode(code) {
     return null;
 }
 
+async function getContactCompletedPurchases(contactId) {
+    const normalizedContactId = Number(contactId || 0);
+
+    if (!normalizedContactId) {
+        return [];
+    }
+
+    const purchases = [];
+    let start = 0;
+
+    for (let page = 0; page < 20; page += 1) {
+        const result = await bitrixCall('crm.deal.list', {
+            order: {
+                DATE_CREATE: 'ASC'
+            },
+            filter: {
+                CONTACT_ID: normalizedContactId
+            },
+            select: [
+                'ID',
+                'STAGE_ID',
+                'OPPORTUNITY',
+                'DATE_CREATE',
+                'CLOSEDATE'
+            ],
+            start
+        });
+
+        const deals = Array.isArray(result) ? result : [];
+
+        for (const deal of deals) {
+            if (mapDealStatus(deal.STAGE_ID) !== 'completed') {
+                continue;
+            }
+
+            const amount = Math.max(
+                0,
+                Number(deal.OPPORTUNITY || 0)
+            );
+
+            if (amount <= 0) {
+                continue;
+            }
+
+            purchases.push({
+                orderId: String(deal.ID || ''),
+                amount,
+                date:
+                    deal.CLOSEDATE ||
+                    deal.DATE_CREATE ||
+                    null
+            });
+        }
+
+        if (deals.length < 50) {
+            break;
+        }
+
+        start += deals.length;
+    }
+
+    return purchases;
+}
+
+async function getAccountLoyaltySnapshot(user) {
+    let profile = null;
+
+    try {
+        profile = await getAccountBitrixProfile(user);
+    } catch (error) {
+        console.error(
+            'RTN loyalty profile status lookup error:',
+            error.message
+        );
+    }
+
+    const statuses = Array.isArray(profile?.memberStatuses)
+        ? profile.memberStatuses.map(value =>
+            String(value || '').toUpperCase()
+        )
+        : [];
+
+    const isBoss = statuses.includes('BOSS');
+    const isAmbassador = statuses.includes('AMBASSADOR');
+    const excludedFromTiers = isBoss || isAmbassador;
+
+    const contactId =
+        Number(
+            user?.bitrix_contact_id ||
+            await ensureAccountBitrixContact(user)
+        ) || 0;
+
+    const purchases = contactId
+        ? await getContactCompletedPurchases(contactId)
+        : [];
+
+    const calculated = calculateLoyaltyFromPurchases(
+        purchases
+    );
+
+    const stored = user?.id
+        ? await upsertLoyaltyProfile(user.id, calculated)
+        : calculated;
+
+    const programLevel = isBoss
+        ? 'BOSS'
+        : isAmbassador
+            ? 'AMBASSADOR'
+            : calculated.level;
+
+    return {
+        ...stored,
+        level: programLevel,
+        ordinaryLevel: calculated.level,
+        excludedFromTiers,
+        isAmbassador,
+        isBoss,
+        memberStatuses: statuses,
+        benefits: excludedFromTiers
+            ? {
+                level: programLevel,
+                friendDiscount: 5,
+                referralPercent: 0,
+                friendBonus: 0
+            }
+            : getLoyaltyBenefits(calculated.level)
+    };
+}
+
+function referralFriendKey(email, phone) {
+    const identity = [
+        normalizeEmail(email),
+        normalizePhone(phone)
+    ].filter(Boolean).join('|');
+
+    if (!identity) {
+        return '';
+    }
+
+    return crypto
+        .createHash('sha256')
+        .update(identity)
+        .digest('hex');
+}
+
 function referralLevelFromXp(xp, memberStatuses = []) {
     const set = new Set(
         (Array.isArray(memberStatuses) ? memberStatuses : [])
@@ -1315,8 +1467,8 @@ function referralLevelFromXp(xp, memberStatuses = []) {
     if (set.has('GOLD')) return 'gold';
     if (set.has('SILVER')) return 'silver';
     if (set.has('BRONZE')) return 'bronze';
-    if (xp >= 50000) return 'gold';
-    if (xp >= 15000) return 'silver';
+    if (xp >= 150000) return 'gold';
+    if (xp >= 50000) return 'silver';
     return 'bronze';
 }
 
@@ -1403,35 +1555,17 @@ async function awardReferralCoinsForPayment(payment, dealId) {
             return { ok: true, ignored: true, reason: 'self_referral' };
         }
 
-        try {
-            const referrerProfile = await getAccountBitrixProfile(referrer);
-            const statuses = Array.isArray(referrerProfile?.memberStatuses)
-                ? referrerProfile.memberStatuses.map(value =>
-                    String(value || '').toUpperCase()
-                )
-                : [];
-
-            if (
-                statuses.includes('AMBASSADOR') ||
-                statuses.includes('BOSS')
-            ) {
-                return {
-                    ok: true,
-                    ignored: true,
-                    reason: 'partner_program'
-                };
-            }
-        } catch (profileError) {
-            console.error(
-                'RTN referral status lookup error:',
-                profileError.message
-            );
-        }
-
-        const rewardCoins = Math.max(
-            1,
-            Math.round(paymentAmount * 0.05)
+        const loyalty = await getAccountLoyaltySnapshot(
+            referrer
         );
+
+        if (loyalty.excludedFromTiers) {
+            return {
+                ok: true,
+                ignored: true,
+                reason: 'partner_program'
+            };
+        }
 
         const deal = await bitrixCall('crm.deal.get', {
             id: Number(dealId)
@@ -1450,65 +1584,41 @@ async function awardReferralCoinsForPayment(payment, dealId) {
             };
         }
 
-        await ensureReferralRewardTable();
+        const reward = await awardReferralRewards({
+            paymentId,
+            dealId,
+            referrerUserId: Number(referrer.id),
+            promoCode,
+            orderAmount: paymentAmount,
+            level: loyalty.ordinaryLevel,
+            friendEmail: buyerEmail,
+            friendPhone: buyerPhone,
+            friendKey: referralFriendKey(
+                buyerEmail,
+                buyerPhone
+            )
+        });
 
-        const db = getPool();
-        const connection = await db.getConnection();
-        let awarded = false;
-
-        try {
-            await connection.beginTransaction();
-
-            const [rewardInsert] = await connection.execute(
-                `INSERT IGNORE INTO rtn_referral_rewards
-                    (
-                        payment_id,
-                        deal_id,
-                        referrer_user_id,
-                        promo_code,
-                        coins
-                    )
-                 VALUES (?, ?, ?, ?, ?)`,
-                [
-                    paymentId,
-                    Number(dealId),
-                    Number(referrer.id),
-                    promoCode,
-                    rewardCoins
-                ]
-            );
-
-            if (Number(rewardInsert?.affectedRows || 0) > 0) {
-                await connection.execute(
-                    `INSERT INTO rhino_coin_accounts
-                        (user_id, balance)
-                     VALUES (?, ?)
-                     ON DUPLICATE KEY UPDATE
-                        balance = COALESCE(balance, 0) + VALUES(balance)`,
-                    [Number(referrer.id), rewardCoins]
-                );
-
-                awarded = true;
-            }
-
-            await connection.commit();
-        } catch (error) {
+        if (!reward?.ignored) {
             try {
-                await connection.rollback();
-            } catch {}
+                const markerParts = [
+                    `${Number(reward.totalAwarded || reward.rewardCoins || 0)} RC`,
+                    `${Number(reward.rewardPercent || 0)}%`
+                ];
 
-            throw error;
-        } finally {
-            connection.release();
-        }
+                if (Number(reward.friendBonusCoins || 0) > 0) {
+                    markerParts.push(
+                        `+${Number(reward.friendBonusCoins)} RC friend`
+                    );
+                }
 
-        if (!existingMarker) {
-            try {
+                markerParts.push(paymentId);
+
                 await bitrixCall('crm.deal.update', {
                     id: Number(dealId),
                     fields: {
                         [DEAL_FIELD_NAMES.referralReward]:
-                            `${rewardCoins} RC · 5% · ${paymentId}`
+                            markerParts.join(' · ')
                     }
                 });
             } catch (markerError) {
@@ -1520,12 +1630,9 @@ async function awardReferralCoinsForPayment(payment, dealId) {
         }
 
         return {
-            ok: true,
-            ignored: !awarded,
-            reason: awarded ? null : 'already_awarded',
-            rewardCoins: awarded ? rewardCoins : 0,
-            rewardPercent: 5,
-            referrerUserId: Number(referrer.id)
+            ...reward,
+            referrerUserId: Number(referrer.id),
+            loyaltyLevel: loyalty.ordinaryLevel
         };
     } finally {
         referralRewardLocks.delete(paymentId);
@@ -1618,16 +1725,44 @@ async function getReferralFriends(user) {
     const referralCode =
         clean(ownerProfile?.personalPromoCode, 80).toUpperCase() ||
         referralCodeFromPublicId(user?.public_id);
-    const rewardPercent =
-        ownerIsAmbassador || ownerIsBoss
-            ? 0
-            : 5;
-    const rewardCoins = 0;
+
+    let ownerLoyalty = null;
+
+    if (!ownerIsAmbassador && !ownerIsBoss) {
+        try {
+            ownerLoyalty = await getAccountLoyaltySnapshot(user);
+        } catch (error) {
+            console.error(
+                'RTN referral owner loyalty error:',
+                error.message
+            );
+        }
+    }
+
+    const ownerBenefits = ownerIsAmbassador || ownerIsBoss
+        ? {
+            friendDiscount: 5,
+            referralPercent: 0,
+            friendBonus: 0
+        }
+        : (
+            ownerLoyalty?.benefits ||
+            getLoyaltyBenefits('BRONZE')
+        );
+    const rewardPercent = Number(
+        ownerBenefits.referralPercent || 0
+    );
+    const rewardCoins = Number(
+        ownerBenefits.friendBonus || 0
+    );
+    const discountPercent = Number(
+        ownerBenefits.friendDiscount || 5
+    );
 
     if (!user?.id || !referralCode) {
         return {
             referralCode,
-            discountPercent: 5,
+            discountPercent,
             rewardPercent,
             rewardCoins,
             friends: []
@@ -1650,7 +1785,7 @@ async function getReferralFriends(user) {
     if (!promoOptionId) {
         return {
             referralCode,
-            discountPercent: 5,
+            discountPercent,
             rewardPercent,
             rewardCoins,
             friends: []
@@ -1822,7 +1957,7 @@ async function getReferralFriends(user) {
 
     return {
         referralCode,
-        discountPercent: 5,
+        discountPercent,
         rewardPercent,
         rewardCoins,
         friends
@@ -2255,6 +2390,7 @@ module.exports = {
     getAccountOrderReference,
     referralCodeFromPublicId,
     resolveReferralCode,
+    getAccountLoyaltySnapshot,
     awardReferralCoinsForPayment,
     getReferralFriends,
     getAmbassadorSales,
