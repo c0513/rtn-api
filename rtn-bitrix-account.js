@@ -1458,6 +1458,67 @@ function referralFriendKey(email, phone) {
         .digest('hex');
 }
 
+
+async function getReferralCheckoutTerms(code, buyer = {}) {
+    const referrer = await resolveReferralCode(code);
+
+    if (!referrer?.id) {
+        return null;
+    }
+
+    const loyalty = await getAccountLoyaltySnapshot(referrer);
+    const firstOrderOnly = !Boolean(loyalty.excludedFromTiers);
+    let eligible = true;
+    let completedOrders = 0;
+
+    if (firstOrderOnly) {
+        try {
+            const buyerContactId = await findContactId({
+                email: buyer?.email,
+                phone: buyer?.phone
+            });
+
+            if (buyerContactId) {
+                const completedPurchases =
+                    await getContactCompletedPurchases(
+                        buyerContactId
+                    );
+
+                completedOrders =
+                    completedPurchases.length;
+                eligible = completedOrders === 0;
+            }
+        } catch (error) {
+            console.error(
+                'RTN referral first-order lookup error:',
+                error.message
+            );
+
+            // Не даём временной ошибке Bitrix заблокировать оплату.
+            // Финальная защита от повторных начислений остаётся идемпотентной.
+            eligible = true;
+        }
+    }
+
+    return {
+        referrer,
+        level: loyalty.level,
+        ordinaryLevel: loyalty.ordinaryLevel,
+        firstOrderOnly,
+        eligible,
+        completedOrders,
+        discountPercent: Number(
+            loyalty?.benefits?.friendDiscount || 5
+        ),
+        rewardPercent: Number(
+            loyalty?.benefits?.referralPercent || 0
+        ),
+        friendBonus: Number(
+            loyalty?.benefits?.friendBonus || 0
+        )
+    };
+}
+
 function referralLevelFromXp(xp, memberStatuses = []) {
     const set = new Set(
         (Array.isArray(memberStatuses) ? memberStatuses : [])
@@ -2391,6 +2452,7 @@ module.exports = {
     referralCodeFromPublicId,
     resolveReferralCode,
     getAccountLoyaltySnapshot,
+    getReferralCheckoutTerms,
     awardReferralCoinsForPayment,
     getReferralFriends,
     getAmbassadorSales,
