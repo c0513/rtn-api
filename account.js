@@ -11,16 +11,23 @@ const {
     getAccountOrderReference,
     referralCodeFromPublicId,
     resolveReferralCode,
+    getAccountLoyaltySnapshot,
     getReferralFriends,
     getAmbassadorSales,
     getBossSales
 } = require('./rtn-bitrix-account');
 const { getOrderReceipt } = require('./rtn-yookassa-account');
+const {
+    getCoinHistory,
+    startLoyaltyMaintenanceScheduler
+} = require('./loyalty');
 
 const SESSION_COOKIE = 'rtn_session';
 const RTN_ADMIN_EMAIL = normalizeEmail(process.env.RTN_ADMIN_EMAIL || 'perervamax@yandex.ru');
 const SESSION_DAYS = Math.max(1, Number(process.env.RTN_SESSION_DAYS || 30));
 const SESSION_MAX_AGE = SESSION_DAYS * 24 * 60 * 60;
+
+startLoyaltyMaintenanceScheduler();
 
 function cleanText(value, max = 255) {
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -1108,10 +1115,27 @@ function createAccountRouter() {
                 resolvedCode = referralCodeFromPublicId(referrer.public_id);
             }
 
+            const loyalty = await getAccountLoyaltySnapshot(
+                referrer
+            );
+
             return res.json({
                 ok: true,
                 code: resolvedCode,
-                discountPercent: 5
+                discountPercent: Number(
+                    loyalty?.benefits?.friendDiscount || 5
+                ),
+                rewardPercent: Number(
+                    loyalty?.benefits?.referralPercent || 0
+                ),
+                friendBonus: Number(
+                    loyalty?.benefits?.friendBonus || 0
+                ),
+                level: loyalty?.level || 'BRONZE',
+                ordinaryLevel:
+                    loyalty?.ordinaryLevel || 'BRONZE',
+                firstOrderOnly:
+                    !Boolean(loyalty?.excludedFromTiers)
             });
         } catch (error) {
             console.error('RTN referral resolve error:', error.message);
@@ -1184,6 +1208,71 @@ function createAccountRouter() {
 
             return res.status(502).json({
                 error: 'Не удалось загрузить продажи амбассадоров'
+            });
+        }
+    });
+
+    router.get('/loyalty', async (req, res) => {
+        try {
+            const user = await getAuthenticatedUser(req);
+
+            if (!user) {
+                return res.status(401).json({
+                    error: 'Требуется вход'
+                });
+            }
+
+            const loyalty = await getAccountLoyaltySnapshot(
+                user
+            );
+            const history = await getCoinHistory(
+                user.id,
+                60
+            );
+
+            return res.json({
+                ok: true,
+                level: loyalty.level,
+                ordinaryLevel: loyalty.ordinaryLevel,
+                excludedFromTiers:
+                    Boolean(loyalty.excludedFromTiers),
+                isAmbassador:
+                    Boolean(loyalty.isAmbassador),
+                isBoss:
+                    Boolean(loyalty.isBoss),
+                totalPurchaseAmount:
+                    Number(loyalty.totalPurchaseAmount || 0),
+                qualifyingPurchaseAmount:
+                    Number(loyalty.qualifyingPurchaseAmount || 0),
+                silverProgress:
+                    Number(loyalty.silverProgress || 0),
+                goldProgress:
+                    Number(loyalty.goldProgress || 0),
+                lastPurchaseAt:
+                    loyalty.lastPurchaseAt || null,
+                qualificationStartedAt:
+                    loyalty.qualificationStartedAt || null,
+                expiresAt:
+                    loyalty.expiresAt || null,
+                inactive:
+                    Boolean(loyalty.inactive),
+                progress: loyalty.progress,
+                benefits: loyalty.benefits,
+                coins: {
+                    available:
+                        Number(loyalty.availableCoins || 0),
+                    transactions: history
+                }
+            });
+        } catch (error) {
+            console.error(
+                'RTN loyalty profile error:',
+                error
+            );
+
+            return res.status(502).json({
+                error:
+                    'Не удалось загрузить программу лояльности'
             });
         }
     });
