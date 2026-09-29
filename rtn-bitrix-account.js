@@ -1618,15 +1618,17 @@ async function getReferralFriends(user) {
     const referralCode =
         clean(ownerProfile?.personalPromoCode, 80).toUpperCase() ||
         referralCodeFromPublicId(user?.public_id);
-    const rewardCoins =
+    const rewardPercent =
         ownerIsAmbassador || ownerIsBoss
             ? 0
-            : 150;
+            : 5;
+    const rewardCoins = 0;
 
     if (!user?.id || !referralCode) {
         return {
             referralCode,
             discountPercent: 5,
+            rewardPercent,
             rewardCoins,
             friends: []
         };
@@ -1649,6 +1651,7 @@ async function getReferralFriends(user) {
         return {
             referralCode,
             discountPercent: 5,
+            rewardPercent,
             rewardCoins,
             friends: []
         };
@@ -1680,17 +1683,28 @@ async function getReferralFriends(user) {
         if (!contactId) continue;
         if (Number(user.bitrix_contact_id || 0) === contactId) continue;
 
-        const rewardAwarded = Boolean(
-            clean(deal?.[DEAL_FIELD_NAMES.referralReward], 200)
+        const rewardMarker = clean(
+            deal?.[DEAL_FIELD_NAMES.referralReward],
+            200
         );
+        const rewardAwarded = Boolean(rewardMarker);
+        const rewardMatch = rewardMarker.match(/^(\d+)\s*RC\b/i);
+        const rewardCoinsEarned = rewardMatch
+            ? Number(rewardMatch[1] || 0)
+            : 0;
 
         if (!byContact.has(contactId)) {
             byContact.set(contactId, {
                 firstDeal: deal,
-                rewardAwarded
+                rewardAwarded,
+                rewardCoinsEarned
             });
-        } else if (rewardAwarded) {
-            byContact.get(contactId).rewardAwarded = true;
+        } else {
+            const current = byContact.get(contactId);
+            if (rewardAwarded) current.rewardAwarded = true;
+            current.rewardCoinsEarned =
+                Number(current.rewardCoinsEarned || 0) +
+                rewardCoinsEarned;
         }
     }
 
@@ -1700,6 +1714,9 @@ async function getReferralFriends(user) {
     for (const [contactId, referralInfo] of byContact.entries()) {
         const firstDeal = referralInfo.firstDeal;
         const rewardAwarded = Boolean(referralInfo.rewardAwarded);
+        const rewardCoinsEarned = Number(
+            referralInfo.rewardCoinsEarned || 0
+        );
         const [rows] = await db.execute(
             `SELECT
                 id,
@@ -1741,6 +1758,8 @@ async function getReferralFriends(user) {
                 pendingXp: 0,
                 joinedAt: firstDeal?.DATE_CREATE || null,
                 rewardCoins,
+                rewardCoinsEarned,
+                rewardPercent,
                 rewardAwarded,
                 accountLinked: false
             });
@@ -1794,6 +1813,8 @@ async function getReferralFriends(user) {
             pendingXp,
             joinedAt: friendUser.created_at || firstDeal?.DATE_CREATE || null,
             rewardCoins,
+            rewardCoinsEarned,
+            rewardPercent,
             rewardAwarded,
             accountLinked: true
         });
@@ -1802,6 +1823,7 @@ async function getReferralFriends(user) {
     return {
         referralCode,
         discountPercent: 5,
+        rewardPercent,
         rewardCoins,
         friends
     };
