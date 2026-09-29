@@ -55,6 +55,74 @@ function getClientIp(req) {
     return cleanText(forwarded || req.ip || req.socket?.remoteAddress || 'unknown', 100);
 }
 
+async function sendNewUserTelegram({ user, req, source }) {
+    const botToken = cleanText(
+        process.env.RTN_TELEGRAM_BOT_TOKEN ||
+        process.env.TELEGRAM_BOT_TOKEN ||
+        process.env.TG_BOT_TOKEN ||
+        '',
+        500
+    );
+    const chatId = cleanText(
+        process.env.RTN_TELEGRAM_CHAT_ID ||
+        process.env.TELEGRAM_CHAT_ID ||
+        process.env.TG_CHAT_ID ||
+        '',
+        200
+    );
+
+    if (!botToken || !chatId || !user) {
+        return false;
+    }
+
+    const name = cleanText(
+        [user.first_name || user.firstName, user.last_name || user.lastName]
+            .filter(Boolean)
+            .join(' '),
+        220
+    ) || '—';
+
+    const text = [
+        '🧬 RTN.PRO — НОВЫЙ ПОЛЬЗОВАТЕЛЬ',
+        '',
+        `Источник: ${cleanText(source, 120) || 'личный кабинет'}`,
+        `Имя: ${name}`,
+        `Email: ${cleanText(user.email, 254) || '—'}`,
+        `Телефон: ${cleanText(user.phone, 60) || '—'}`,
+        `RTN ID: ${cleanText(user.public_id || user.id, 120) || '—'}`,
+        `IP: ${getClientIp(req)}`
+    ].join('\n');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    try {
+        const response = await fetch(
+            `https://api.telegram.org/bot${botToken}/sendMessage`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    text,
+                    disable_web_page_preview: true
+                }),
+                signal: controller.signal
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error(`Telegram HTTP ${response.status}`);
+        }
+
+        return true;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 function consumeMemoryRateLimit(key, limit, windowMs) {
     const now = Date.now();
     const current = memoryRateLimits.get(key);
@@ -778,6 +846,7 @@ function createAccountRouter() {
             );
 
             let user = userRows[0];
+            let createdNewUser = false;
 
             if (user && user.status !== 'active') {
                 await connection.rollback();
@@ -822,6 +891,7 @@ function createAccountRouter() {
                 );
 
                 user = createdRows[0];
+                createdNewUser = true;
             } else {
                 await connection.execute(
                     `UPDATE users
@@ -876,6 +946,19 @@ function createAccountRouter() {
             }).catch(error => {
                 console.error('RTN account Bitrix contact link error:', error.message);
             });
+
+            if (createdNewUser) {
+                sendNewUserTelegram({
+                    user: publicRows[0],
+                    req,
+                    source: 'EMAIL OTP'
+                }).catch(error => {
+                    console.error(
+                        'RTN new user Telegram error:',
+                        error.message
+                    );
+                });
+            }
 
             return res.json({
                 ok: true,
@@ -980,16 +1063,29 @@ function createAccountRouter() {
 
             setSessionCookie(res, token);
 
-            ensureAccountBitrixContact({
+            const registeredUser = {
                 id: userId,
                 public_id: publicId,
                 email: email || null,
                 phone: phone || null,
                 first_name: firstName || null,
                 last_name: lastName || null
-            }).catch(error => {
+            };
+
+            ensureAccountBitrixContact(registeredUser).catch(error => {
                 console.error(
                     'RTN account register Bitrix sync error:',
+                    error.message
+                );
+            });
+
+            sendNewUserTelegram({
+                user: registeredUser,
+                req,
+                source: 'PASSWORD REGISTER'
+            }).catch(error => {
+                console.error(
+                    'RTN new user Telegram error:',
                     error.message
                 );
             });
