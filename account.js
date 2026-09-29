@@ -578,23 +578,11 @@ function createAccountRouter() {
                 ]
             );
 
-            try {
-                await sendVerificationCodeEmail({
-                    to: email,
-                    code,
-                    expiresMinutes: EMAIL_CODE_TTL_MINUTES
-                });
-            } catch (mailError) {
-                await db.execute(
-                    'UPDATE verification_codes SET used_at = NOW() WHERE id = ?',
-                    [insertResult.insertId]
-                ).catch(() => {});
-
-                throw mailError;
-            }
-
-            return res.json({
+            // Не держим интерфейс 10-15 секунд в ожидании SMTP.
+            // Код уже создан; письмо уходит в фоне сразу после ответа API.
+            res.json({
                 ok: true,
+                queued: true,
                 expiresMinutes: EMAIL_CODE_TTL_MINUTES,
                 resendAfterSeconds: EMAIL_CODE_RESEND_SECONDS,
                 remainingSendsInWindow: Math.max(
@@ -603,6 +591,24 @@ function createAccountRouter() {
                 ),
                 windowMinutes: EMAIL_CODE_WINDOW_MINUTES
             });
+
+            sendVerificationCodeEmail({
+                to: email,
+                code,
+                expiresMinutes: EMAIL_CODE_TTL_MINUTES
+            }).catch(async mailError => {
+                console.error(
+                    `RTN verification email delivery error for ${email}:`,
+                    mailError.message
+                );
+
+                await db.execute(
+                    'UPDATE verification_codes SET used_at = NOW() WHERE id = ?',
+                    [insertResult.insertId]
+                ).catch(() => {});
+            });
+
+            return;
         } catch (error) {
             console.error('RTN email send code error:', error);
 
