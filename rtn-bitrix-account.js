@@ -292,18 +292,8 @@ async function ensureAccountBitrixContact(user, extra = {}) {
 
     user.bitrix_contact_id = contactId;
 
-    // CRM-контакт является мастер-копией расширенного профиля.
-    // Каждый успешный вход освежает стандартные поля теми данными,
-    // которые уже есть у пользователя RTN.
-    try {
-        await syncAccountContactFields(contactId, user, extra);
-    } catch (error) {
-        console.error(
-            `RTN account Bitrix contact sync error for ${contactId}:`,
-            error.message
-        );
-    }
-
+    // Чтение личного кабинета не должно каждый раз писать в Bitrix.
+    // Поля контакта обновляются только через явное сохранение профиля.
     return contactId;
 }
 
@@ -447,7 +437,7 @@ async function getContactMemberStatuses(contact = {}) {
             }
 
             memberStatusCache = {
-                expiresAt: now + 15000,
+                expiresAt: now + 5 * 60 * 1000,
                 options
             };
         } catch (error) {
@@ -466,18 +456,6 @@ async function getOrCreatePersonalPromo({
     contactId,
     user
 }) {
-    try {
-        await ensureContactSimpleField(
-            RTN_PERSONAL_PROMO_FIELD,
-            'Персональный промокод'
-        );
-    } catch (error) {
-        console.error(
-            'RTN personal promo field ensure error:',
-            error.message
-        );
-    }
-
     const existing = clean(
         contact?.[RTN_PERSONAL_PROMO_FIELD],
         80
@@ -1382,11 +1360,16 @@ async function awardReferralCoinsForPayment(payment, dealId) {
     ).toUpperCase();
 
     const paymentId = clean(payment?.id, 100);
+    const paymentAmount = Math.max(
+        0,
+        Number(payment?.amount?.value || 0)
+    );
 
     if (
-        !/^RTN-[A-Z0-9]{8,32}$/.test(promoCode) ||
+        !promoCode ||
         !dealId ||
-        !paymentId
+        !paymentId ||
+        paymentAmount <= 0
     ) {
         return { ok: true, ignored: true };
     }
@@ -1419,6 +1402,36 @@ async function awardReferralCoinsForPayment(payment, dealId) {
         ) {
             return { ok: true, ignored: true, reason: 'self_referral' };
         }
+
+        try {
+            const referrerProfile = await getAccountBitrixProfile(referrer);
+            const statuses = Array.isArray(referrerProfile?.memberStatuses)
+                ? referrerProfile.memberStatuses.map(value =>
+                    String(value || '').toUpperCase()
+                )
+                : [];
+
+            if (
+                statuses.includes('AMBASSADOR') ||
+                statuses.includes('BOSS')
+            ) {
+                return {
+                    ok: true,
+                    ignored: true,
+                    reason: 'partner_program'
+                };
+            }
+        } catch (profileError) {
+            console.error(
+                'RTN referral status lookup error:',
+                profileError.message
+            );
+        }
+
+        const rewardCoins = Math.max(
+            1,
+            Math.round(paymentAmount * 0.05)
+        );
 
         const deal = await bitrixCall('crm.deal.get', {
             id: Number(dealId)
@@ -1461,7 +1474,7 @@ async function awardReferralCoinsForPayment(payment, dealId) {
                     Number(dealId),
                     Number(referrer.id),
                     promoCode,
-                    150
+                    rewardCoins
                 ]
             );
 
@@ -1472,7 +1485,7 @@ async function awardReferralCoinsForPayment(payment, dealId) {
                      VALUES (?, ?)
                      ON DUPLICATE KEY UPDATE
                         balance = COALESCE(balance, 0) + VALUES(balance)`,
-                    [Number(referrer.id), 150]
+                    [Number(referrer.id), rewardCoins]
                 );
 
                 awarded = true;
@@ -1495,7 +1508,7 @@ async function awardReferralCoinsForPayment(payment, dealId) {
                     id: Number(dealId),
                     fields: {
                         [DEAL_FIELD_NAMES.referralReward]:
-                            `150 RC · ${paymentId}`
+                            `${rewardCoins} RC · 5% · ${paymentId}`
                     }
                 });
             } catch (markerError) {
@@ -1510,7 +1523,8 @@ async function awardReferralCoinsForPayment(payment, dealId) {
             ok: true,
             ignored: !awarded,
             reason: awarded ? null : 'already_awarded',
-            rewardCoins: awarded ? 150 : 0,
+            rewardCoins: awarded ? rewardCoins : 0,
+            rewardPercent: 5,
             referrerUserId: Number(referrer.id)
         };
     } finally {
