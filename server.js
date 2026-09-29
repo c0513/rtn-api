@@ -3512,18 +3512,11 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             );
 
             try {
-                const alreadyRewardedFriend =
-                    await hasPreviousReferralReward(
+                const referralReward =
+                    await awardReferralCoinsForPayment(
+                        payment,
                         dealId
                     );
-
-                const referralReward =
-                    alreadyRewardedFriend
-                        ? { ok: true, ignored: true, rewardCoins: 0 }
-                        : await awardReferralCoinsForPayment(
-                            payment,
-                            dealId
-                        );
 
                 if (referralReward?.rewardCoins > 0) {
                     console.log(
@@ -10282,18 +10275,11 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                 );
 
                 try {
-                    const alreadyRewardedFriend =
-                        await hasPreviousReferralReward(
+                    const referralReward =
+                        await awardReferralCoinsForPayment(
+                            payment,
                             dealId
                         );
-
-                    const referralReward =
-                        alreadyRewardedFriend
-                            ? { ok: true, ignored: true, rewardCoins: 0 }
-                            : await awardReferralCoinsForPayment(
-                                payment,
-                                dealId
-                            );
 
                     if (referralReward?.rewardCoins > 0) {
                         console.log(
