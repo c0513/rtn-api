@@ -2113,6 +2113,35 @@ async function getBossSales(user, requestedPromo = '') {
         });
     }
 
+    // BOSS должен видеть не только контакты со статусом AMBASSADOR,
+    // но вообще все промокоды, которые существуют в поле сделок.
+    const promoOptionsByField = await getDealUserFieldOptions();
+    const allPromoOptions = promoOptionsByField.get(
+        DEAL_FIELD_NAMES.promoCode
+    );
+
+    const knownPromoCodes = new Set(
+        ambassadors.map(item => item.promoCode)
+    );
+
+    if (allPromoOptions) {
+        for (const [, rawCode] of allPromoOptions.entries()) {
+            const promoCode = clean(rawCode, 80).toUpperCase();
+
+            if (!promoCode || knownPromoCodes.has(promoCode)) {
+                continue;
+            }
+
+            ambassadors.push({
+                contactId: 0,
+                displayName: promoCode,
+                promoCode
+            });
+
+            knownPromoCodes.add(promoCode);
+        }
+    }
+
     const requested = clean(
         requestedPromo,
         80
