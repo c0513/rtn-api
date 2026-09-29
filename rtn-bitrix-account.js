@@ -170,6 +170,18 @@ function buildStandardContactFields(user = {}, extra = {}) {
     if (country) fields.ADDRESS_COUNTRY = country;
     if (birthDate) fields.BIRTHDATE = birthDate;
 
+    if (
+        Object.prototype.hasOwnProperty.call(
+            source,
+            'favoritePickupPoint'
+        )
+    ) {
+        fields[RTN_FAVORITE_PVZ_FIELD] =
+            serializeFavoritePickupPoint(
+                source.favoritePickupPoint
+            );
+    }
+
     const photoBase64 = clean(
         pick(source, 'photo_base64', 'photoBase64'),
         20 * 1024 * 1024
@@ -250,6 +262,15 @@ async function createAccountContact(user, extra = {}) {
 
 async function syncAccountContactFields(contactId, user, extra = {}) {
     if (!contactId) return false;
+
+    if (
+        Object.prototype.hasOwnProperty.call(
+            extra,
+            'favoritePickupPoint'
+        )
+    ) {
+        await ensureFavoritePickupPointField();
+    }
 
     await bitrixCall('crm.contact.update', {
         id: Number(contactId),
@@ -339,7 +360,9 @@ function extractContactPhotoUrl(value) {
 
 const RTN_MEMBER_STATUS_FIELD = 'UF_CRM_RTN_MEMBER_STATUS';
 const RTN_PERSONAL_PROMO_FIELD = 'UF_CRM_RTN_PERSONAL_PROMO';
+const RTN_FAVORITE_PVZ_FIELD = 'UF_CRM_RTN_FAVORITE_PVZ';
 let memberStatusCache = { expiresAt: 0, options: new Map() };
+let favoritePickupFieldReadyPromise = null;
 
 async function ensureContactSimpleField(fieldName, label) {
     const existing = await bitrixCall('crm.contact.userfield.list', {
@@ -415,6 +438,66 @@ async function ensureContactSimpleField(fieldName, label) {
     });
 
     return Array.isArray(refreshed) ? refreshed[0] || null : null;
+}
+
+
+function normalizeFavoritePickupPoint(value) {
+    let source = value;
+
+    if (typeof source === 'string') {
+        const raw = source.trim();
+
+        if (!raw) return null;
+
+        try {
+            source = JSON.parse(raw);
+        } catch {
+            return null;
+        }
+    }
+
+    if (!source || typeof source !== 'object') {
+        return null;
+    }
+
+    const code = clean(source.code, 80);
+    const name = clean(source.name, 120);
+    const address = clean(source.address, 220);
+    const city = clean(source.city, 120);
+    const cityCode = Math.max(0, Number(source.cityCode || 0));
+
+    if (!code || !address) {
+        return null;
+    }
+
+    return {
+        code,
+        name,
+        address,
+        city,
+        cityCode
+    };
+}
+
+function serializeFavoritePickupPoint(value) {
+    const point = normalizeFavoritePickupPoint(value);
+    return point ? JSON.stringify(point) : '';
+}
+
+async function ensureFavoritePickupPointField() {
+    if (favoritePickupFieldReadyPromise) {
+        return favoritePickupFieldReadyPromise;
+    }
+
+    favoritePickupFieldReadyPromise = ensureContactSimpleField(
+        RTN_FAVORITE_PVZ_FIELD,
+        'Любимый ПВЗ СДЭК'
+    ).catch(error => {
+        favoritePickupFieldReadyPromise = null;
+        throw error;
+    });
+
+    return favoritePickupFieldReadyPromise;
 }
 
 async function getContactMemberStatuses(contact = {}) {
@@ -907,6 +990,9 @@ async function getAccountBitrixProfile(user) {
         memberStatuses,
         personalPromoCode,
         referralCode: personalPromoCode || referralCodeFromPublicId(user?.public_id),
+        favoritePickupPoint: normalizeFavoritePickupPoint(
+            contact?.[RTN_FAVORITE_PVZ_FIELD]
+        ),
         isAmbassador,
         isBoss
     };
