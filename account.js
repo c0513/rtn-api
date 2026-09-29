@@ -1402,6 +1402,17 @@ function createAccountRouter() {
                     photoFilename: cleanText(
                         req.body?.photoFilename || 'rtn-profile.jpg',
                         180
+                    ),
+                    ...(
+                        Object.prototype.hasOwnProperty.call(
+                            req.body || {},
+                            'favoritePickupPoint'
+                        )
+                            ? {
+                                favoritePickupPoint:
+                                    req.body?.favoritePickupPoint ?? null
+                            }
+                            : {}
                     )
                 }
             );
