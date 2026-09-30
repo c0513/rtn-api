@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RTN Warehouse</title>
+<style>
+:root{--bg:#050505;--card:#0b0b0d;--line:#23232b;--text:#f7f7f8;--muted:#8b8b98;--c:#00f0ff;--g:#00ff6a;--o:#ff8a1f;--r:#ff496c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}.shell{max-width:900px;margin:auto;padding:18px}.hud{font:700 10px monospace;letter-spacing:.18em;color:var(--c)}h1{font-size:24px;margin:8px 0}.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);padding:16px;margin-top:14px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.input{background:#000;border:1px solid var(--line);color:#fff;padding:11px;outline:none}.scan{width:100%;background:#000;border:1px solid #a259ff;color:#fff;padding:16px;font:700 16px monospace;outline:none}.btn{border:1px solid var(--c);background:#061214;color:var(--c);padding:12px 16px;font-weight:900;cursor:pointer}.btn.green{border-color:var(--g);color:var(--g);background:#05120a}.btn:disabled{opacity:.35;cursor:not-allowed}.item{display:grid;grid-template-columns:1fr auto;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}.good{color:var(--g)}.warn{color:var(--o)}.bad{color:var(--r)}.hidden{display:none}.scanrow{font:12px monospace;padding:7px 0;border-bottom:1px dashed #26262c}.error{color:#ff899e;margin-top:8px;white-space:pre-wrap}@media(max-width:600px){.btn,.input{width:100%}}
+</style>
+</head>
+<body>
+<div class="shell">
+<div class="hud">// RTN.PRO · WAREHOUSE NODE</div>
+<h1>СБОРКА ЗАКАЗА</h1>
+<div class="muted">Bitrix24 → 1С → маркировка → SafeRoute</div>
+
+<div class="card">
+<div class="row">
+<input id="deal" class="input" inputmode="numeric" placeholder="ID сделки Bitrix24">
+<button id="open" class="btn">ОТКРЫТЬ</button>
+<button id="start" class="btn green" disabled>НАЧАТЬ СБОРКУ</button>
+</div>
+<div id="error" class="error"></div>
+</div>
+
+<div id="work" class="hidden">
+<div class="card">
+<div class="hud">ЗАКАЗ</div>
+<div id="order" style="font-weight:900;font-size:18px;margin-top:8px"></div>
+<div id="status" class="muted" style="margin-top:6px"></div>
+</div>
+
+<div class="card">
+<div class="hud">КОМПЛЕКТАЦИЯ</div>
+<div id="items"></div>
+</div>
+
+<div class="card">
+<div class="hud">DATAMATRIX</div>
+<div class="muted" style="margin:8px 0 12px">Сканируйте код и нажимайте Enter. Код считается собранным только после подтверждения 1С.</div>
+<input id="scan" class="scan" autocomplete="off" placeholder="ОТСКАНИРУЙТЕ DATAMATRIX" disabled>
+<div id="scanmsg" style="margin-top:8px"></div>
+<div id="scans" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+<button id="complete" class="btn green" disabled>ЗАВЕРШИТЬ СБОРКУ</button>
+<div id="final" class="muted" style="margin-top:10px"></div>
+<a id="label" class="btn green hidden" target="_blank" rel="noopener" style="display:inline-block;text-decoration:none;margin-top:12px">🖨 ПЕЧАТАТЬ ЭТИКЕТКУ</a>
+</div>
+</div>
+</div>
+<script>
+const $=id=>document.getElementById(id),q=new URLSearchParams(location.search);let s=null,t=null;
+$('deal').value=q.get('dealId')||q.get('deal_id')||'';
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,opt={}){const r=await fetch('/api/warehouse'+path,{credentials:'include',...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d}
+function label(v){return({preparing_1c:'ЖДЁМ 1С',picking:'СБОРКА',finalizing_1c:'ОТГРУЗКА В 1С',ready_for_label:'ГОТОВ К ЭТИКЕТКЕ',completed:'ГОТОВО',onec_error:'ОШИБКА 1С'}[v]||String(v||'—').toUpperCase())}
+function render(){if(!s){$('work').classList.add('hidden');$('start').disabled=false;return}$('work').classList.remove('hidden');$('start').disabled=true;$('order').textContent='#'+s.orderId+' · сделка '+s.dealId;$('status').textContent=label(s.status)+(s.onecDocumentId?' · 1С: '+s.onecDocumentId:'')+(s.error?' · '+s.error:'');const scans=s.scans||[];$('items').innerHTML=(s.items||[]).map(i=>{const n=Math.max(1,Math.ceil(Number(i.quantity||1))),c=scans.filter(x=>x.status==='valid'&&String(x.externalId||'')===String(i.externalId||'')).length,m=i.requiresMarking===true;return '<div class="item"><div><b>'+esc(i.name||i.externalId)+'</b><div class="muted">'+esc(i.externalId||'нет externalId')+(i.gtin?' · GTIN '+esc(i.gtin):'')+'</div></div><div class="'+(m?(c>=n?'good':'warn'):'muted')+'">'+(m?c+'/'+n:'БЕЗ МАРКИРОВКИ')+'</div></div>'}).join('');$('scans').innerHTML=scans.slice().reverse().map(x=>'<div class="scanrow"><span class="'+(x.status==='valid'?'good':x.status==='invalid'?'bad':'warn')+'">'+esc(x.status)+'</span> · GTIN '+esc(x.gtin||'—')+' · …'+esc(x.codeTail||'')+(x.productName?' · '+esc(x.productName):'')+(x.error?' · '+esc(x.error):'')+'</div>').join('');$('scan').disabled=s.status!=='picking';$('complete').disabled=s.status!=='picking';$('final').textContent=s.status==='finalizing_1c'?'Ждём оформления реализации/отгрузки и маркировки в 1С…':s.status==='ready_for_label'?'1С подтвердила отгрузку. Следующий шаг — транспортная этикетка SafeRoute.':'';if(s.labelUrl){$('label').href=s.labelUrl;$('label').classList.remove('hidden')}else{$('label').classList.add('hidden');$('label').style.display='none'}if(s.status==='picking')setTimeout(()=>$('scan').focus(),30)}
+async function load(){try{$('error').textContent='';const d=await api('/deal/'+encodeURIComponent($('deal').value.trim()));s=d.session;render()}catch(e){$('error').textContent=e.message}}
+async function start(){try{const d=await api('/deal/'+encodeURIComponent($('deal').value.trim())+'/start',{method:'POST',body:'{}'});s=d.session;render();poll()}catch(e){$('error').textContent=e.message}}
+async function refresh(){if(!s)return;try{const d=await api('/session/'+s.id);s=d.session;render()}catch{}}
+function poll(){clearInterval(t);t=setInterval(refresh,1800)}
+async function scan(code){if(!code.trim())return;$('scanmsg').textContent='Проверяем в 1С…';try{await api('/session/'+s.id+'/scan',{method:'POST',body:JSON.stringify({code})});$('scanmsg').textContent='Код принят. Ждём ответ 1С.';await refresh()}catch(e){$('scanmsg').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function complete(){try{const d=await api('/session/'+s.id+'/complete',{method:'POST',body:'{}'});s=d.session;render();poll()}catch(e){$('error').textContent=e.message}}
+$('open').onclick=load;$('start').onclick=start;$('complete').onclick=complete;$('scan').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const v=e.currentTarget.value;e.currentTarget.value='';scan(v)}});if($('deal').value)load().then(poll);
+</script>
+</body>
+</html>

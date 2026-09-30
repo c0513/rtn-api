@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 const { getPool } = require('./db');
 const { getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { bitrixCall } = require('./rtn-bitrix-account');
@@ -501,6 +502,12 @@ function validateCompletion(session) {
 
 function createWarehouseRouter() {
     const router = express.Router();
+
+    router.get('/ui', (req, res) => {
+        return res.sendFile(
+            path.join(__dirname, 'warehouse-ui.html')
+        );
+    });
 
     router.get('/health', async (req, res) => {
         try {
