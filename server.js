@@ -175,21 +175,27 @@ async function getSafeRouteApi() {
         saferouteApiPromise = import('saferoute-api')
             .then(module => {
                 const candidates = [
-                    module?.default,
-                    module?.api,
+                    module?.default?.default,
                     module?.default?.api,
+                    module?.api,
+                    module?.default,
                     module
                 ];
 
-                return candidates.find(candidate =>
+                const api = candidates.find(candidate =>
                     candidate &&
                     typeof candidate === 'object' &&
-                    (
-                        candidate.widgets ||
-                        candidate.user ||
-                        candidate.other
-                    )
-                ) || module?.default || module;
+                    candidate.widgets &&
+                    candidate.user
+                );
+
+                if (!api) {
+                    throw new Error(
+                        'SafeRoute API export not found'
+                    );
+                }
+
+                return api;
             })
             .catch(error => {
                 saferouteApiPromise = null;
@@ -236,6 +242,81 @@ function normalizeSafeRouteWidgetUrl(value) {
     }
 
     return '';
+}
+
+function cleanSafeRouteReference(value, max = 120) {
+    return String(value || '')
+        .replace(/[\r\n\t]/g, '')
+        .trim()
+        .slice(0, max);
+}
+
+async function confirmPaidSafeRouteOrder(payment) {
+    if (!isSafeRouteConfigured()) {
+        return {
+            ok: false,
+            ignored: true,
+            reason: 'not_configured'
+        };
+    }
+
+    const metadata = payment?.metadata || {};
+    const orderId = cleanSafeRouteReference(
+        metadata.saferouteOrderId ||
+        metadata.saferouteCabinetId
+    );
+
+    if (!orderId) {
+        return {
+            ok: false,
+            ignored: true,
+            reason: 'no_saferoute_order'
+        };
+    }
+
+    const api = await getSafeRouteApi();
+
+    const result = await api.widgets.updateOrder(
+        orderId,
+        {
+            status: 'confirmed',
+            paymentMethod: 'online',
+            COD: false,
+            cmsId: cleanSafeRouteReference(
+                metadata.orderId,
+                100
+            ),
+            payment: true
+        },
+        {
+            token: SAFEROUTE_TOKEN,
+            shopId: SAFEROUTE_SHOP_ID
+        }
+    );
+
+    const status = String(result?.status || '');
+
+    if (
+        status &&
+        !['success', 'ok', '200'].includes(
+            status.toLowerCase()
+        )
+    ) {
+        const error = new Error(
+            result?.data?.message ||
+            result?.data?.code ||
+            'SafeRoute order confirmation failed'
+        );
+        error.safeRouteResult = result;
+        throw error;
+    }
+
+    return {
+        ok: true,
+        orderId,
+        cabinetId:
+            result?.data?.cabinetId || null
+    };
 }
 
 const YCP_ACCESS_TOKEN =
@@ -358,7 +439,21 @@ function orderFromCheckout({ orderId, amount, items, customer, delivery, comment
             method: cleanOrderValue(delivery?.method, 100),
             address: cleanOrderValue(delivery?.address, 1000),
             city: cleanOrderValue(delivery?.city, 200),
-            price: Math.max(0, Number(delivery?.price || 0))
+            price: Math.max(0, Number(delivery?.price || 0)),
+            provider: cleanOrderValue(delivery?.provider, 40),
+            saferouteOrderId: cleanSafeRouteReference(
+                delivery?.saferouteOrderId
+            ),
+            saferouteCabinetId: cleanSafeRouteReference(
+                delivery?.saferouteCabinetId
+            ),
+            saferouteCheckoutSessId: cleanSafeRouteReference(
+                delivery?.saferouteCheckoutSessId
+            ),
+            company: cleanOrderValue(
+                delivery?.company,
+                120
+            )
         },
         items: (Array.isArray(items) ? items : []).map(item => ({
             externalId: cleanOrderValue(item?.externalId || item?.id, 150),
@@ -3560,6 +3655,28 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             paid: true,
             paidAt: payment?.captured_at || new Date().toISOString()
         });
+
+        // SafeRoute подтверждаем только после повторной проверки payment.succeeded
+        // напрямую через API ЮKassa. Сбой доставки не должен ломать оплату.
+        try {
+            const safeRouteResult =
+                await confirmPaidSafeRouteOrder(
+                    payment
+                );
+
+            if (safeRouteResult?.ok) {
+                console.log(
+                    `SafeRoute order ${safeRouteResult.orderId}: payment confirmed`
+                );
+            }
+        } catch (safeRouteError) {
+            console.error(
+                'SafeRoute paid order confirmation error:',
+                safeRouteError?.safeRouteResult ||
+                safeRouteError?.message ||
+                safeRouteError
+            );
+        }
 
         // Сначала Telegram. Подтверждение уже перепроверено через API ЮKassa,
         // поэтому сообщение означает реальную успешную оплату.
@@ -10752,7 +10869,22 @@ app.post('/api/create-payment', async (req, res) => {
                         : '',
 
                 promoCode:
-                    normalizePromoCode(promoCode)
+                    normalizePromoCode(promoCode),
+
+                saferouteOrderId:
+                    cleanSafeRouteReference(
+                        delivery?.saferouteOrderId
+                    ),
+
+                saferouteCabinetId:
+                    cleanSafeRouteReference(
+                        delivery?.saferouteCabinetId
+                    ),
+
+                saferouteCheckoutSessId:
+                    cleanSafeRouteReference(
+                        delivery?.saferouteCheckoutSessId
+                    )
             },
 
             receipt: {
@@ -13860,193 +13992,6 @@ app.post(
 );
 
 
-async function runSafeRouteStartupDiagnostics() {
-    if (!isSafeRouteConfigured()) {
-        console.warn('SafeRoute startup: credentials are not configured');
-        return;
-    }
-
-    try {
-        const imported = await import('saferoute-api');
-        console.log(
-            'SafeRoute module shape:',
-            JSON.stringify({
-                moduleKeys: Object.keys(imported || {}),
-                defaultKeys:
-                    imported?.default &&
-                    typeof imported.default === 'object'
-                        ? Object.keys(imported.default)
-                        : [],
-                apiKeys:
-                    imported?.api &&
-                    typeof imported.api === 'object'
-                        ? Object.keys(imported.api)
-                        : [],
-                defaultApiKeys:
-                    imported?.default?.api &&
-                    typeof imported.default.api === 'object'
-                        ? Object.keys(imported.default.api)
-                        : []
-            })
-        );
-
-        const api = await getSafeRouteApi();
-        const userApi =
-            api?.user ||
-            api?.default?.user ||
-            imported?.user ||
-            imported?.default?.user ||
-            imported?.api?.user ||
-            imported?.default?.api?.user;
-
-        if (!userApi?.getData) {
-            throw new Error(
-                'SafeRoute user.getData export not found'
-            );
-        }
-
-        const result = await userApi.getData(
-            SAFEROUTE_TOKEN
-        );
-
-        console.log(
-            'SafeRoute auth check:',
-            JSON.stringify({
-                ok:
-                    Number(result?.status || 0) >= 200 &&
-                    Number(result?.status || 0) < 300 &&
-                    !result?.error,
-                status:
-                    result?.status || null,
-                shopId:
-                    SAFEROUTE_SHOP_ID,
-                errorCode:
-                    result?.error?.code || null
-            })
-        );
-    } catch (error) {
-        console.error(
-            'SafeRoute auth check failed:',
-            error?.message || error
-        );
-    }
-
-    try {
-        const jsResponse = await axios.get(
-            'https://widgets.saferoute.ru/cart/api.js',
-            {
-                timeout: 7000,
-                responseType: 'text'
-            }
-        );
-
-        const js = String(jsResponse.data || '');
-        const terms = [
-            'apiScript',
-            'products',
-            'items',
-            'price',
-            'weight',
-            'width',
-            'height',
-            'length',
-            'regionName',
-            'fias',
-            'kladr',
-            'onSelect',
-            'onChange',
-            'callback',
-            'delivery',
-            'done',
-            'select',
-            'change',
-            'orderId',
-            'cabinetId',
-            'checkoutSessId',
-            'userEmail',
-            'userPhone',
-            'userName',
-            'paymentMethod',
-            'SafeRouteCartWidget'
-        ];
-
-        const hints = {};
-
-        for (const term of terms) {
-            const index = js.indexOf(term);
-
-            if (index >= 0) {
-                hints[term] = js
-                    .slice(
-                        Math.max(0, index - 180),
-                        Math.min(js.length, index + 420)
-                    )
-                    .replace(/\s+/g, ' ');
-            }
-        }
-
-        console.log(
-            'SafeRoute cart JS hints:',
-            JSON.stringify(hints)
-        );
-    } catch (error) {
-        console.warn(
-            'SafeRoute cart JS hint probe failed:',
-            error?.message || error
-        );
-    }
-
-    const candidates = [
-        'https://widgets.saferoute.ru/cart/api.js',
-        'https://widgets.saferoute.ru/checkout/api.js',
-        'https://widgets.saferoute.ru/api.js',
-        'https://widgets.saferoute.ru/cart.js',
-        'https://widgets.saferoute.ru/widget.js'
-    ];
-
-    for (const url of candidates) {
-        try {
-            const response = await axios.get(
-                url,
-                {
-                    timeout: 7000,
-                    responseType: 'text',
-                    validateStatus: () => true
-                }
-            );
-
-            const preview = String(
-                response.data || ''
-            )
-                .replace(/\s+/g, ' ')
-                .slice(0, 220);
-
-            console.log(
-                'SafeRoute widget asset probe:',
-                JSON.stringify({
-                    url,
-                    status: response.status,
-                    contentType:
-                        response.headers?.['content-type'] ||
-                        '',
-                    preview
-                })
-            );
-        } catch (error) {
-            console.log(
-                'SafeRoute widget asset probe:',
-                JSON.stringify({
-                    url,
-                    error:
-                        error?.code ||
-                        error?.message ||
-                        'failed'
-                })
-            );
-        }
-    }
-}
-
 // ============================================================
 // 404
 // ============================================================
@@ -14070,14 +14015,6 @@ app.listen(PORT, () => {
         `RTN API запущен на порту ${PORT}`
     );
 
-    setTimeout(() => {
-        runSafeRouteStartupDiagnostics().catch(error => {
-            console.error(
-                'SafeRoute startup diagnostics error:',
-                error?.message || error
-            );
-        });
-    }, 2500);
 
     if (isBitrixConfigured()) {
         setTimeout(async () => {
