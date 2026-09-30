@@ -1704,6 +1704,11 @@ async function runPaidCdekBackfill() {
                     metadata.deliveryCity,
                     200
                 ),
+            deliveryAddressPreview:
+                cdekBackfillClean(
+                    metadata.deliveryAddress,
+                    180
+                ),
             status:
                 ''
         };
