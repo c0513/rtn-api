@@ -1959,16 +1959,16 @@ async function runPaidCdekBackfill() {
                             44
                         )
                 },
-                to_location: {
-                    code:
-                        city.code,
-                    ...(isCourier
-                        ? {
+                ...(isCourier
+                    ? {
+                        to_location: {
+                            code:
+                                city.code,
                             address:
                                 deliveryAddress
                         }
-                        : {})
-                },
+                    }
+                    : {}),
                 ...(pickupPoint
                     ? {
                         delivery_point:
