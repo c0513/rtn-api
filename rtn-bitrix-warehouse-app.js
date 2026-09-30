@@ -4,7 +4,7 @@ function publicApiUrl(req) {
     return String(
         process.env.PUBLIC_API_URL ||
         ('https://' + req.get('host'))
-    ).replace(/\\/+$/, '');
+    ).replace(/\/+$/, '');
 }
 
 function installHtml(handlerUrl) {
