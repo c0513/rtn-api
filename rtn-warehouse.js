@@ -1,4 +1,5 @@
 const express = require('express');
+const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
 const { getPool } = require('./db');
@@ -22,6 +23,196 @@ function safeJson(value, fallback) {
         return parsed ?? fallback;
     } catch {
         return fallback;
+    }
+}
+
+function warehouseSigningSecret() {
+    return String(process.env.RTN_WAREHOUSE_SIGNING_SECRET || '');
+}
+
+function signWarehouseToken(payload) {
+    const secret = warehouseSigningSecret();
+    if (!secret) {
+        throw new Error('RTN_WAREHOUSE_SIGNING_SECRET is not configured');
+    }
+
+    const encoded = Buffer.from(
+        JSON.stringify(payload),
+        'utf8'
+    ).toString('base64url');
+
+    const signature = crypto
+        .createHmac('sha256', secret)
+        .update(encoded)
+        .digest('base64url');
+
+    return encoded + '.' + signature;
+}
+
+function verifyWarehouseToken(token) {
+    const raw = String(token || '');
+    const parts = raw.split('.');
+    if (parts.length !== 2) return null;
+
+    const [encoded, signature] = parts;
+    const secret = warehouseSigningSecret();
+    if (!secret) return null;
+
+    const expected = crypto
+        .createHmac('sha256', secret)
+        .update(encoded)
+        .digest('base64url');
+
+    if (!secureEqual(signature, expected)) return null;
+
+    try {
+        const payload = JSON.parse(
+            Buffer.from(encoded, 'base64url').toString('utf8')
+        );
+
+        if (
+            !payload ||
+            !payload.dealId ||
+            !payload.userId ||
+            !payload.exp ||
+            Date.now() > Number(payload.exp)
+        ) {
+            return null;
+        }
+
+        return payload;
+    } catch {
+        return null;
+    }
+}
+
+function configuredBitrixHost() {
+    try {
+        const url = new URL(
+            String(process.env.BITRIX_WEBHOOK_URL || '')
+        );
+
+        return String(url.hostname || '').toLowerCase();
+    } catch {
+        return '';
+    }
+}
+
+async function validateBitrixWidgetSession({
+    domain,
+    accessToken,
+    dealId
+}) {
+    const requestedHost =
+        String(domain || '')
+            .trim()
+            .toLowerCase()
+            .replace(/^https?:\/\//, '')
+            .replace(/\/.*$/, '');
+
+    const expectedHost =
+        configuredBitrixHost();
+
+    if (
+        !requestedHost ||
+        !expectedHost ||
+        requestedHost !== expectedHost
+    ) {
+        const error = new Error(
+            'Bitrix24 portal mismatch'
+        );
+        error.status = 403;
+        throw error;
+    }
+
+    const baseUrl =
+        'https://' +
+        requestedHost +
+        '/rest';
+
+    const profileResponse =
+        await axios.get(
+            baseUrl + '/profile.json',
+            {
+                params: {
+                    auth:
+                        String(accessToken || '')
+                },
+                timeout: 12000
+            }
+        );
+
+    if (
+        profileResponse.data?.error ||
+        !profileResponse.data?.result?.ID
+    ) {
+        const error = new Error(
+            profileResponse.data?.error_description ||
+            profileResponse.data?.error ||
+            'Bitrix24 auth failed'
+        );
+        error.status = 401;
+        throw error;
+    }
+
+    const dealResponse =
+        await axios.get(
+            baseUrl + '/crm.deal.get.json',
+            {
+                params: {
+                    auth:
+                        String(accessToken || ''),
+                    id:
+                        Number(dealId)
+                },
+                timeout: 12000
+            }
+        );
+
+    if (
+        dealResponse.data?.error ||
+        !dealResponse.data?.result
+    ) {
+        const error = new Error(
+            dealResponse.data?.error_description ||
+            dealResponse.data?.error ||
+            'Bitrix24 deal access failed'
+        );
+        error.status = 403;
+        throw error;
+    }
+
+    return {
+        userId:
+            String(
+                profileResponse.data.result.ID
+            ),
+        userName:
+            clean(
+                [
+                    profileResponse.data.result.NAME,
+                    profileResponse.data.result.LAST_NAME
+                ].filter(Boolean).join(' '),
+                160
+            ) || (
+                'Bitrix user ' +
+                profileResponse.data.result.ID
+            ),
+        deal:
+            dealResponse.data.result
+    };
+}
+
+function requireDealAccess(req, dealId) {
+    if (
+        req.warehouseDealId &&
+        Number(req.warehouseDealId) !==
+        Number(dealId)
+    ) {
+        const error =
+            new Error('Нет доступа к этой сделке');
+        error.status = 403;
+        throw error;
     }
 }
 
@@ -266,6 +457,23 @@ async function paymentLabelForDeal(deal) {
 
 async function requireWarehouse(req, res, next) {
     try {
+        const widgetSession =
+            verifyWarehouseToken(
+                req.get('x-rtn-warehouse-widget')
+            );
+
+        if (widgetSession) {
+            req.warehouseOperator =
+                widgetSession.userName ||
+                ('Bitrix user ' +
+                    widgetSession.userId);
+
+            req.warehouseDealId =
+                Number(widgetSession.dealId);
+
+            return next();
+        }
+
         const configuredToken = clean(process.env.RTN_WAREHOUSE_TOKEN, 500);
         const supplied = clean(req.get('x-rtn-warehouse-token'), 500);
 
@@ -503,6 +711,80 @@ function validateCompletion(session) {
 function createWarehouseRouter() {
     const router = express.Router();
 
+    router.post('/bitrix/session', async (req, res) => {
+        try {
+            const domain =
+                clean(req.body?.domain, 250);
+
+            const accessToken =
+                clean(
+                    req.body?.accessToken,
+                    1000
+                );
+
+            const dealId =
+                Number(req.body?.dealId || 0);
+
+            if (
+                !domain ||
+                !accessToken ||
+                !dealId
+            ) {
+                return res
+                    .status(400)
+                    .json({
+                        error:
+                            'Недостаточно данных Bitrix24'
+                    });
+            }
+
+            const verified =
+                await validateBitrixWidgetSession({
+                    domain,
+                    accessToken,
+                    dealId
+                });
+
+            const token =
+                signWarehouseToken({
+                    dealId,
+                    userId:
+                        verified.userId,
+                    userName:
+                        verified.userName,
+                    exp:
+                        Date.now() +
+                        2 * 60 * 60 * 1000
+                });
+
+            return res.json({
+                ok: true,
+                token,
+                dealId,
+                operator:
+                    verified.userName
+            });
+        } catch (error) {
+            console.error(
+                'RTN warehouse Bitrix session error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res
+                .status(
+                    Number(
+                        error.status ||
+                        500
+                    )
+                )
+                .json({
+                    error:
+                        error.message
+                });
+        }
+    });
+
     router.get('/ui', (req, res) => {
         return res.sendFile(
             path.join(__dirname, 'warehouse-ui.html')
@@ -525,6 +807,10 @@ function createWarehouseRouter() {
 
     router.get('/deal/:dealId', requireWarehouse, async (req, res) => {
         try {
+            requireDealAccess(
+                req,
+                Number(req.params.dealId)
+            );
             await ensureTables();
             const db = getPool();
             const [[row]] = await db.execute(
@@ -540,6 +826,11 @@ function createWarehouseRouter() {
 
     router.post('/deal/:dealId/start', requireWarehouse, async (req, res) => {
         try {
+            requireDealAccess(
+                req,
+                Number(req.params.dealId)
+            );
+
             const session = await startSession(
                 Number(req.params.dealId),
                 req.warehouseOperator || req.body?.operator || ''
@@ -553,6 +844,26 @@ function createWarehouseRouter() {
     router.get('/session/:id', requireWarehouse, async (req, res) => {
         const session = await readSession(req.params.id);
         if (!session) return res.status(404).json({ error: 'Сборка не найдена' });
+
+        try {
+            requireDealAccess(
+                req,
+                session.dealId
+            );
+        } catch (error) {
+            return res
+                .status(
+                    Number(
+                        error.status ||
+                        403
+                    )
+                )
+                .json({
+                    error:
+                        error.message
+                });
+        }
+
         return res.json({ ok: true, session });
     });
 
@@ -560,6 +871,12 @@ function createWarehouseRouter() {
         try {
             const session = await readSession(req.params.id);
             if (!session) return res.status(404).json({ error: 'Сборка не найдена' });
+
+            requireDealAccess(
+                req,
+                session.dealId
+            );
+
             if (session.status !== 'picking') {
                 return res.status(409).json({ error: 'Заказ ещё не готов к сканированию' });
             }
@@ -618,6 +935,26 @@ function createWarehouseRouter() {
             [Number(req.params.scanId), Number(req.params.id)]
         );
         if (!scan) return res.status(404).json({ error: 'Скан не найден' });
+
+        const session =
+            await readSession(
+                req.params.id
+            );
+
+        if (!session) {
+            return res
+                .status(404)
+                .json({
+                    error:
+                        'Сборка не найдена'
+                });
+        }
+
+        requireDealAccess(
+            req,
+            session.dealId
+        );
+
         if (scan.status === 'consumed') {
             return res.status(409).json({ error: 'Марка уже списана в 1С/ЧЗ и не может быть удалена' });
         }
@@ -630,6 +967,25 @@ function createWarehouseRouter() {
     router.post('/session/:id/complete', requireWarehouse, async (req, res) => {
         const session = await readSession(req.params.id);
         if (!session) return res.status(404).json({ error: 'Сборка не найдена' });
+
+        try {
+            requireDealAccess(
+                req,
+                session.dealId
+            );
+        } catch (error) {
+            return res
+                .status(
+                    Number(
+                        error.status ||
+                        403
+                    )
+                )
+                .json({
+                    error:
+                        error.message
+                });
+        }
 
         const validation = validateCompletion(session);
         if (!validation.ok) return res.status(409).json({ error: validation.error });
