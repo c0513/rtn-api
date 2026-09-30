@@ -4877,15 +4877,26 @@ async function enrichExistingBitrixContact(
             .join(' ')
             .trim();
 
+    const existingNameParts =
+        existingFullName
+            .split(/\s+/)
+            .filter(Boolean)
+            .length;
+
+    const incomingNameParts =
+        incomingName
+            .split(/\s+/)
+            .filter(Boolean)
+            .length;
+
     if (
         incomingName &&
         (
             looksLikeBitrixUsername(
                 existingFullName
             ) ||
-            incomingName.split(/\s+/)
-                .filter(Boolean)
-                .length >= 2
+            incomingNameParts >
+                existingNameParts
         )
     ) {
         if (parsed.name) {
