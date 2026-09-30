@@ -1789,6 +1789,10 @@ async function runCdekPickupRepairAndIntake() {
     }
 
     if (!repaired.length) {
+        console.error(
+            'CDEK pickup repair failures:',
+            JSON.stringify(failed)
+        );
         throw new Error(
             'No CDEK orders repaired for pickup'
         );
