@@ -2,69 +2,398 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#050505">
 <title>RTN Warehouse</title>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.23.0/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <style>
-:root{--bg:#050505;--card:#0b0b0d;--line:#23232b;--text:#f7f7f8;--muted:#8b8b98;--c:#00f0ff;--g:#00ff6a;--o:#ff8a1f;--r:#ff496c}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}.shell{max-width:900px;margin:auto;padding:18px}.hud{font:700 10px monospace;letter-spacing:.18em;color:var(--c)}h1{font-size:24px;margin:8px 0}.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);padding:16px;margin-top:14px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.input{background:#000;border:1px solid var(--line);color:#fff;padding:11px;outline:none}.scan{width:100%;background:#000;border:1px solid #a259ff;color:#fff;padding:16px;font:700 16px monospace;outline:none}.btn{border:1px solid var(--c);background:#061214;color:var(--c);padding:12px 16px;font-weight:900;cursor:pointer}.btn.green{border-color:var(--g);color:var(--g);background:#05120a}.btn:disabled{opacity:.35;cursor:not-allowed}.item{display:grid;grid-template-columns:1fr auto;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}.good{color:var(--g)}.warn{color:var(--o)}.bad{color:var(--r)}.hidden{display:none}.scanrow{font:12px monospace;padding:7px 0;border-bottom:1px dashed #26262c}.error{color:#ff899e;margin-top:8px;white-space:pre-wrap}@media(max-width:600px){.btn,.input{width:100%}}
+:root{--bg:#050505;--card:#0b0b0d;--card2:#101014;--line:#262630;--text:#f7f7f8;--muted:#9696a3;--c:#00f0ff;--g:#00ff6a;--o:#ff9d2e;--r:#ff496c;--violet:#9b5cff}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+button,input{font:inherit}
+.shell{max-width:920px;margin:auto;padding:18px 18px calc(24px + env(safe-area-inset-bottom))}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.hud{font:800 10px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.18em;color:var(--c)}
+h1{font-size:25px;line-height:1.1;margin:8px 0 5px}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);padding:16px;margin-top:14px;border-radius:4px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.input{background:#000;border:1px solid var(--line);color:#fff;padding:12px 13px;outline:none;min-height:44px}
+.scan{width:100%;background:#000;border:1px solid var(--violet);color:#fff;padding:16px;font:800 16px ui-monospace,SFMono-Regular,Consolas,monospace;outline:none}
+.btn{border:1px solid var(--c);background:#061214;color:var(--c);padding:12px 16px;font-weight:900;cursor:pointer;min-height:44px;text-transform:uppercase;letter-spacing:.02em}
+.btn.green{border-color:var(--g);color:var(--g);background:#05120a}
+.btn.violet{border-color:var(--violet);color:#d2baff;background:#10091a}
+.btn.ghost{border-color:var(--line);color:#d5d5da;background:#0a0a0c}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.item{display:grid;grid-template-columns:1fr auto;gap:12px;padding:13px 0;border-bottom:1px solid var(--line)}
+.item:last-child{border-bottom:0}.item b{line-height:1.35}
+.good{color:var(--g)}.warn{color:var(--o)}.bad{color:var(--r)}.hidden{display:none!important}
+.scanrow{font:12px ui-monospace,SFMono-Regular,Consolas,monospace;padding:8px 0;border-bottom:1px dashed #292930;overflow-wrap:anywhere}
+.error{color:#ff899e;margin-top:8px;white-space:pre-wrap}
+.mobilebar{display:flex;gap:8px;align-items:center}
+.badge{font:800 10px ui-monospace,SFMono-Regular,Consolas,monospace;padding:7px 9px;border:1px solid var(--line);color:var(--muted)}
+.camera{margin-top:12px;border:1px solid #30303a;background:#000;position:relative;overflow:hidden;border-radius:6px;aspect-ratio:4/3}
+.camera video{width:100%;height:100%;object-fit:cover;display:block;background:#000}
+.reticle{position:absolute;left:10%;right:10%;top:25%;bottom:25%;border:2px solid rgba(0,240,255,.85);box-shadow:0 0 0 9999px rgba(0,0,0,.18);pointer-events:none}
+.reticle:before,.reticle:after{content:"";position:absolute;left:12%;right:12%;height:1px;background:rgba(0,255,106,.75)}
+.reticle:before{top:33%}.reticle:after{bottom:33%}
+.cam-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.flash{position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:0;transition:opacity .18s}
+.flash.ok{background:rgba(0,255,106,.22);opacity:1}.flash.err{background:rgba(255,73,108,.24);opacity:1}
+.share{margin-top:14px;border:1px solid var(--line);background:var(--card2);padding:16px}
+.sharegrid{display:grid;grid-template-columns:180px 1fr;gap:18px;align-items:center}
+#qrcode{background:#fff;padding:10px;width:180px;height:180px;display:flex;align-items:center;justify-content:center}
+#qrcode img,#qrcode canvas{max-width:160px!important;max-height:160px!important}
+.sharelink{font:12px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;color:#c8c8d0}
+.mobile-only{display:none}
+body.mobile .desktop-only{display:none!important}
+body.mobile .mobile-only{display:block}
+body.mobile .shell{max-width:620px;padding:14px 12px calc(20px + env(safe-area-inset-bottom))}
+body.mobile h1{font-size:22px}
+body.mobile .card{padding:14px;margin-top:10px}
+body.mobile .btn{width:100%}
+body.mobile .cam-actions .btn{width:auto;flex:1}
+body.mobile .item{grid-template-columns:1fr auto}
+@media(max-width:640px){
+  .shell{padding:14px 12px calc(20px + env(safe-area-inset-bottom))}
+  .btn,.input{width:100%}
+  .top{align-items:flex-start}
+  .sharegrid{grid-template-columns:1fr}
+  #qrcode{margin:auto}
+}
 </style>
 </head>
 <body>
+<div id="flash" class="flash"></div>
 <div class="shell">
-<div class="hud">// RTN.PRO · WAREHOUSE NODE</div>
-<h1>СБОРКА ЗАКАЗА</h1>
-<div class="muted">Bitrix24 → 1С → маркировка → SafeRoute</div>
+  <div class="top">
+    <div>
+      <div class="hud">// RTN.PRO · WAREHOUSE NODE</div>
+      <h1>СБОРКА ЗАКАЗА</h1>
+      <div class="muted">Bitrix24 → 1С → маркировка → SafeRoute</div>
+    </div>
+    <div class="mobilebar">
+      <div id="modeBadge" class="badge">WEB</div>
+    </div>
+  </div>
 
-<div class="card">
-<div class="row">
-<input id="deal" class="input" inputmode="numeric" placeholder="ID сделки Bitrix24">
-<button id="open" class="btn">ОТКРЫТЬ</button>
-<button id="start" class="btn green" disabled>НАЧАТЬ СБОРКУ</button>
-</div>
-<div id="error" class="error"></div>
+  <div class="card desktop-only">
+    <div class="row">
+      <input id="deal" class="input" inputmode="numeric" placeholder="ID сделки Bitrix24">
+      <button id="open" class="btn">ОТКРЫТЬ</button>
+      <button id="start" class="btn green" disabled>НАЧАТЬ СБОРКУ</button>
+      <button id="mobileOpen" class="btn violet hidden">📱 ОТКРЫТЬ НА ТЕЛЕФОНЕ</button>
+    </div>
+    <div id="error" class="error"></div>
+    <div id="share" class="share hidden">
+      <div class="sharegrid">
+        <div id="qrcode"></div>
+        <div>
+          <div class="hud">МОБИЛЬНАЯ СБОРКА</div>
+          <div style="font-weight:900;font-size:18px;margin:7px 0">Отсканируйте QR телефоном</div>
+          <div class="muted">Ссылка привязана к этой сделке и действует 5 минут. После входа телефон получает отдельную складскую сессию.</div>
+          <div id="sharelink" class="sharelink" style="margin-top:12px"></div>
+          <button id="copyMobile" class="btn ghost" style="margin-top:12px">КОПИРОВАТЬ ССЫЛКУ</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mobileBoot" class="card mobile-only hidden">
+    <div class="hud">МОБИЛЬНАЯ СЕССИЯ</div>
+    <div id="mobileBootText" class="muted" style="margin-top:8px">Подключаемся к складу RTN…</div>
+  </div>
+
+  <div id="work" class="hidden">
+    <div class="card">
+      <div class="hud">ЗАКАЗ</div>
+      <div id="order" style="font-weight:900;font-size:18px;margin-top:8px"></div>
+      <div id="status" class="muted" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card">
+      <div class="hud">КОМПЛЕКТАЦИЯ</div>
+      <div id="items"></div>
+    </div>
+
+    <div class="card">
+      <div class="hud">DATAMATRIX</div>
+      <div class="desktop-only muted" style="margin:8px 0 12px">Сканируйте USB/ручным сканером и нажимайте Enter. Код считается собранным только после подтверждения 1С.</div>
+      <input id="scan" class="scan desktop-only" autocomplete="off" placeholder="ОТСКАНИРУЙТЕ DATAMATRIX" disabled>
+
+      <div class="mobile-only">
+        <div class="muted" style="margin:8px 0 10px">Наведите заднюю камеру на DataMatrix. После чтения код автоматически уйдёт на проверку в 1С.</div>
+        <button id="cameraStart" class="btn violet" disabled>📷 ВКЛЮЧИТЬ КАМЕРУ</button>
+        <div id="cameraBox" class="camera hidden">
+          <video id="camera" playsinline muted></video>
+          <div class="reticle"></div>
+        </div>
+        <div id="cameraActions" class="cam-actions hidden">
+          <button id="torch" class="btn ghost hidden">🔦 ФОНАРИК</button>
+          <button id="cameraStop" class="btn ghost">ОСТАНОВИТЬ</button>
+        </div>
+      </div>
+
+      <div id="scanmsg" style="margin-top:9px"></div>
+      <div id="scans" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <button id="complete" class="btn green" disabled>ЗАВЕРШИТЬ СБОРКУ</button>
+      <div id="final" class="muted" style="margin-top:10px"></div>
+      <a id="label" class="btn green hidden" target="_blank" rel="noopener" style="display:inline-block;text-decoration:none;margin-top:12px">🖨 ПЕЧАТАТЬ ЭТИКЕТКУ</a>
+    </div>
+  </div>
 </div>
 
-<div id="work" class="hidden">
-<div class="card">
-<div class="hud">ЗАКАЗ</div>
-<div id="order" style="font-weight:900;font-size:18px;margin-top:8px"></div>
-<div id="status" class="muted" style="margin-top:6px"></div>
-</div>
-
-<div class="card">
-<div class="hud">КОМПЛЕКТАЦИЯ</div>
-<div id="items"></div>
-</div>
-
-<div class="card">
-<div class="hud">DATAMATRIX</div>
-<div class="muted" style="margin:8px 0 12px">Сканируйте код и нажимайте Enter. Код считается собранным только после подтверждения 1С.</div>
-<input id="scan" class="scan" autocomplete="off" placeholder="ОТСКАНИРУЙТЕ DATAMATRIX" disabled>
-<div id="scanmsg" style="margin-top:8px"></div>
-<div id="scans" style="margin-top:10px"></div>
-</div>
-
-<div class="card">
-<button id="complete" class="btn green" disabled>ЗАВЕРШИТЬ СБОРКУ</button>
-<div id="final" class="muted" style="margin-top:10px"></div>
-<a id="label" class="btn green hidden" target="_blank" rel="noopener" style="display:inline-block;text-decoration:none;margin-top:12px">🖨 ПЕЧАТАТЬ ЭТИКЕТКУ</a>
-</div>
-</div>
-</div>
 <script>
-const $=id=>document.getElementById(id),q=new URLSearchParams(location.search),h=new URLSearchParams(location.hash.replace(/^#/,''));let s=null,t=null;const widgetToken=h.get('widget')||'';
-$('deal').value=q.get('dealId')||q.get('deal_id')||'';if(widgetToken){$('deal').readOnly=true;$('open').style.display='none';}
+const $=id=>document.getElementById(id);
+const q=new URLSearchParams(location.search);
+const h=new URLSearchParams(location.hash.replace(/^#/,''));
+let s=null,t=null,warehouseToken=h.get('widget')||sessionStorage.getItem('rtnWarehouseMobileToken')||'';
+let scannerControls=null,scannerReader=null,scanBusy=false,lastCameraCode='',lastCameraAt=0,torchOn=false;
+const isMobile=q.get('mobile')==='1'||Boolean(h.get('handoff'))||Boolean(sessionStorage.getItem('rtnWarehouseMobileToken'));
+if(isMobile)document.body.classList.add('mobile');
+$('modeBadge').textContent=isMobile?'MOBILE':'BITRIX';
+$('deal').value=q.get('dealId')||q.get('deal_id')||'';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(path,opt={}){const r=await fetch('/api/warehouse'+path,{credentials:'include',...opt,headers:{'Content-Type':'application/json',...(widgetToken?{'X-RTN-Warehouse-Widget':widgetToken}:{}),...(opt.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d}
-function label(v){return({preparing_1c:'ЖДЁМ 1С',picking:'СБОРКА',finalizing_1c:'ОТГРУЗКА В 1С',ready_for_label:'ГОТОВ К ЭТИКЕТКЕ',completed:'ГОТОВО',onec_error:'ОШИБКА 1С'}[v]||String(v||'—').toUpperCase())}
-function render(){if(!s){$('work').classList.add('hidden');$('start').disabled=false;return}$('work').classList.remove('hidden');$('start').disabled=true;$('order').textContent='#'+s.orderId+' · сделка '+s.dealId;$('status').textContent=label(s.status)+(s.onecDocumentId?' · 1С: '+s.onecDocumentId:'')+(s.error?' · '+s.error:'');const scans=s.scans||[];$('items').innerHTML=(s.items||[]).map(i=>{const n=Math.max(1,Math.ceil(Number(i.quantity||1))),c=scans.filter(x=>x.status==='valid'&&String(x.externalId||'')===String(i.externalId||'')).length,m=i.requiresMarking===true;return '<div class="item"><div><b>'+esc(i.name||i.externalId)+'</b><div class="muted">'+esc(i.externalId||'нет externalId')+(i.gtin?' · GTIN '+esc(i.gtin):'')+'</div></div><div class="'+(m?(c>=n?'good':'warn'):'muted')+'">'+(m?c+'/'+n:'БЕЗ МАРКИРОВКИ')+'</div></div>'}).join('');$('scans').innerHTML=scans.slice().reverse().map(x=>'<div class="scanrow"><span class="'+(x.status==='valid'?'good':x.status==='invalid'?'bad':'warn')+'">'+esc(x.status)+'</span> · GTIN '+esc(x.gtin||'—')+' · …'+esc(x.codeTail||'')+(x.productName?' · '+esc(x.productName):'')+(x.error?' · '+esc(x.error):'')+'</div>').join('');$('scan').disabled=s.status!=='picking';$('complete').disabled=s.status!=='picking';$('final').textContent=s.status==='finalizing_1c'?'Ждём оформления реализации/отгрузки и маркировки в 1С…':s.status==='ready_for_label'?'1С подтвердила отгрузку. Следующий шаг — транспортная этикетка SafeRoute.':'';if(s.labelUrl){$('label').href=s.labelUrl;$('label').classList.remove('hidden')}else{$('label').classList.add('hidden');$('label').style.display='none'}if(s.status==='picking')setTimeout(()=>$('scan').focus(),30)}
-async function load(){try{$('error').textContent='';const d=await api('/deal/'+encodeURIComponent($('deal').value.trim()));s=d.session;render()}catch(e){$('error').textContent=e.message}}
-async function start(){try{const d=await api('/deal/'+encodeURIComponent($('deal').value.trim())+'/start',{method:'POST',body:'{}'});s=d.session;render();poll()}catch(e){$('error').textContent=e.message}}
-async function refresh(){if(!s)return;try{const d=await api('/session/'+s.id);s=d.session;render()}catch{}}
+
+function authHeaders(){
+  return warehouseToken?{'X-RTN-Warehouse-Widget':warehouseToken}:{};
+}
+async function api(path,opt={}){
+  const r=await fetch('/api/warehouse'+path,{
+    credentials:'include',
+    ...opt,
+    headers:{'Content-Type':'application/json',...authHeaders(),...(opt.headers||{})}
+  });
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
+  return d;
+}
+async function exchangeHandoff(){
+  const handoff=h.get('handoff')||'';
+  if(!handoff)return;
+  $('mobileBoot').classList.remove('hidden');
+  $('mobileBootText').textContent='Проверяем мобильную ссылку…';
+  const r=await fetch('/api/warehouse/mobile/session',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({handoff})
+  });
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.token)throw new Error(d.error||'Не удалось открыть мобильную сессию');
+  warehouseToken=d.token;
+  sessionStorage.setItem('rtnWarehouseMobileToken',warehouseToken);
+  if(d.dealId)$('deal').value=String(d.dealId);
+  history.replaceState(null,'',location.pathname+'?dealId='+encodeURIComponent($('deal').value)+'&mobile=1');
+  $('mobileBootText').textContent='Мобильный склад подключён';
+  setTimeout(()=>$('mobileBoot').classList.add('hidden'),700);
+}
+function label(v){
+  return ({preparing_1c:'ЖДЁМ 1С',picking:'СБОРКА',finalizing_1c:'ОТГРУЗКА В 1С',ready_for_label:'ГОТОВ К ЭТИКЕТКЕ',completed:'ГОТОВО',onec_error:'ОШИБКА 1С'}[v]||String(v||'—').toUpperCase());
+}
+function flash(ok){
+  const el=$('flash');el.className='flash '+(ok?'ok':'err');
+  setTimeout(()=>{el.className='flash'},180);
+  if(navigator.vibrate)navigator.vibrate(ok?[55]:[70,50,70]);
+}
+function render(){
+  if(!s){
+    $('work').classList.add('hidden');
+    $('start').disabled=false;
+    $('mobileOpen').classList.toggle('hidden',!warehouseToken||!$('deal').value);
+    return;
+  }
+  $('work').classList.remove('hidden');
+  $('start').disabled=true;
+  $('mobileOpen').classList.toggle('hidden',isMobile||!warehouseToken);
+  $('order').textContent='#'+s.orderId+' · сделка '+s.dealId;
+  $('status').textContent=label(s.status)+(s.onecDocumentId?' · 1С: '+s.onecDocumentId:'')+(s.error?' · '+s.error:'');
+  const scans=s.scans||[];
+  $('items').innerHTML=(s.items||[]).map(i=>{
+    const n=Math.max(1,Math.ceil(Number(i.quantity||1)));
+    const c=scans.filter(x=>x.status==='valid'&&String(x.externalId||'')===String(i.externalId||'')).length;
+    const m=i.requiresMarking===true;
+    return '<div class="item"><div><b>'+esc(i.name||i.externalId)+'</b><div class="muted">'+esc(i.externalId||'нет externalId')+(i.gtin?' · GTIN '+esc(i.gtin):'')+'</div></div><div class="'+(m?(c>=n?'good':'warn'):'muted')+'">'+(m?c+'/'+n:'БЕЗ МАРКИРОВКИ')+'</div></div>';
+  }).join('');
+  $('scans').innerHTML=scans.slice().reverse().map(x=>'<div class="scanrow"><span class="'+(x.status==='valid'?'good':x.status==='invalid'?'bad':'warn')+'">'+esc(x.status)+'</span> · GTIN '+esc(x.gtin||'—')+' · …'+esc(x.codeTail||'')+(x.productName?' · '+esc(x.productName):'')+(x.error?' · '+esc(x.error):'')+'</div>').join('');
+  $('scan').disabled=s.status!=='picking';
+  $('cameraStart').disabled=s.status!=='picking';
+  $('complete').disabled=s.status!=='picking';
+  $('final').textContent=s.status==='finalizing_1c'?'Ждём оформления реализации/отгрузки и маркировки в 1С…':s.status==='ready_for_label'?'1С подтвердила отгрузку. Следующий шаг — транспортная этикетка SafeRoute.':'';
+  if(s.labelUrl){$('label').href=s.labelUrl;$('label').classList.remove('hidden');$('label').style.display='inline-block'}else{$('label').classList.add('hidden')}
+  if(!isMobile&&s.status==='picking')setTimeout(()=>$('scan').focus(),30);
+  if(isMobile&&s.status!=='picking'&&scannerControls)stopCamera();
+}
+async function load(){
+  try{
+    $('error').textContent='';
+    const d=await api('/deal/'+encodeURIComponent($('deal').value.trim()));
+    s=d.session;render();
+  }catch(e){
+    if(isMobile){$('scanmsg').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}
+    else $('error').textContent=e.message;
+  }
+}
+async function start(){
+  try{
+    const d=await api('/deal/'+encodeURIComponent($('deal').value.trim())+'/start',{method:'POST',body:'{}'});
+    s=d.session;render();poll();
+  }catch(e){$('error').textContent=e.message}
+}
+async function refresh(){
+  if(!s)return;
+  try{
+    const before=new Map((s.scans||[]).map(x=>[x.id,x.status]));
+    const d=await api('/session/'+s.id);
+    s=d.session;
+    const changed=(s.scans||[]).find(x=>before.has(x.id)&&before.get(x.id)==='pending_1c'&&(x.status==='valid'||x.status==='invalid'));
+    if(changed){
+      $('scanmsg').innerHTML=changed.status==='valid'?'<span class="good">✓ Марка подтверждена 1С</span>':'<span class="bad">✕ '+esc(changed.error||'Марка отклонена 1С')+'</span>';
+      flash(changed.status==='valid');
+    }
+    render();
+  }catch{}
+}
 function poll(){clearInterval(t);t=setInterval(refresh,1800)}
-async function scan(code){if(!code.trim())return;$('scanmsg').textContent='Проверяем в 1С…';try{await api('/session/'+s.id+'/scan',{method:'POST',body:JSON.stringify({code})});$('scanmsg').textContent='Код принят. Ждём ответ 1С.';await refresh()}catch(e){$('scanmsg').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
-async function complete(){try{const d=await api('/session/'+s.id+'/complete',{method:'POST',body:'{}'});s=d.session;render();poll()}catch(e){$('error').textContent=e.message}}
-$('open').onclick=load;$('start').onclick=start;$('complete').onclick=complete;$('scan').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const v=e.currentTarget.value;e.currentTarget.value='';scan(v)}});if($('deal').value)load().then(()=>{poll();if(!s)$('start').disabled=false;});
+async function scan(code){
+  const raw=String(code||'').trim();
+  if(!raw||!s||scanBusy)return;
+  scanBusy=true;
+  $('scanmsg').textContent='Проверяем в 1С…';
+  try{
+    await api('/session/'+s.id+'/scan',{method:'POST',body:JSON.stringify({code:raw})});
+    $('scanmsg').innerHTML='<span class="warn">Код принят. Ждём ответ 1С.</span>';
+    if(navigator.vibrate)navigator.vibrate(35);
+    await refresh();
+  }catch(e){
+    $('scanmsg').innerHTML='<span class="bad">'+esc(e.message)+'</span>';
+    flash(false);
+  }finally{
+    setTimeout(()=>{scanBusy=false},650);
+  }
+}
+async function complete(){
+  try{
+    const d=await api('/session/'+s.id+'/complete',{method:'POST',body:'{}'});
+    s=d.session;render();poll();
+  }catch(e){
+    if(isMobile)$('scanmsg').innerHTML='<span class="bad">'+esc(e.message)+'</span>';
+    else $('error').textContent=e.message;
+  }
+}
+async function openMobile(){
+  try{
+    $('mobileOpen').disabled=true;
+    const dealId=Number(s?.dealId||$('deal').value||0);
+    const d=await api('/mobile/handoff',{method:'POST',body:JSON.stringify({dealId})});
+    const url=location.origin+'/api/warehouse/ui?dealId='+encodeURIComponent(String(dealId))+'&mobile=1#handoff='+encodeURIComponent(d.handoff);
+    $('share').classList.remove('hidden');
+    $('sharelink').textContent=url;
+    $('qrcode').innerHTML='';
+    if(window.QRCode){
+      new QRCode($('qrcode'),{text:url,width:160,height:160,correctLevel:QRCode.CorrectLevel.M});
+    }else{
+      $('qrcode').innerHTML='<div style="color:#000;font-weight:900;text-align:center">QR не загрузился<br>используйте ссылку</div>';
+    }
+  }catch(e){
+    $('error').textContent=e.message;
+  }finally{
+    $('mobileOpen').disabled=false;
+  }
+}
+async function copyMobile(){
+  const v=$('sharelink').textContent;
+  if(!v)return;
+  await navigator.clipboard.writeText(v);
+  $('copyMobile').textContent='СКОПИРОВАНО ✓';
+  setTimeout(()=>$('copyMobile').textContent='КОПИРОВАТЬ ССЫЛКУ',1200);
+}
+async function startCamera(){
+  if(!s||s.status!=='picking')return;
+  if(!window.ZXingBrowser){
+    $('scanmsg').innerHTML='<span class="bad">Модуль камеры не загрузился. Проверьте интернет и обновите страницу.</span>';
+    return;
+  }
+  try{
+    $('cameraStart').disabled=true;
+    $('scanmsg').textContent='Запрашиваем доступ к камере…';
+    scannerReader=new ZXingBrowser.BrowserDatamatrixCodeReader();
+    $('cameraBox').classList.remove('hidden');
+    $('cameraActions').classList.remove('hidden');
+    scannerControls=await scannerReader.decodeFromVideoDevice(undefined,$('camera'),(result,error,controls)=>{
+      if(!result||scanBusy)return;
+      const code=typeof result.getText==='function'?result.getText():String(result.text||'');
+      const now=Date.now();
+      if(!code)return;
+      if(code===lastCameraCode&&now-lastCameraAt<3500)return;
+      lastCameraCode=code;lastCameraAt=now;
+      scan(code);
+    });
+    $('cameraStart').classList.add('hidden');
+    $('scanmsg').innerHTML='<span class="good">Камера активна — наведите на DataMatrix</span>';
+    if(scannerControls&&typeof scannerControls.switchTorch==='function')$('torch').classList.remove('hidden');
+  }catch(e){
+    $('cameraBox').classList.add('hidden');
+    $('cameraActions').classList.add('hidden');
+    $('cameraStart').classList.remove('hidden');
+    $('cameraStart').disabled=false;
+    $('scanmsg').innerHTML='<span class="bad">Не удалось открыть камеру: '+esc(e.message||e)+'</span>';
+  }
+}
+async function stopCamera(){
+  if(scannerControls){
+    try{await scannerControls.stop()}catch{}
+  }
+  scannerControls=null;scannerReader=null;torchOn=false;
+  $('cameraBox').classList.add('hidden');
+  $('cameraActions').classList.add('hidden');
+  $('cameraStart').classList.remove('hidden');
+  $('cameraStart').disabled=!s||s.status!=='picking';
+  $('torch').classList.add('hidden');
+}
+async function toggleTorch(){
+  if(!scannerControls||typeof scannerControls.switchTorch!=='function')return;
+  try{
+    torchOn=!torchOn;
+    await scannerControls.switchTorch(torchOn);
+    $('torch').textContent=torchOn?'🔦 ВЫКЛЮЧИТЬ':'🔦 ФОНАРИК';
+  }catch(e){
+    $('scanmsg').innerHTML='<span class="bad">Фонарик недоступен на этом телефоне</span>';
+  }
+}
+
+$('open').onclick=load;
+$('start').onclick=start;
+$('complete').onclick=complete;
+$('mobileOpen').onclick=openMobile;
+$('copyMobile').onclick=copyMobile;
+$('cameraStart').onclick=startCamera;
+$('cameraStop').onclick=stopCamera;
+$('torch').onclick=toggleTorch;
+$('scan').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const v=e.currentTarget.value;e.currentTarget.value='';scan(v)}});
+window.addEventListener('pagehide',()=>{if(scannerControls)scannerControls.stop()});
+
+(async()=>{
+  try{
+    if(h.get('handoff'))await exchangeHandoff();
+    if(warehouseToken){
+      $('deal').readOnly=true;
+      $('open').style.display='none';
+    }
+    if($('deal').value){
+      await load();poll();
+      if(!s)$('start').disabled=false;
+    }
+    if(isMobile&&!warehouseToken)throw new Error('Нет мобильной складской сессии');
+  }catch(e){
+    $('mobileBoot').classList.remove('hidden');
+    $('mobileBootText').innerHTML='<span class="bad">'+esc(e.message)+'</span>';
+  }
+})();
 </script>
 </body>
 </html>
