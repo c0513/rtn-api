@@ -173,7 +173,24 @@ let saferouteApiPromise = null;
 async function getSafeRouteApi() {
     if (!saferouteApiPromise) {
         saferouteApiPromise = import('saferoute-api')
-            .then(module => module.default || module)
+            .then(module => {
+                const candidates = [
+                    module?.default,
+                    module?.api,
+                    module?.default?.api,
+                    module
+                ];
+
+                return candidates.find(candidate =>
+                    candidate &&
+                    typeof candidate === 'object' &&
+                    (
+                        candidate.widgets ||
+                        candidate.user ||
+                        candidate.other
+                    )
+                ) || module?.default || module;
+            })
             .catch(error => {
                 saferouteApiPromise = null;
                 throw error;
@@ -13850,8 +13867,45 @@ async function runSafeRouteStartupDiagnostics() {
     }
 
     try {
+        const imported = await import('saferoute-api');
+        console.log(
+            'SafeRoute module shape:',
+            JSON.stringify({
+                moduleKeys: Object.keys(imported || {}),
+                defaultKeys:
+                    imported?.default &&
+                    typeof imported.default === 'object'
+                        ? Object.keys(imported.default)
+                        : [],
+                apiKeys:
+                    imported?.api &&
+                    typeof imported.api === 'object'
+                        ? Object.keys(imported.api)
+                        : [],
+                defaultApiKeys:
+                    imported?.default?.api &&
+                    typeof imported.default.api === 'object'
+                        ? Object.keys(imported.default.api)
+                        : []
+            })
+        );
+
         const api = await getSafeRouteApi();
-        const result = await api.user.getData(
+        const userApi =
+            api?.user ||
+            api?.default?.user ||
+            imported?.user ||
+            imported?.default?.user ||
+            imported?.api?.user ||
+            imported?.default?.api?.user;
+
+        if (!userApi?.getData) {
+            throw new Error(
+                'SafeRoute user.getData export not found'
+            );
+        }
+
+        const result = await userApi.getData(
             SAFEROUTE_TOKEN
         );
 
@@ -13873,6 +13927,61 @@ async function runSafeRouteStartupDiagnostics() {
     } catch (error) {
         console.error(
             'SafeRoute auth check failed:',
+            error?.message || error
+        );
+    }
+
+    try {
+        const jsResponse = await axios.get(
+            'https://widgets.saferoute.ru/cart/api.js',
+            {
+                timeout: 7000,
+                responseType: 'text'
+            }
+        );
+
+        const js = String(jsResponse.data || '');
+        const terms = [
+            'apiScript',
+            'products',
+            'items',
+            'price',
+            'weight',
+            'width',
+            'height',
+            'length',
+            'regionName',
+            'fias',
+            'kladr',
+            'onSelect',
+            'onChange',
+            'callback',
+            'delivery',
+            'SafeRouteCartWidget'
+        ];
+
+        const hints = {};
+
+        for (const term of terms) {
+            const index = js.indexOf(term);
+
+            if (index >= 0) {
+                hints[term] = js
+                    .slice(
+                        Math.max(0, index - 180),
+                        Math.min(js.length, index + 420)
+                    )
+                    .replace(/\s+/g, ' ');
+            }
+        }
+
+        console.log(
+            'SafeRoute cart JS hints:',
+            JSON.stringify(hints)
+        );
+    } catch (error) {
+        console.warn(
+            'SafeRoute cart JS hint probe failed:',
             error?.message || error
         );
     }
