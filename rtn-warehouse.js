@@ -462,7 +462,10 @@ async function requireWarehouse(req, res, next) {
                 req.get('x-rtn-warehouse-widget')
             );
 
-        if (widgetSession) {
+        if (
+            widgetSession &&
+            widgetSession.kind !== 'handoff'
+        ) {
             req.warehouseOperator =
                 widgetSession.userName ||
                 ('Bitrix user ' +
@@ -470,6 +473,9 @@ async function requireWarehouse(req, res, next) {
 
             req.warehouseDealId =
                 Number(widgetSession.dealId);
+
+            req.warehouseTokenPayload =
+                widgetSession;
 
             return next();
         }
@@ -747,6 +753,7 @@ function createWarehouseRouter() {
 
             const token =
                 signWarehouseToken({
+                    kind: 'widget',
                     dealId,
                     userId:
                         verified.userId,
@@ -784,6 +791,160 @@ function createWarehouseRouter() {
                 });
         }
     });
+
+    router.post(
+        '/mobile/handoff',
+        requireWarehouse,
+        async (req, res) => {
+            try {
+                const dealId =
+                    Number(
+                        req.body?.dealId ||
+                        req.warehouseDealId ||
+                        0
+                    );
+
+                if (!dealId) {
+                    return res
+                        .status(400)
+                        .json({
+                            error:
+                                'Не указана сделка'
+                        });
+                }
+
+                requireDealAccess(
+                    req,
+                    dealId
+                );
+
+                const payload =
+                    req.warehouseTokenPayload ||
+                    {};
+
+                const handoff =
+                    signWarehouseToken({
+                        kind:
+                            'handoff',
+                        dealId,
+                        userId:
+                            String(
+                                payload.userId ||
+                                req.warehouseOperator ||
+                                'warehouse'
+                            ),
+                        userName:
+                            clean(
+                                payload.userName ||
+                                req.warehouseOperator ||
+                                'RTN Warehouse',
+                                160
+                            ),
+                        jti:
+                            crypto
+                                .randomBytes(18)
+                                .toString('hex'),
+                        exp:
+                            Date.now() +
+                            5 * 60 * 1000
+                    });
+
+                return res.json({
+                    ok: true,
+                    handoff,
+                    dealId,
+                    expiresIn:
+                        300
+                });
+            } catch (error) {
+                return res
+                    .status(
+                        Number(
+                            error.status ||
+                            500
+                        )
+                    )
+                    .json({
+                        error:
+                            error.message
+                    });
+            }
+        }
+    );
+
+    router.post(
+        '/mobile/session',
+        async (req, res) => {
+            try {
+                const handoff =
+                    verifyWarehouseToken(
+                        clean(
+                            req.body?.handoff,
+                            4000
+                        )
+                    );
+
+                if (
+                    !handoff ||
+                    handoff.kind !==
+                        'handoff'
+                ) {
+                    return res
+                        .status(401)
+                        .json({
+                            error:
+                                'Ссылка на мобильный склад истекла или недействительна'
+                        });
+                }
+
+                const token =
+                    signWarehouseToken({
+                        kind:
+                            'mobile',
+                        dealId:
+                            Number(
+                                handoff.dealId
+                            ),
+                        userId:
+                            String(
+                                handoff.userId
+                            ),
+                        userName:
+                            clean(
+                                handoff.userName ||
+                                'RTN Warehouse',
+                                160
+                            ),
+                        exp:
+                            Date.now() +
+                            8 * 60 * 60 * 1000
+                    });
+
+                return res.json({
+                    ok: true,
+                    token,
+                    dealId:
+                        Number(
+                            handoff.dealId
+                        ),
+                    operator:
+                        clean(
+                            handoff.userName,
+                            160
+                        ),
+                    expiresIn:
+                        28800
+                });
+            } catch (error) {
+                return res
+                    .status(500)
+                    .json({
+                        error:
+                            error.message
+                    });
+            }
+        }
+    );
 
     router.get('/ui', (req, res) => {
         return res.sendFile(
@@ -1032,6 +1193,40 @@ function createWarehouseRouter() {
 
     router.post('/session/:id/shipping-document', requireWarehouse, async (req, res) => {
         await ensureTables();
+
+        const session =
+            await readSession(
+                req.params.id
+            );
+
+        if (!session) {
+            return res
+                .status(404)
+                .json({
+                    error:
+                        'Сборка не найдена'
+                });
+        }
+
+        try {
+            requireDealAccess(
+                req,
+                session.dealId
+            );
+        } catch (error) {
+            return res
+                .status(
+                    Number(
+                        error.status ||
+                        403
+                    )
+                )
+                .json({
+                    error:
+                        error.message
+                });
+        }
+
         const db = getPool();
         const labelUrl = clean(req.body?.labelUrl, 2000);
         const trackNumber = clean(req.body?.trackNumber, 180);
