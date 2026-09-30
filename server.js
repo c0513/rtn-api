@@ -178,6 +178,12 @@ const BITRIX_PAID_BACKFILL_MODE =
         ''
     ).toLowerCase();
 
+const BITRIX_DELIVERY_FIX_MODE =
+    normalizeEnvValue(
+        process.env.BITRIX_DELIVERY_FIX_MODE ||
+        ''
+    ).toLowerCase();
+
 const CDEK_API = 'https://api.cdek.ru/v2';
 
 const CDEK_PICKUP_MODE =
@@ -3313,7 +3319,8 @@ const BITRIX_ORDER_FIELDS = {
 
 const RTN_DELIVERY_TYPES = [
     'ПВЗ',
-    'КУРЬЕР'
+    'КУРЬЕР',
+    'САМОВЫВОЗ'
 ];
 
 const RTN_PAYMENT_STATUSES = [
@@ -3462,6 +3469,14 @@ function normalizeDeliveryType(delivery) {
         )
             .trim()
             .toUpperCase();
+
+    if (
+        method.includes('САМОВЫВОЗ') ||
+        method.includes('SELF PICKUP') ||
+        method.includes('SELF_PICKUP')
+    ) {
+        return 'САМОВЫВОЗ';
+    }
 
     if (
         method.includes('КУРЬЕР') ||
@@ -5532,6 +5547,566 @@ async function syncPaidOrderToBitrix(payment) {
 }
 
 
+
+
+async function updateBitrixDeliveryOnly({
+    dealId,
+    type,
+    address,
+    cost = 0
+}) {
+    await syncOrderFieldsToBitrix();
+
+    const typeId =
+        await ensureBitrixEnumOption({
+            entity:
+                'deal',
+            fieldName:
+                BITRIX_ORDER_FIELDS.deliveryType,
+            value:
+                type,
+            xmlPrefix:
+                'RTN_DELIVERY_TYPE'
+        });
+
+    const fields = {
+        [BITRIX_ORDER_FIELDS.deliveryAddress]:
+            String(address || '').trim(),
+        [BITRIX_ORDER_FIELDS.deliveryCost]:
+            Math.max(
+                0,
+                Number(cost || 0)
+            )
+    };
+
+    if (typeId) {
+        fields[
+            BITRIX_ORDER_FIELDS.deliveryType
+        ] = Number(typeId);
+    }
+
+    await bitrixCall(
+        'crm.deal.update',
+        {
+            id:
+                Number(dealId),
+            fields
+        }
+    );
+}
+
+async function cdekCreatePrintPdf({
+    token,
+    kind,
+    orderUuid
+}) {
+    const isBarcode =
+        kind === 'barcodes';
+
+    const path =
+        isBarcode
+            ? 'barcodes'
+            : 'orders';
+
+    const payload =
+        isBarcode
+            ? {
+                orders: [
+                    {
+                        order_uuid:
+                            orderUuid
+                    }
+                ],
+                copy_count:
+                    1,
+                format:
+                    'A6',
+                lang:
+                    'RUS'
+            }
+            : {
+                orders: [
+                    {
+                        order_uuid:
+                            orderUuid
+                    }
+                ],
+                copy_count:
+                    1,
+                type:
+                    'tpl_russia'
+            };
+
+    const created =
+        await axios.post(
+            `${CDEK_API}/print/${path}`,
+            payload,
+            {
+                headers: {
+                    Authorization:
+                        `Bearer ${token}`,
+                    'Content-Type':
+                        'application/json'
+                },
+                timeout:
+                    15000
+            }
+        );
+
+    const createErrors =
+        cdekBackfillResponseErrors(
+            created.data || {}
+        );
+
+    if (createErrors.length) {
+        throw new Error(
+            `CDEK print ${kind}: ${createErrors.join('; ')}`
+        );
+    }
+
+    const printUuid =
+        created.data?.entity?.uuid;
+
+    if (!printUuid) {
+        throw new Error(
+            `CDEK print ${kind}: UUID задания не получен`
+        );
+    }
+
+    for (
+        let attempt = 1;
+        attempt <= 12;
+        attempt += 1
+    ) {
+        await sleep(
+            attempt === 1
+                ? 1000
+                : 1500
+        );
+
+        const status =
+            await axios.get(
+                `${CDEK_API}/print/${path}/${printUuid}`,
+                {
+                    headers: {
+                        Authorization:
+                            `Bearer ${token}`
+                    },
+                    timeout:
+                        10000
+                }
+            );
+
+        const statusErrors =
+            cdekBackfillResponseErrors(
+                status.data || {}
+            );
+
+        if (statusErrors.length) {
+            throw new Error(
+                `CDEK print ${kind}: ${statusErrors.join('; ')}`
+            );
+        }
+
+        const statuses =
+            Array.isArray(
+                status.data?.entity?.statuses
+            )
+                ? status.data.entity.statuses
+                : [];
+
+        const ready =
+            Boolean(
+                status.data?.entity?.url
+            ) ||
+            statuses.some(item =>
+                String(
+                    item?.code || ''
+                ).toUpperCase() ===
+                'READY'
+            );
+
+        if (!ready) {
+            continue;
+        }
+
+        const pdf =
+            await axios.get(
+                `${CDEK_API}/print/${path}/${printUuid}.pdf`,
+                {
+                    headers: {
+                        Authorization:
+                            `Bearer ${token}`
+                    },
+                    responseType:
+                        'arraybuffer',
+                    timeout:
+                        20000
+                }
+            );
+
+        return {
+            printUuid,
+            buffer:
+                Buffer.from(
+                    pdf.data
+                )
+        };
+    }
+
+    throw new Error(
+        `CDEK print ${kind}: PDF не сформирован вовремя`
+    );
+}
+
+async function getCdekPickupPointByCode(
+    token,
+    code
+) {
+    if (!code) {
+        return null;
+    }
+
+    const response =
+        await axios.get(
+            `${CDEK_API}/deliverypoints`,
+            {
+                headers: {
+                    Authorization:
+                        `Bearer ${token}`
+                },
+                params: {
+                    code:
+                        String(code)
+                },
+                timeout:
+                    10000
+            }
+        );
+
+    const points =
+        Array.isArray(response.data)
+            ? response.data
+            : [];
+
+    return points[0] || null;
+}
+
+async function addBitrixTimelineComment({
+    dealId,
+    comment,
+    files = []
+}) {
+    return bitrixCall(
+        'crm.timeline.comment.add',
+        {
+            fields: {
+                ENTITY_ID:
+                    Number(dealId),
+                ENTITY_TYPE:
+                    'deal',
+                COMMENT:
+                    String(comment || ''),
+                FILES:
+                    files.map(file => [
+                        file.name,
+                        file.buffer.toString(
+                            'base64'
+                        )
+                    ])
+            }
+        }
+    );
+}
+
+async function runBitrixDeliveryFix() {
+    if (
+        BITRIX_DELIVERY_FIX_MODE !==
+        'execute'
+    ) {
+        return;
+    }
+
+    if (!isBitrixConfigured()) {
+        throw new Error(
+            'BITRIX_WEBHOOK_URL не настроен'
+        );
+    }
+
+    const bratchikovOrderId =
+        '1790067172022-v5swmy';
+
+    const selfPickupOrderId =
+        '1790084273315-t0lens';
+
+    const paymentResult =
+        await fetchAllYooKassaPayments();
+
+    const byOrderId =
+        new Map(
+            paymentResult.payments
+                .map(payment => [
+                    String(
+                        payment?.metadata
+                            ?.orderId ||
+                        ''
+                    ).trim(),
+                    payment
+                ])
+                .filter(
+                    ([orderId]) =>
+                        Boolean(orderId)
+                )
+        );
+
+    const bratchikovPayment =
+        byOrderId.get(
+            bratchikovOrderId
+        );
+
+    const selfPickupPayment =
+        byOrderId.get(
+            selfPickupOrderId
+        );
+
+    if (!bratchikovPayment) {
+        throw new Error(
+            'Оплата Братчикова не найдена в YooKassa'
+        );
+    }
+
+    if (!selfPickupPayment) {
+        throw new Error(
+            'Оплата самовывоза не найдена в YooKassa'
+        );
+    }
+
+    const [
+        bratchikovDealId,
+        selfPickupDealId,
+        bratchikovOrder,
+        selfPickupOrder
+    ] =
+        await Promise.all([
+            findExistingBitrixDeal(
+                bratchikovOrderId
+            ),
+            findExistingBitrixDeal(
+                selfPickupOrderId
+            ),
+            buildPaidOrderPayload(
+                bratchikovPayment
+            ),
+            buildPaidOrderPayload(
+                selfPickupPayment
+            )
+        ]);
+
+    if (!bratchikovDealId) {
+        throw new Error(
+            'Сделка Братчикова в Bitrix24 не найдена'
+        );
+    }
+
+    if (!selfPickupDealId) {
+        throw new Error(
+            'Сделка самовывоза в Bitrix24 не найдена'
+        );
+    }
+
+    const token =
+        await getCdekToken();
+
+    const cdekOrder =
+        await cdekBackfillFindExisting(
+            token,
+            bratchikovOrderId
+        );
+
+    if (!cdekOrder?.uuid) {
+        throw new Error(
+            'Отправление Братчикова в CDEK не найдено'
+        );
+    }
+
+    const cdekDetailsResponse =
+        await axios.get(
+            `${CDEK_API}/orders/${cdekOrder.uuid}`,
+            {
+                headers: {
+                    Authorization:
+                        `Bearer ${token}`
+                },
+                timeout:
+                    10000
+            }
+        );
+
+    const cdekEntity =
+        cdekDetailsResponse.data?.entity ||
+        cdekOrder;
+
+    const pointCode =
+        String(
+            cdekEntity?.delivery_point ||
+            'SPB288'
+        ).trim();
+
+    const point =
+        await getCdekPickupPointByCode(
+            token,
+            pointCode
+        );
+
+    const pointAddress =
+        String(
+            point?.location?.address_full ||
+            point?.location?.address ||
+            bratchikovOrder?.delivery
+                ?.address ||
+            'Санкт-Петербург, ул. 10-я Советская, д. 1-3, лит. А, оф. пом. 6-Н'
+        ).trim();
+
+    const cdekNumber =
+        String(
+            cdekEntity?.cdek_number ||
+            cdekOrder?.cdek_number ||
+            '10328422817'
+        ).trim();
+
+    await updateBitrixDeliveryOnly({
+        dealId:
+            bratchikovDealId,
+        type:
+            'ПВЗ',
+        address:
+            `ПВЗ СДЭК ${pointCode} — ${pointAddress}`,
+        cost:
+            bratchikovOrder
+                ?.delivery?.price ||
+            0
+    });
+
+    const [
+        barcodePdf,
+        waybillPdf
+    ] =
+        await Promise.all([
+            cdekCreatePrintPdf({
+                token,
+                kind:
+                    'barcodes',
+                orderUuid:
+                    cdekOrder.uuid
+            }),
+            cdekCreatePrintPdf({
+                token,
+                kind:
+                    'orders',
+                orderUuid:
+                    cdekOrder.uuid
+            })
+        ]);
+
+    const bratchikovComment =
+        [
+            '🚚 ДОСТАВКА СДЭК',
+            'Получатель: Братчиков Олег',
+            `ПВЗ: ${pointCode}`,
+            `Адрес: ${pointAddress}`,
+            `Номер СДЭК: ${cdekNumber}`,
+            `№ ИМ: ${bratchikovOrderId}`,
+            `Отправление: Санкт-Петербург, ул. Маршала Казакова, 58с1`,
+            '',
+            'Во вложении: наклейка СДЭК и накладная.'
+        ].join('\n');
+
+    const bratchikovCommentId =
+        await addBitrixTimelineComment({
+            dealId:
+                bratchikovDealId,
+            comment:
+                bratchikovComment,
+            files: [
+                {
+                    name:
+                        `CDEK_наклейка_${cdekNumber || pointCode}.pdf`,
+                    buffer:
+                        barcodePdf.buffer
+                },
+                {
+                    name:
+                        `CDEK_накладная_${cdekNumber || pointCode}.pdf`,
+                    buffer:
+                        waybillPdf.buffer
+                }
+            ]
+        });
+
+    const selfPickupAddress =
+        CDEK_FROM_ADDRESS ||
+        'Санкт-Петербург, улица Маршала Казакова, 58с1';
+
+    await updateBitrixDeliveryOnly({
+        dealId:
+            selfPickupDealId,
+        type:
+            'САМОВЫВОЗ',
+        address:
+            selfPickupAddress,
+        cost:
+            0
+    });
+
+    const selfPickupCommentId =
+        await addBitrixTimelineComment({
+            dealId:
+                selfPickupDealId,
+            comment:
+                [
+                    '📦 САМОВЫВОЗ',
+                    `Адрес выдачи: ${selfPickupAddress}`,
+                    `№ ИМ: ${selfPickupOrderId}`,
+                    'Заказ оплачен.',
+                    'Доставка СДЭК не требуется.'
+                ].join('\n')
+        });
+
+    console.log(
+        'Bitrix delivery fix result:',
+        JSON.stringify({
+            bratchikov: {
+                dealId:
+                    Number(
+                        bratchikovDealId
+                    ),
+                orderId:
+                    bratchikovOrderId,
+                pointCode,
+                pointAddress,
+                cdekNumber,
+                commentId:
+                    bratchikovCommentId,
+                barcodePrintUuid:
+                    barcodePdf.printUuid,
+                waybillPrintUuid:
+                    waybillPdf.printUuid
+            },
+            selfPickup: {
+                dealId:
+                    Number(
+                        selfPickupDealId
+                    ),
+                orderId:
+                    selfPickupOrderId,
+                address:
+                    selfPickupAddress,
+                commentId:
+                    selfPickupCommentId
+            }
+        })
+    );
+}
 
 async function runBitrixPaidBackfill() {
     if (
@@ -16181,6 +16756,23 @@ app.listen(PORT, () => {
                 );
             }
         }, 12000);
+    }
+
+    if (
+        BITRIX_DELIVERY_FIX_MODE ===
+        'execute'
+    ) {
+        setTimeout(async () => {
+            try {
+                await runBitrixDeliveryFix();
+            } catch (error) {
+                console.error(
+                    'Bitrix delivery fix startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 18000);
     }
 
     if (
