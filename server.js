@@ -864,11 +864,56 @@ async function runPaidSafeRouteBackfill() {
                 withSafeRouteId.length,
             withoutSafeRouteId:
                 withoutSafeRouteId.length,
-            withoutSafeRouteIdOrders:
-                withoutSafeRouteId.map(
-                    item =>
-                        item.orderId ||
-                        item.paymentId
+            withCheckoutSession:
+                candidates.filter(
+                    payment =>
+                        Boolean(
+                            cleanSafeRouteReference(
+                                payment?.metadata
+                                    ?.saferouteCheckoutSessId
+                            )
+                        )
+                ).length,
+            withoutCheckoutSession:
+                candidates.filter(
+                    payment =>
+                        !cleanSafeRouteReference(
+                            payment?.metadata
+                                ?.saferouteCheckoutSessId
+                        )
+                ).length,
+            orders:
+                candidates.map(
+                    payment => ({
+                        orderId:
+                            cleanSafeRouteReference(
+                                payment?.metadata?.orderId,
+                                100
+                            ) ||
+                            String(payment?.id || ''),
+                        hasSafeRouteId:
+                            Boolean(
+                                cleanSafeRouteReference(
+                                    payment?.metadata
+                                        ?.saferouteOrderId ||
+                                    payment?.metadata
+                                        ?.saferouteCabinetId
+                                )
+                            ),
+                        hasCheckoutSession:
+                            Boolean(
+                                cleanSafeRouteReference(
+                                    payment?.metadata
+                                        ?.saferouteCheckoutSessId
+                                )
+                            ),
+                        deliveryMethod:
+                            cleanOrderValue(
+                                payment?.metadata
+                                    ?.deliveryMethod,
+                                100
+                            )
+                    })
                 )
         })
     );
