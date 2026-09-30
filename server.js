@@ -13843,6 +13843,91 @@ app.post(
 );
 
 
+async function runSafeRouteStartupDiagnostics() {
+    if (!isSafeRouteConfigured()) {
+        console.warn('SafeRoute startup: credentials are not configured');
+        return;
+    }
+
+    try {
+        const api = await getSafeRouteApi();
+        const result = await api.user.getData(
+            SAFEROUTE_TOKEN
+        );
+
+        console.log(
+            'SafeRoute auth check:',
+            JSON.stringify({
+                ok:
+                    Number(result?.status || 0) >= 200 &&
+                    Number(result?.status || 0) < 300 &&
+                    !result?.error,
+                status:
+                    result?.status || null,
+                shopId:
+                    SAFEROUTE_SHOP_ID,
+                errorCode:
+                    result?.error?.code || null
+            })
+        );
+    } catch (error) {
+        console.error(
+            'SafeRoute auth check failed:',
+            error?.message || error
+        );
+    }
+
+    const candidates = [
+        'https://widgets.saferoute.ru/cart/api.js',
+        'https://widgets.saferoute.ru/checkout/api.js',
+        'https://widgets.saferoute.ru/api.js',
+        'https://widgets.saferoute.ru/cart.js',
+        'https://widgets.saferoute.ru/widget.js'
+    ];
+
+    for (const url of candidates) {
+        try {
+            const response = await axios.get(
+                url,
+                {
+                    timeout: 7000,
+                    responseType: 'text',
+                    validateStatus: () => true
+                }
+            );
+
+            const preview = String(
+                response.data || ''
+            )
+                .replace(/\s+/g, ' ')
+                .slice(0, 220);
+
+            console.log(
+                'SafeRoute widget asset probe:',
+                JSON.stringify({
+                    url,
+                    status: response.status,
+                    contentType:
+                        response.headers?.['content-type'] ||
+                        '',
+                    preview
+                })
+            );
+        } catch (error) {
+            console.log(
+                'SafeRoute widget asset probe:',
+                JSON.stringify({
+                    url,
+                    error:
+                        error?.code ||
+                        error?.message ||
+                        'failed'
+                })
+            );
+        }
+    }
+}
+
 // ============================================================
 // 404
 // ============================================================
@@ -13865,6 +13950,15 @@ app.listen(PORT, () => {
     console.log(
         `RTN API запущен на порту ${PORT}`
     );
+
+    setTimeout(() => {
+        runSafeRouteStartupDiagnostics().catch(error => {
+            console.error(
+                'SafeRoute startup diagnostics error:',
+                error?.message || error
+            );
+        });
+    }, 2500);
 
     if (isBitrixConfigured()) {
         setTimeout(async () => {
