@@ -172,6 +172,12 @@ const BITRIX_CATALOG_IBLOCK_ID =
 const BITRIX_ASSIGNED_BY_ID =
     Number(process.env.BITRIX_ASSIGNED_BY_ID || 0);
 
+const BITRIX_PAID_BACKFILL_MODE =
+    normalizeEnvValue(
+        process.env.BITRIX_PAID_BACKFILL_MODE ||
+        ''
+    ).toLowerCase();
+
 const CDEK_API = 'https://api.cdek.ru/v2';
 
 const CDEK_PICKUP_MODE =
@@ -5525,6 +5531,201 @@ async function syncPaidOrderToBitrix(payment) {
     return Number(dealId);
 }
 
+
+
+async function runBitrixPaidBackfill() {
+    if (
+        !['dry-run', 'execute'].includes(
+            BITRIX_PAID_BACKFILL_MODE
+        )
+    ) {
+        return;
+    }
+
+    if (!isBitrixConfigured()) {
+        throw new Error(
+            'BITRIX_WEBHOOK_URL не настроен'
+        );
+    }
+
+    const paymentResult =
+        await fetchAllYooKassaPayments();
+
+    const candidates =
+        paymentResult.payments.filter(payment => {
+            const amount =
+                Number(
+                    payment?.amount?.value ||
+                    0
+                );
+
+            const refunded =
+                Number(
+                    payment?.refunded_amount?.value ||
+                    0
+                );
+
+            return (
+                payment?.status === 'succeeded' &&
+                payment?.paid === true &&
+                amount > 0 &&
+                refunded <= 0
+            );
+        });
+
+    const results = [];
+    let existing = 0;
+    let missing = 0;
+    let created = 0;
+    let failed = 0;
+
+    for (const payment of candidates) {
+        const orderId =
+            String(
+                payment?.metadata?.orderId ||
+                ''
+            ).trim();
+
+        const item = {
+            paymentId:
+                payment?.id || '',
+            orderId,
+            amount:
+                Number(
+                    payment?.amount?.value ||
+                    0
+                ),
+            status:
+                'pending'
+        };
+
+        try {
+            if (!orderId) {
+                throw new Error(
+                    'У платежа отсутствует orderId'
+                );
+            }
+
+            const dealBefore =
+                await findExistingBitrixDeal(
+                    orderId
+                );
+
+            if (dealBefore) {
+                existing += 1;
+                item.status =
+                    'already_exists';
+                item.dealId =
+                    Number(dealBefore);
+                results.push(item);
+                await sleep(200);
+                continue;
+            }
+
+            missing += 1;
+
+            if (
+                BITRIX_PAID_BACKFILL_MODE ===
+                'dry-run'
+            ) {
+                item.status = 'missing';
+                results.push(item);
+                await sleep(200);
+                continue;
+            }
+
+            const order =
+                await buildPaidOrderPayload(
+                    payment
+                );
+
+            const dealId =
+                await syncOrderToBitrix(
+                    order
+                );
+
+            if (!dealId) {
+                throw new Error(
+                    'Bitrix24 не вернул ID сделки'
+                );
+            }
+
+            await moveBitrixDealToPaid({
+                dealId,
+                payment
+            });
+
+            try {
+                await bitrixCall(
+                    'crm.item.update',
+                    {
+                        entityTypeId: 2,
+                        id: Number(dealId),
+                        fields: {
+                            begindate:
+                                String(
+                                    payment?.created_at ||
+                                    ''
+                                ).slice(0, 10)
+                        }
+                    }
+                );
+            } catch (dateError) {
+                console.error(
+                    'Bitrix paid backfill date update error:',
+                    dateError.response?.data ||
+                    dateError.message
+                );
+            }
+
+            upsertLocalOrder({
+                orderId:
+                    order.orderId,
+                paymentId:
+                    payment?.id,
+                bitrixDealId:
+                    Number(dealId),
+                paymentStatus:
+                    'succeeded',
+                paid:
+                    true
+            });
+
+            created += 1;
+            item.status = 'imported';
+            item.dealId = Number(dealId);
+        } catch (error) {
+            failed += 1;
+            item.status = 'error';
+            item.error =
+                error.response?.data
+                    ? JSON.stringify(
+                        error.response.data
+                    )
+                    : error.message;
+        }
+
+        results.push(item);
+        await sleep(350);
+    }
+
+    console.log(
+        'Bitrix paid backfill result:',
+        JSON.stringify({
+            mode:
+                BITRIX_PAID_BACKFILL_MODE,
+            yooKassaPages:
+                paymentResult.pages,
+            candidates:
+                candidates.length,
+            existing,
+            missing,
+            created,
+            failed,
+            results
+        })
+    );
+}
 
 app.post('/api/yookassa/webhook', async (req, res) => {
     try {
@@ -15980,6 +16181,24 @@ app.listen(PORT, () => {
                 );
             }
         }, 12000);
+    }
+
+    if (
+        ['dry-run', 'execute'].includes(
+            BITRIX_PAID_BACKFILL_MODE
+        )
+    ) {
+        setTimeout(async () => {
+            try {
+                await runBitrixPaidBackfill();
+            } catch (error) {
+                console.error(
+                    'Bitrix paid backfill startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 18000);
     }
 
     if (isBitrixConfigured()) {
