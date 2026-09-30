@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
+const { createWarehouseRouter } = require('./rtn-warehouse');
 const {
     awardReferralCoinsForPayment,
     resolveReferralCode,
@@ -24,6 +25,15 @@ app.use(
         credentials: true
     }),
     createAccountRouter()
+);
+
+app.use(
+    '/api/warehouse',
+    cors({
+        origin: true,
+        credentials: true
+    }),
+    createWarehouseRouter()
 );
 
 // Админка блога может работать по той же HttpOnly-сессии,

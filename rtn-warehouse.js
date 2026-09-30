@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { getPool } = require('./db');
 const { getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
-const { bitrixCall, getDealProductRows } = require('./rtn-bitrix-account');
+const { bitrixCall } = require('./rtn-bitrix-account');
 
 const PAYMENT_FIELD = 'UF_CRM_RTN_PAYMENT_STATUS';
 const STAGE_PICKING = process.env.BITRIX_STAGE_PICKING || 'EXECUTING';
@@ -140,6 +140,73 @@ async function ensureTables() {
     });
 
     return tablesReadyPromise;
+}
+
+
+async function getWarehouseDealProductRows(dealId) {
+    const rows = await bitrixCall('crm.deal.productrows.get', {
+        id: Number(dealId)
+    });
+
+    const items = [];
+
+    for (const row of Array.isArray(rows) ? rows : []) {
+        const rawName = clean(
+            row.PRODUCT_NAME || row.productName || '',
+            300
+        );
+
+        if (/^ДОСТАВКА\s*[—-]/i.test(rawName)) {
+            continue;
+        }
+
+        const productId = Number(
+            row.PRODUCT_ID || row.productId || 0
+        );
+
+        let externalId = '';
+
+        if (productId) {
+            try {
+                const productResult = await bitrixCall(
+                    'catalog.product.get',
+                    { id: productId }
+                );
+
+                const product =
+                    productResult?.product ||
+                    productResult?.item ||
+                    productResult ||
+                    {};
+
+                externalId = clean(
+                    product.xmlId ||
+                    product.XML_ID ||
+                    '',
+                    180
+                ).replace(/^RTN:/i, '');
+            } catch (error) {
+                console.warn(
+                    `RTN warehouse catalog lookup warning for product ${productId}:`,
+                    error.message
+                );
+            }
+        }
+
+        items.push({
+            id: String(row.ID || row.id || ''),
+            productId: productId || null,
+            externalId,
+            name: rawName || 'Товар RTN.PRO',
+            quantity: Math.max(
+                1,
+                Number(row.QUANTITY || row.quantity || 1)
+            ),
+            price: Number(row.PRICE || row.price || 0)
+        });
+    }
+
+    return items;
 }
 
 async function addTimelineComment(dealId, comment) {
@@ -334,7 +401,7 @@ async function startSession(dealId, operatorName) {
         throw error;
     }
 
-    const items = await getDealProductRows(Number(dealId));
+    const items = await getWarehouseDealProductRows(Number(dealId));
     if (!items.length) {
         const error = new Error('В сделке нет товарных позиций');
         error.status = 409;
