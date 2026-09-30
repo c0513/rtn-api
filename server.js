@@ -184,6 +184,12 @@ const BITRIX_DELIVERY_FIX_MODE =
         ''
     ).toLowerCase();
 
+const BITRIX_DELIVERY_CLEANUP_MODE =
+    normalizeEnvValue(
+        process.env.BITRIX_DELIVERY_CLEANUP_MODE ||
+        ''
+    ).toLowerCase();
+
 const CDEK_API = 'https://api.cdek.ru/v2';
 
 const CDEK_PICKUP_MODE =
@@ -6104,6 +6110,44 @@ async function runBitrixDeliveryFix() {
                 commentId:
                     selfPickupCommentId
             }
+        })
+    );
+}
+
+
+async function runBitrixDeliveryCleanup() {
+    if (BITRIX_DELIVERY_CLEANUP_MODE !== 'execute') {
+        return;
+    }
+
+    const deleted = [];
+    const failed = [];
+
+    for (const id of [479, 481]) {
+        try {
+            await bitrixCall(
+                'crm.timeline.comment.delete',
+                { id: Number(id) }
+            );
+
+            deleted.push(id);
+        } catch (error) {
+            failed.push({
+                id,
+                error:
+                    error.response?.data ||
+                    error.message
+            });
+        }
+
+        await sleep(250);
+    }
+
+    console.log(
+        'Bitrix delivery cleanup result:',
+        JSON.stringify({
+            deleted,
+            failed
         })
     );
 }
@@ -16773,6 +16817,20 @@ app.listen(PORT, () => {
                 );
             }
         }, 18000);
+    }
+
+    if (BITRIX_DELIVERY_CLEANUP_MODE === 'execute') {
+        setTimeout(async () => {
+            try {
+                await runBitrixDeliveryCleanup();
+            } catch (error) {
+                console.error(
+                    'Bitrix delivery cleanup startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 14000);
     }
 
     if (
