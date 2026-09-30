@@ -609,25 +609,45 @@ async function runPaidSafeRouteBackfill() {
     const safeRouteApi =
         await getSafeRouteApi();
 
+    const ordersApi =
+        safeRouteApi?.orders;
+
+    const ownMethods =
+        Object.keys(
+            ordersApi ||
+            {}
+        );
+
+    const prototypeMethods =
+        ordersApi
+            ? Object.getOwnPropertyNames(
+                Object.getPrototypeOf(
+                    ordersApi
+                ) || {}
+            )
+            : [];
+
     console.log(
         'SafeRoute API orders methods:',
-        JSON.stringify(
-            Object.keys(
-                safeRouteApi?.orders ||
-                {}
-            )
-        )
+        JSON.stringify({
+            own:
+                ownMethods,
+            prototype:
+                prototypeMethods,
+            createOrderType:
+                typeof ordersApi?.createOrder
+        })
     );
 
     if (
-        typeof safeRouteApi?.orders?.createOrder ===
+        typeof ordersApi?.createOrder ===
         'function'
     ) {
         console.log(
             'SafeRoute API createOrder signature:',
             String(
-                safeRouteApi.orders.createOrder
-            ).slice(0, 1500)
+                ordersApi.createOrder
+            ).slice(0, 2000)
         );
     }
 
