@@ -606,6 +606,118 @@ async function runPaidSafeRouteBackfill() {
         return;
     }
 
+    try {
+        const packageEntry =
+            require.resolve(
+                'saferoute-api'
+            );
+
+        let packageDir =
+            path.dirname(
+                packageEntry
+            );
+
+        while (
+            packageDir !==
+                path.dirname(
+                    packageDir
+                ) &&
+            !fs.existsSync(
+                path.join(
+                    packageDir,
+                    'package.json'
+                )
+            )
+        ) {
+            packageDir =
+                path.dirname(
+                    packageDir
+                );
+        }
+
+        const matchedFiles = [];
+
+        const walk = (
+            dir,
+            depth = 0
+        ) => {
+            if (
+                depth > 5 ||
+                matchedFiles.length >
+                    120
+            ) {
+                return;
+            }
+
+            for (
+                const entry
+                of fs.readdirSync(
+                    dir,
+                    {
+                        withFileTypes:
+                            true
+                    }
+                )
+            ) {
+                const full =
+                    path.join(
+                        dir,
+                        entry.name
+                    );
+
+                if (
+                    entry.isDirectory()
+                ) {
+                    walk(
+                        full,
+                        depth + 1
+                    );
+                    continue;
+                }
+
+                const rel =
+                    path.relative(
+                        packageDir,
+                        full
+                    );
+
+                if (
+                    /order/i.test(
+                        rel
+                    ) ||
+                    /package\.json$/i.test(
+                        rel
+                    )
+                ) {
+                    matchedFiles.push(
+                        rel
+                    );
+                }
+            }
+        };
+
+        walk(
+            packageDir
+        );
+
+        console.log(
+            'SafeRoute package inspection:',
+            JSON.stringify({
+                entry:
+                    path.relative(
+                        packageDir,
+                        packageEntry
+                    ),
+                matchedFiles
+            })
+        );
+    } catch (error) {
+        console.warn(
+            'SafeRoute package inspection warning:',
+            error.message
+        );
+    }
+
     const safeRouteApi =
         await getSafeRouteApi();
 
