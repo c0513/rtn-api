@@ -13957,6 +13957,16 @@ async function runSafeRouteStartupDiagnostics() {
             'onChange',
             'callback',
             'delivery',
+            'done',
+            'select',
+            'change',
+            'orderId',
+            'cabinetId',
+            'checkoutSessId',
+            'userEmail',
+            'userPhone',
+            'userName',
+            'paymentMethod',
             'SafeRouteCartWidget'
         ];
 
