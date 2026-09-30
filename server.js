@@ -1725,8 +1725,10 @@ async function runCdekPickupRepairAndIntake() {
 
             const patchResponse =
                 await axios.patch(
-                    `${CDEK_API}/orders/${existing.uuid}`,
+                    `${CDEK_API}/orders`,
                     {
+                        uuid:
+                            existing.uuid,
                         from_location: {
                             code: 137,
                             city:
