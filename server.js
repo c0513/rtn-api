@@ -1058,6 +1058,1055 @@ async function fetchAllYooKassaReceipts() {
     };
 }
 
+
+const CDEK_BACKFILL_MODE =
+    normalizeEnvValue(
+        process.env.CDEK_BACKFILL_MODE ||
+        ''
+    ).toLowerCase();
+
+function cdekBackfillClean(value, max = 500) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, max);
+}
+
+function cdekBackfillNormalizeAddress(value) {
+    return cdekBackfillClean(value, 1000)
+        .toUpperCase()
+        .replace(/Ё/g, 'Е')
+        .replace(/РОССИЯ/g, ' ')
+        .replace(/\bГ\.?\s+/g, ' ')
+        .replace(/[^0-9A-ZА-Я]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function cdekBackfillResponseErrors(data) {
+    const errors = [];
+
+    for (const request of Array.isArray(data?.requests) ? data.requests : []) {
+        for (const error of Array.isArray(request?.errors) ? request.errors : []) {
+            const message =
+                cdekBackfillClean(
+                    error?.message ||
+                    error?.code ||
+                    'CDEK request error',
+                    300
+                );
+
+            if (message) errors.push(message);
+        }
+    }
+
+    for (const error of Array.isArray(data?.errors) ? data.errors : []) {
+        const message =
+            cdekBackfillClean(
+                error?.message ||
+                error?.code ||
+                'CDEK error',
+                300
+            );
+
+        if (message) errors.push(message);
+    }
+
+    return errors;
+}
+
+async function cdekBackfillResolveCity(token, cityName) {
+    const query =
+        cdekBackfillClean(cityName, 200);
+
+    if (!query) return null;
+
+    const response =
+        await axios.get(
+            `${CDEK_API}/location/suggest/cities`,
+            {
+                headers: {
+                    Authorization:
+                        `Bearer ${token}`
+                },
+                params: {
+                    name: query,
+                    country_code: 'RU'
+                },
+                timeout: 10000
+            }
+        );
+
+    const candidates =
+        Array.isArray(response.data)
+            ? response.data
+            : [];
+
+    if (!candidates.length) {
+        return null;
+    }
+
+    const normalizedQuery =
+        query
+            .toUpperCase()
+            .replace(/Ё/g, 'Е');
+
+    const exact =
+        candidates.find(item =>
+            String(item?.full_name || '')
+                .toUpperCase()
+                .replace(/Ё/g, 'Е')
+                .startsWith(normalizedQuery)
+        );
+
+    const selected =
+        exact ||
+        candidates[0];
+
+    const code =
+        Number(selected?.code || 0);
+
+    if (!code) return null;
+
+    return {
+        code,
+        fullName:
+            cdekBackfillClean(
+                selected?.full_name ||
+                query,
+                300
+            )
+    };
+}
+
+async function cdekBackfillResolvePickupPoint(
+    token,
+    cityCode,
+    deliveryAddress
+) {
+    const expected =
+        cdekBackfillNormalizeAddress(
+            deliveryAddress
+        );
+
+    if (!expected) return null;
+
+    const response =
+        await axios.get(
+            `${CDEK_API}/deliverypoints`,
+            {
+                headers: {
+                    Authorization:
+                        `Bearer ${token}`
+                },
+                params: {
+                    city_code:
+                        Number(cityCode),
+                    type:
+                        'PVZ'
+                },
+                timeout:
+                    15000
+            }
+        );
+
+    const points =
+        Array.isArray(response.data)
+            ? response.data
+            : [];
+
+    let best = null;
+
+    for (const point of points) {
+        const address =
+            cdekBackfillClean(
+                point?.location?.address ||
+                point?.location?.address_full ||
+                '',
+                1000
+            );
+
+        const normalized =
+            cdekBackfillNormalizeAddress(
+                address
+            );
+
+        if (!normalized) continue;
+
+        let score = 0;
+
+        if (normalized === expected) {
+            score = 100;
+        } else if (
+            normalized.includes(expected) ||
+            expected.includes(normalized)
+        ) {
+            score = 90;
+        } else {
+            const expectedNumbers =
+                expected.match(/\d+[A-ZА-Я]?/g) ||
+                [];
+
+            const pointNumbers =
+                normalized.match(/\d+[A-ZА-Я]?/g) ||
+                [];
+
+            const numberMatches =
+                expectedNumbers.filter(number =>
+                    pointNumbers.includes(number)
+                ).length;
+
+            const expectedWords =
+                expected
+                    .split(' ')
+                    .filter(word =>
+                        word.length >= 4
+                    );
+
+            const pointWords =
+                new Set(
+                    normalized
+                        .split(' ')
+                        .filter(Boolean)
+                );
+
+            const wordMatches =
+                expectedWords.filter(word =>
+                    pointWords.has(word)
+                ).length;
+
+            if (
+                expectedNumbers.length > 0 &&
+                numberMatches ===
+                    expectedNumbers.length
+            ) {
+                score += 55;
+            }
+
+            if (wordMatches >= 2) {
+                score +=
+                    Math.min(
+                        35,
+                        wordMatches * 10
+                    );
+            }
+        }
+
+        if (
+            !best ||
+            score > best.score
+        ) {
+            best = {
+                score,
+                code:
+                    cdekBackfillClean(
+                        point?.code,
+                        100
+                    ),
+                address
+            };
+        }
+    }
+
+    if (
+        !best ||
+        best.score < 70 ||
+        !best.code
+    ) {
+        return null;
+    }
+
+    return best;
+}
+
+function cdekBackfillEstimateUnitWeight(name) {
+    const source =
+        cdekBackfillClean(name, 300)
+            .toUpperCase()
+            .replace(/Ё/g, 'Е');
+
+    const gramMatch =
+        source.match(
+            /(\d{2,5})\s*(?:Г|G)(?:\b|Р)/
+        );
+
+    if (gramMatch) {
+        const grams =
+            Number(gramMatch[1]);
+
+        if (
+            Number.isFinite(grams) &&
+            grams >= 50 &&
+            grams <= 10000
+        ) {
+            return grams;
+        }
+    }
+
+    if (
+        source.includes('ГЕЙНЕР') ||
+        source.includes('GAINER')
+    ) {
+        return 3000;
+    }
+
+    if (
+        source.includes('ПРОТЕИН') ||
+        source.includes('WHEY')
+    ) {
+        return 900;
+    }
+
+    if (
+        source.includes('АМИЛОПЕКТИН')
+    ) {
+        return 1000;
+    }
+
+    if (
+        source.includes('BCAA') ||
+        source.includes('БЦАА') ||
+        source.includes('КРЕАТИН')
+    ) {
+        return 300;
+    }
+
+    if (
+        source.includes('АРГИНИН')
+    ) {
+        return 150;
+    }
+
+    if (
+        source.includes('FURY') ||
+        source.includes('ПРЕДТРЕН')
+    ) {
+        return 225;
+    }
+
+    if (
+        source.includes('КАПС')
+    ) {
+        return 250;
+    }
+
+    return 500;
+}
+
+function cdekBackfillPackageFromReceipt(
+    receipt,
+    orderId
+) {
+    const physicalItems =
+        (Array.isArray(receipt?.items)
+            ? receipt.items
+            : [])
+            .filter(item => {
+                const description =
+                    cdekBackfillClean(
+                        item?.description,
+                        300
+                    );
+
+                return (
+                    item?.payment_subject !==
+                        'service' &&
+                    !description
+                        .toUpperCase()
+                        .startsWith(
+                            'ДОСТАВКА'
+                        )
+                );
+            });
+
+    if (!physicalItems.length) {
+        return null;
+    }
+
+    const items = [];
+    let totalWeight = 250;
+    let totalUnits = 0;
+
+    for (const item of physicalItems) {
+        const name =
+            cdekBackfillClean(
+                item?.description ||
+                'Товар RTN.PRO',
+                255
+            );
+
+        const amount =
+            Math.max(
+                1,
+                Math.round(
+                    Number(
+                        item?.quantity ||
+                        1
+                    )
+                )
+            );
+
+        const cost =
+            Math.max(
+                0,
+                Number(
+                    item?.amount?.value ||
+                    0
+                )
+            );
+
+        const unitWeight =
+            cdekBackfillEstimateUnitWeight(
+                name
+            );
+
+        totalWeight +=
+            unitWeight *
+            amount;
+
+        totalUnits +=
+            amount;
+
+        items.push({
+            name,
+            ware_key:
+                'RTN-' +
+                crypto
+                    .createHash('sha1')
+                    .update(name)
+                    .digest('hex')
+                    .slice(0, 16),
+            payment: {
+                value: 0
+            },
+            cost:
+                Number(
+                    cost.toFixed(2)
+                ),
+            weight:
+                unitWeight,
+            amount
+        });
+    }
+
+    return {
+        number:
+            cdekBackfillClean(
+                orderId,
+                30
+            ) ||
+            '1',
+        weight:
+            Math.max(
+                500,
+                Math.round(
+                    totalWeight
+                )
+            ),
+        length:
+            totalUnits >= 5
+                ? 45
+                : 35,
+        width:
+            totalUnits >= 5
+                ? 35
+                : 25,
+        height:
+            totalUnits >= 5
+                ? 30
+                : 20,
+        items
+    };
+}
+
+async function cdekBackfillFindExisting(
+    token,
+    imNumber
+) {
+    try {
+        const response =
+            await axios.get(
+                `${CDEK_API}/orders`,
+                {
+                    headers: {
+                        Authorization:
+                            `Bearer ${token}`
+                    },
+                    params: {
+                        im_number:
+                            imNumber
+                    },
+                    timeout:
+                        10000
+                }
+            );
+
+        const entity =
+            response.data?.entity ||
+            null;
+
+        if (
+            entity &&
+            (
+                entity.uuid ||
+                entity.cdek_number
+            )
+        ) {
+            return entity;
+        }
+
+        return null;
+    } catch (error) {
+        if (
+            error.response?.status === 404
+        ) {
+            return null;
+        }
+
+        const data =
+            error.response?.data;
+
+        const errors =
+            cdekBackfillResponseErrors(
+                data
+            );
+
+        if (
+            error.response?.status === 400 &&
+            errors.some(message =>
+                /не найден|not found/i.test(
+                    message
+                )
+            )
+        ) {
+            return null;
+        }
+
+        throw error;
+    }
+}
+
+async function runPaidCdekBackfill() {
+    if (
+        !['dry-run', 'execute'].includes(
+            CDEK_BACKFILL_MODE
+        )
+    ) {
+        return;
+    }
+
+    if (
+        !CDEK_ACCOUNT ||
+        !CDEK_SECRET
+    ) {
+        console.error(
+            'CDEK paid backfill: CDEK credentials are not configured'
+        );
+        return;
+    }
+
+    const token =
+        await getCdekToken();
+
+    const [
+        paymentResult,
+        receiptResult
+    ] = await Promise.all([
+        fetchAllYooKassaPayments(),
+        fetchAllYooKassaReceipts()
+    ]);
+
+    const receiptsByPaymentId =
+        new Map();
+
+    for (
+        const receipt
+        of receiptResult.receipts
+    ) {
+        if (
+            receipt?.type === 'payment' &&
+            receipt?.status === 'succeeded' &&
+            receipt?.payment_id
+        ) {
+            receiptsByPaymentId.set(
+                String(
+                    receipt.payment_id
+                ),
+                receipt
+            );
+        }
+    }
+
+    const candidates =
+        paymentResult.payments.filter(
+            payment => {
+                const amount =
+                    Number(
+                        payment?.amount?.value ||
+                        0
+                    );
+
+                const refunded =
+                    Number(
+                        payment?.refunded_amount?.value ||
+                        0
+                    );
+
+                return (
+                    payment?.status ===
+                        'succeeded' &&
+                    payment?.paid === true &&
+                    amount > 0 &&
+                    refunded <= 0
+                );
+            }
+        );
+
+    const report = [];
+    let ready = 0;
+    let alreadyExists = 0;
+    let created = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    for (const payment of candidates) {
+        const metadata =
+            payment?.metadata || {};
+
+        const orderId =
+            cdekBackfillClean(
+                metadata.orderId ||
+                payment?.id,
+                100
+            );
+
+        const imNumber =
+            cdekBackfillClean(
+                orderId ||
+                payment?.id,
+                40
+            );
+
+        const summary = {
+            orderId,
+            paymentId:
+                String(
+                    payment?.id ||
+                    ''
+                ),
+            deliveryMethod:
+                cdekBackfillClean(
+                    metadata.deliveryMethod,
+                    100
+                ),
+            deliveryCity:
+                cdekBackfillClean(
+                    metadata.deliveryCity,
+                    200
+                ),
+            status:
+                ''
+        };
+
+        try {
+            if (!imNumber) {
+                summary.status =
+                    'skip_no_order_number';
+                skipped += 1;
+                report.push(summary);
+                continue;
+            }
+
+            const existing =
+                await cdekBackfillFindExisting(
+                    token,
+                    imNumber
+                );
+
+            if (existing) {
+                summary.status =
+                    'already_exists';
+                summary.cdekUuid =
+                    existing.uuid ||
+                    '';
+                summary.cdekNumber =
+                    existing.cdek_number ||
+                    '';
+
+                alreadyExists += 1;
+
+                try {
+                    upsertLocalOrder({
+                        orderId,
+                        paymentId:
+                            payment?.id,
+                        cdekImNumber:
+                            imNumber,
+                        cdekUuid:
+                            existing.uuid ||
+                            '',
+                        cdekNumber:
+                            existing.cdek_number ||
+                            '',
+                        cdekExportedAt:
+                            new Date()
+                                .toISOString()
+                    });
+                } catch (
+                    storageError
+                ) {
+                    console.warn(
+                        'CDEK existing order local update warning:',
+                        storageError.message
+                    );
+                }
+
+                report.push(summary);
+                await sleep(100);
+                continue;
+            }
+
+            const receipt =
+                receiptsByPaymentId.get(
+                    String(
+                        payment?.id ||
+                        ''
+                    )
+                );
+
+            if (!receipt) {
+                summary.status =
+                    'skip_no_receipt';
+                skipped += 1;
+                report.push(summary);
+                continue;
+            }
+
+            const recipientName =
+                cdekBackfillClean(
+                    metadata.customerName ||
+                    'Покупатель RTN.PRO',
+                    255
+                );
+
+            const recipientPhone =
+                cdekBackfillClean(
+                    metadata.customerPhone,
+                    40
+                );
+
+            const recipientEmail =
+                cdekBackfillClean(
+                    metadata.customerEmail,
+                    254
+                );
+
+            const deliveryCity =
+                cdekBackfillClean(
+                    metadata.deliveryCity,
+                    200
+                );
+
+            const deliveryAddress =
+                cdekBackfillClean(
+                    metadata.deliveryAddress,
+                    1000
+                );
+
+            if (
+                !recipientPhone ||
+                !deliveryCity ||
+                !deliveryAddress
+            ) {
+                summary.status =
+                    'skip_missing_delivery_data';
+                skipped += 1;
+                report.push(summary);
+                continue;
+            }
+
+            const city =
+                await cdekBackfillResolveCity(
+                    token,
+                    deliveryCity
+                );
+
+            if (!city?.code) {
+                summary.status =
+                    'skip_city_not_found';
+                skipped += 1;
+                report.push(summary);
+                continue;
+            }
+
+            const isCourier =
+                /КУРЬЕР|COURIER|ДВЕР/i.test(
+                    String(
+                        metadata.deliveryMethod ||
+                        ''
+                    )
+                );
+
+            let pickupPoint =
+                null;
+
+            if (!isCourier) {
+                pickupPoint =
+                    await cdekBackfillResolvePickupPoint(
+                        token,
+                        city.code,
+                        deliveryAddress
+                    );
+
+                if (!pickupPoint?.code) {
+                    summary.status =
+                        'skip_pickup_point_not_found';
+                    skipped += 1;
+                    report.push(summary);
+                    continue;
+                }
+            }
+
+            const parcel =
+                cdekBackfillPackageFromReceipt(
+                    receipt,
+                    orderId
+                );
+
+            if (!parcel) {
+                summary.status =
+                    'skip_no_physical_items';
+                skipped += 1;
+                report.push(summary);
+                continue;
+            }
+
+            const payload = {
+                type: 1,
+                number:
+                    imNumber,
+                tariff_code:
+                    isCourier
+                        ? 137
+                        : 136,
+                comment:
+                    `RTN.PRO, оплачен онлайн, заказ ${orderId}`,
+                recipient: {
+                    name:
+                        recipientName,
+                    phones: [
+                        {
+                            number:
+                                recipientPhone
+                        }
+                    ],
+                    ...(recipientEmail
+                        ? {
+                            email:
+                                recipientEmail
+                        }
+                        : {})
+                },
+                from_location: {
+                    code:
+                        Number(
+                            process.env
+                                .CDEK_FROM_CITY_CODE ||
+                            44
+                        )
+                },
+                to_location: {
+                    code:
+                        city.code,
+                    ...(isCourier
+                        ? {
+                            address:
+                                deliveryAddress
+                        }
+                        : {})
+                },
+                ...(pickupPoint
+                    ? {
+                        delivery_point:
+                            pickupPoint.code
+                    }
+                    : {}),
+                delivery_recipient_cost: {
+                    value: 0
+                },
+                packages: [
+                    parcel
+                ]
+            };
+
+            summary.status =
+                'ready';
+            summary.cityCode =
+                city.code;
+            summary.tariffCode =
+                payload.tariff_code;
+            summary.deliveryPoint =
+                pickupPoint?.code ||
+                '';
+            summary.packageWeight =
+                parcel.weight;
+
+            ready += 1;
+
+            if (
+                CDEK_BACKFILL_MODE !==
+                'execute'
+            ) {
+                report.push(summary);
+                await sleep(100);
+                continue;
+            }
+
+            const createResponse =
+                await axios.post(
+                    `${CDEK_API}/orders`,
+                    payload,
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${token}`,
+                            'Content-Type':
+                                'application/json'
+                        },
+                        timeout:
+                            20000
+                    }
+                );
+
+            const responseData =
+                createResponse.data ||
+                {};
+
+            const createErrors =
+                cdekBackfillResponseErrors(
+                    responseData
+                );
+
+            if (createErrors.length) {
+                throw new Error(
+                    createErrors.join('; ')
+                );
+            }
+
+            let entity =
+                responseData.entity ||
+                {};
+
+            if (entity.uuid) {
+                await sleep(500);
+
+                try {
+                    const details =
+                        await axios.get(
+                            `${CDEK_API}/orders/${entity.uuid}`,
+                            {
+                                headers: {
+                                    Authorization:
+                                        `Bearer ${token}`
+                                },
+                                timeout:
+                                    10000
+                            }
+                        );
+
+                    if (
+                        details.data?.entity
+                    ) {
+                        entity =
+                            details.data.entity;
+                    }
+                } catch (
+                    detailsError
+                ) {
+                    console.warn(
+                        `CDEK order ${orderId}: created, details refresh failed:`,
+                        detailsError.response?.data ||
+                        detailsError.message
+                    );
+                }
+            }
+
+            summary.status =
+                'created';
+            summary.cdekUuid =
+                entity.uuid ||
+                responseData.entity?.uuid ||
+                '';
+            summary.cdekNumber =
+                entity.cdek_number ||
+                '';
+
+            created += 1;
+
+            try {
+                upsertLocalOrder({
+                    orderId,
+                    paymentId:
+                        payment?.id,
+                    cdekImNumber:
+                        imNumber,
+                    cdekUuid:
+                        summary.cdekUuid,
+                    cdekNumber:
+                        summary.cdekNumber,
+                    cdekExportedAt:
+                        new Date()
+                            .toISOString()
+                });
+            } catch (
+                storageError
+            ) {
+                console.warn(
+                    'CDEK created order local update warning:',
+                    storageError.message
+                );
+            }
+        } catch (error) {
+            failed += 1;
+            summary.status =
+                'failed';
+            summary.error =
+                cdekBackfillClean(
+                    error.response?.data
+                        ? JSON.stringify(
+                            error.response.data
+                        )
+                        : error.message,
+                    500
+                );
+        }
+
+        report.push(summary);
+        await sleep(150);
+    }
+
+    console.log(
+        'CDEK paid backfill audit:',
+        JSON.stringify({
+            mode:
+                CDEK_BACKFILL_MODE,
+            yooKassaPages:
+                paymentResult.pages,
+            receiptPages:
+                receiptResult.pages,
+            paidCandidates:
+                candidates.length,
+            ready,
+            alreadyExists,
+            created,
+            failed,
+            skipped,
+            orders:
+                report
+        })
+    );
+}
+
 async function requireBlogAdmin(req, res, next) {
     try {
         const supplied = String(req.get('authorization') || '')
@@ -14473,6 +15522,24 @@ app.listen(PORT, () => {
                 );
             }
         }, 8000);
+    }
+
+    if (
+        ['dry-run', 'execute'].includes(
+            CDEK_BACKFILL_MODE
+        )
+    ) {
+        setTimeout(async () => {
+            try {
+                await runPaidCdekBackfill();
+            } catch (error) {
+                console.error(
+                    'CDEK paid backfill startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 12000);
     }
 
     if (isBitrixConfigured()) {
