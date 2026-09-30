@@ -174,6 +174,19 @@ const BITRIX_ASSIGNED_BY_ID =
 
 const CDEK_API = 'https://api.cdek.ru/v2';
 
+const CDEK_PICKUP_MODE =
+    normalizeEnvValue(
+        process.env.CDEK_PICKUP_MODE ||
+        ''
+    ).toLowerCase();
+
+const CDEK_FROM_ADDRESS =
+    normalizeEnvValue(
+        process.env.CDEK_FROM_ADDRESS ||
+        'Санкт-Петербург, улица Маршала Казакова, 58с1'
+    );
+
+
 const SAFEROUTE_TOKEN =
     normalizeEnvValue(
         process.env.SAFEROUTE_TOKEN ||
@@ -1584,6 +1597,369 @@ async function cdekBackfillFindExisting(
 
         throw error;
     }
+}
+
+
+async function runCdekPickupRepairAndIntake() {
+    if (CDEK_PICKUP_MODE !== 'execute') {
+        return;
+    }
+
+    const token =
+        await getCdekToken();
+
+    const paymentResult =
+        await fetchAllYooKassaPayments();
+
+    const paidDeliveries =
+        paymentResult.payments.filter(payment => {
+            const metadata =
+                payment?.metadata || {};
+
+            const amount =
+                Number(
+                    payment?.amount?.value ||
+                    0
+                );
+
+            const refunded =
+                Number(
+                    payment?.refunded_amount?.value ||
+                    0
+                );
+
+            const deliveryMethod =
+                String(
+                    metadata.deliveryMethod ||
+                    ''
+                );
+
+            return (
+                payment?.status === 'succeeded' &&
+                payment?.paid === true &&
+                amount > 0 &&
+                refunded <= 0 &&
+                !/САМОВЫВОЗ|SELF\s*PICKUP/i.test(
+                    deliveryMethod
+                )
+            );
+        });
+
+    const repaired = [];
+    const failed = [];
+    let totalWeight = 0;
+    let sender = null;
+
+    for (const payment of paidDeliveries) {
+        const orderId =
+            cdekBackfillClean(
+                payment?.metadata?.orderId ||
+                payment?.id,
+                100
+            );
+
+        try {
+            const existing =
+                await cdekBackfillFindExisting(
+                    token,
+                    orderId
+                );
+
+            if (!existing?.uuid) {
+                failed.push({
+                    orderId,
+                    error:
+                        'CDEK order not found'
+                });
+                continue;
+            }
+
+            const detailsResponse =
+                await axios.get(
+                    `${CDEK_API}/orders/${existing.uuid}`,
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${token}`
+                        },
+                        timeout:
+                            10000
+                    }
+                );
+
+            const entity =
+                detailsResponse.data?.entity ||
+                existing;
+
+            if (
+                !sender &&
+                entity?.sender &&
+                Array.isArray(
+                    entity.sender.phones
+                ) &&
+                entity.sender.phones[0]?.number
+            ) {
+                sender =
+                    entity.sender;
+            }
+
+            const packageWeight =
+                (Array.isArray(entity?.packages)
+                    ? entity.packages
+                    : [])
+                    .reduce(
+                        (sum, pkg) =>
+                            sum +
+                            Math.max(
+                                0,
+                                Number(
+                                    pkg?.weight ||
+                                    0
+                                )
+                            ),
+                        0
+                    );
+
+            totalWeight +=
+                packageWeight;
+
+            const patchResponse =
+                await axios.patch(
+                    `${CDEK_API}/orders/${existing.uuid}`,
+                    {
+                        from_location: {
+                            code: 137,
+                            city:
+                                'Санкт-Петербург',
+                            address:
+                                CDEK_FROM_ADDRESS
+                        }
+                    },
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${token}`,
+                            'Content-Type':
+                                'application/json'
+                        },
+                        timeout:
+                            15000
+                    }
+                );
+
+            const patchErrors =
+                cdekBackfillResponseErrors(
+                    patchResponse.data ||
+                    {}
+                );
+
+            if (patchErrors.length) {
+                throw new Error(
+                    patchErrors.join('; ')
+                );
+            }
+
+            repaired.push({
+                orderId,
+                uuid:
+                    existing.uuid,
+                cdekNumber:
+                    entity?.cdek_number ||
+                    existing?.cdek_number ||
+                    '',
+                weight:
+                    packageWeight
+            });
+        } catch (error) {
+            failed.push({
+                orderId,
+                error:
+                    cdekBackfillClean(
+                        error.response?.data
+                            ? JSON.stringify(
+                                error.response.data
+                            )
+                            : error.message,
+                        800
+                    )
+            });
+        }
+
+        await sleep(150);
+    }
+
+    if (!repaired.length) {
+        throw new Error(
+            'No CDEK orders repaired for pickup'
+        );
+    }
+
+    const anchorOrder =
+        repaired[0];
+
+    let existingIntake = null;
+
+    try {
+        const intakeResponse =
+            await axios.get(
+                `${CDEK_API}/orders/${anchorOrder.uuid}/intakes`,
+                {
+                    headers: {
+                        Authorization:
+                            `Bearer ${token}`
+                    },
+                    timeout:
+                        10000
+                }
+            );
+
+        const entities =
+            Array.isArray(
+                intakeResponse.data?.entity
+            )
+                ? intakeResponse.data.entity
+                : (
+                    intakeResponse.data?.entity
+                        ? [
+                            intakeResponse.data.entity
+                        ]
+                        : []
+                );
+
+        existingIntake =
+            entities.find(item =>
+                item?.uuid ||
+                item?.intake_number
+            ) ||
+            null;
+    } catch (error) {
+        if (
+            error.response?.status !== 404
+        ) {
+            console.warn(
+                'CDEK pickup existing intake check warning:',
+                error.response?.data ||
+                error.message
+            );
+        }
+    }
+
+    if (!sender) {
+        throw new Error(
+            'CDEK pickup sender contact with phone was not returned by CDEK'
+        );
+    }
+
+    let intake = existingIntake;
+
+    if (!intake) {
+        const intakePayload = {
+            order_uuid:
+                anchorOrder.uuid,
+            intake_date:
+                '2026-10-01',
+            intake_time_from:
+                '10:00',
+            intake_time_to:
+                '18:00',
+            name:
+                `RTN.PRO — ${repaired.length} отправлений`,
+            weight:
+                Math.max(
+                    1,
+                    Math.round(
+                        totalWeight
+                    )
+                ),
+            comment:
+                `Забрать всю подготовленную партию RTN.PRO: ${repaired.length} отправлений. Адрес: ${CDEK_FROM_ADDRESS}`,
+            sender: {
+                ...sender,
+                company:
+                    sender.company ||
+                    'RTN.PRO / SuppStore',
+                name:
+                    sender.name ||
+                    'RTN.PRO / SuppStore'
+            },
+            from_location: {
+                code: 137,
+                city:
+                    'Санкт-Петербург',
+                address:
+                    CDEK_FROM_ADDRESS
+            },
+            need_call:
+                true
+        };
+
+        const intakeResponse =
+            await axios.post(
+                `${CDEK_API}/intakes`,
+                intakePayload,
+                {
+                    headers: {
+                        Authorization:
+                            `Bearer ${token}`,
+                        'Content-Type':
+                            'application/json'
+                    },
+                    timeout:
+                        20000
+                }
+            );
+
+        const intakeErrors =
+            cdekBackfillResponseErrors(
+                intakeResponse.data ||
+                {}
+            );
+
+        if (intakeErrors.length) {
+            throw new Error(
+                intakeErrors.join('; ')
+            );
+        }
+
+        intake =
+            intakeResponse.data?.entity ||
+            {};
+    }
+
+    console.log(
+        'CDEK pickup batch result:',
+        JSON.stringify({
+            fromCityCode:
+                137,
+            fromAddress:
+                CDEK_FROM_ADDRESS,
+            pickupDate:
+                '2026-10-01',
+            pickupWindow:
+                '10:00-18:00',
+            repaired:
+                repaired.length,
+            failed:
+                failed.length,
+            totalWeight:
+                Math.round(
+                    totalWeight
+                ),
+            intakeUuid:
+                intake?.uuid ||
+                '',
+            intakeNumber:
+                intake?.intake_number ||
+                intake?.number ||
+                '',
+            existingIntake:
+                Boolean(
+                    existingIntake
+                ),
+            errors:
+                failed
+        })
+    );
 }
 
 async function runPaidCdekBackfill() {
@@ -15566,6 +15942,20 @@ app.listen(PORT, () => {
                 );
             }
         }, 8000);
+    }
+
+    if (CDEK_PICKUP_MODE === 'execute') {
+        setTimeout(async () => {
+            try {
+                await runCdekPickupRepairAndIntake();
+            } catch (error) {
+                console.error(
+                    'CDEK pickup batch startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 12000);
     }
 
     if (
