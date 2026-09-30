@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { createWarehouseRouter } = require('./rtn-warehouse');
+const { createBitrixWarehouseAppRouter } = require('./rtn-bitrix-warehouse-app');
 const {
     awardReferralCoinsForPayment,
     resolveReferralCode,
@@ -34,6 +35,15 @@ app.use(
         credentials: true
     }),
     createWarehouseRouter()
+);
+
+app.use(
+    '/api/warehouse-bitrix',
+    cors({
+        origin: true,
+        credentials: true
+    }),
+    createBitrixWarehouseAppRouter()
 );
 
 // Админка блога может работать по той же HttpOnly-сессии,
