@@ -154,6 +154,73 @@ const BITRIX_ASSIGNED_BY_ID =
 
 const CDEK_API = 'https://api.cdek.ru/v2';
 
+const SAFEROUTE_TOKEN =
+    normalizeEnvValue(
+        process.env.SAFEROUTE_TOKEN ||
+        ''
+    );
+
+const SAFEROUTE_SHOP_ID =
+    Number(
+        normalizeEnvValue(
+            process.env.SAFEROUTE_SHOP_ID ||
+            ''
+        )
+    ) || 0;
+
+let saferouteApiPromise = null;
+
+async function getSafeRouteApi() {
+    if (!saferouteApiPromise) {
+        saferouteApiPromise = import('saferoute-api')
+            .then(module => module.default || module)
+            .catch(error => {
+                saferouteApiPromise = null;
+                throw error;
+            });
+    }
+
+    return saferouteApiPromise;
+}
+
+function isSafeRouteConfigured() {
+    return Boolean(
+        SAFEROUTE_TOKEN &&
+        SAFEROUTE_SHOP_ID
+    );
+}
+
+function getSafeRouteClientIp(req) {
+    return String(
+        req.headers['x-forwarded-for'] ||
+        req.socket?.remoteAddress ||
+        ''
+    )
+        .split(',')[0]
+        .trim();
+}
+
+function normalizeSafeRouteWidgetUrl(value) {
+    const raw = String(value || '').trim();
+
+    if (
+        !raw ||
+        raw.length > 300 ||
+        /[\r\n]/.test(raw)
+    ) {
+        return '';
+    }
+
+    if (
+        raw.startsWith('/') ||
+        /^https:\/\/(?:widgets\.)?saferoute\.ru\//i.test(raw)
+    ) {
+        return raw;
+    }
+
+    return '';
+}
+
 const YCP_ACCESS_TOKEN =
     normalizeEnvValue(
         process.env.YCP_ACCESS_TOKEN ||
@@ -4516,6 +4583,105 @@ app.delete('/api/admin/articles/:id', requireBlogAdmin, (req, res) => {
     if (filtered.length === articles.length) return res.status(404).json({ error: 'Статья не найдена' });
     writeBlogArticles(filtered);
     res.json({ ok: true });
+});
+
+app.get('/api/saferoute/health', async (req, res) => {
+    if (!isSafeRouteConfigured()) {
+        return res.status(503).json({
+            ok: false,
+            configured: false,
+            error: 'SafeRoute is not configured'
+        });
+    }
+
+    try {
+        const api = await getSafeRouteApi();
+        const result = await api.user.getData(
+            SAFEROUTE_TOKEN
+        );
+
+        const success =
+            Number(result?.status || 0) >= 200 &&
+            Number(result?.status || 0) < 300 &&
+            !result?.error;
+
+        return res.status(success ? 200 : 502).json({
+            ok: success,
+            configured: true,
+            shopId: SAFEROUTE_SHOP_ID,
+            upstreamStatus:
+                result?.status || null,
+            error:
+                result?.error?.message ||
+                result?.error?.code ||
+                null
+        });
+    } catch (error) {
+        console.error(
+            'SafeRoute health error:',
+            error?.message || error
+        );
+
+        return res.status(502).json({
+            ok: false,
+            configured: true,
+            shopId: SAFEROUTE_SHOP_ID,
+            error: 'SafeRoute connection failed'
+        });
+    }
+});
+
+app.all('/api/saferoute/widget', async (req, res) => {
+    if (!isSafeRouteConfigured()) {
+        return res.status(503).json({
+            status: 'server_error',
+            error: 'SafeRoute is not configured'
+        });
+    }
+
+    const widgetUrl = normalizeSafeRouteWidgetUrl(
+        req.method === 'GET'
+            ? req.query?.url
+            : req.body?.url
+    );
+
+    if (!widgetUrl) {
+        return res.status(400).json({
+            status: 'request_error',
+            error: 'Invalid SafeRoute widget url'
+        });
+    }
+
+    const data =
+        req.method === 'GET'
+            ? req.query?.data
+            : req.body?.data;
+
+    try {
+        const api = await getSafeRouteApi();
+        const result = await api.widgets.widgetApi(
+            widgetUrl,
+            req.method === 'GET' ? 'GET' : 'POST',
+            data || {},
+            {
+                token: SAFEROUTE_TOKEN,
+                shopId: SAFEROUTE_SHOP_ID
+            },
+            getSafeRouteClientIp(req)
+        );
+
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error(
+            'SafeRoute widget proxy error:',
+            error?.message || error
+        );
+
+        return res.status(502).json({
+            status: 'server_error',
+            error: 'SafeRoute request failed'
+        });
+    }
 });
 
 app.get('/api/health', (req, res) => {
