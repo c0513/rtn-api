@@ -190,6 +190,12 @@ const BITRIX_DELIVERY_CLEANUP_MODE =
         ''
     ).toLowerCase();
 
+const BITRIX_CDEK_DOCS_MODE =
+    normalizeEnvValue(
+        process.env.BITRIX_CDEK_DOCS_MODE ||
+        ''
+    ).toLowerCase();
+
 const CDEK_API = 'https://api.cdek.ru/v2';
 
 const CDEK_PICKUP_MODE =
@@ -6148,6 +6154,283 @@ async function runBitrixDeliveryCleanup() {
         JSON.stringify({
             deleted,
             failed
+        })
+    );
+}
+
+
+async function runBitrixCdekDocsBackfill() {
+    if (BITRIX_CDEK_DOCS_MODE !== 'execute') {
+        return;
+    }
+
+    if (!isBitrixConfigured()) {
+        throw new Error(
+            'BITRIX_WEBHOOK_URL не настроен'
+        );
+    }
+
+    const token =
+        await getCdekToken();
+
+    const paymentResult =
+        await fetchAllYooKassaPayments();
+
+    const candidates =
+        paymentResult.payments.filter(payment => {
+            const amount =
+                Number(
+                    payment?.amount?.value ||
+                    0
+                );
+
+            const refunded =
+                Number(
+                    payment?.refunded_amount?.value ||
+                    0
+                );
+
+            const deliveryMethod =
+                String(
+                    payment?.metadata
+                        ?.deliveryMethod ||
+                    ''
+                );
+
+            return (
+                payment?.status === 'succeeded' &&
+                payment?.paid === true &&
+                amount > 0 &&
+                refunded <= 0 &&
+                !/САМОВЫВОЗ|SELF\s*PICKUP/i.test(
+                    deliveryMethod
+                )
+            );
+        });
+
+    const bratchikovOrderId =
+        '1790067172022-v5swmy';
+
+    const results = [];
+    let attached = 0;
+    let alreadyAttached = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const payment of candidates) {
+        const orderId =
+            String(
+                payment?.metadata?.orderId ||
+                ''
+            ).trim();
+
+        const item = {
+            orderId,
+            paymentId:
+                payment?.id || '',
+            status:
+                'pending'
+        };
+
+        try {
+            if (!orderId) {
+                skipped += 1;
+                item.status = 'skipped';
+                item.reason =
+                    'missing_order_id';
+                results.push(item);
+                continue;
+            }
+
+            // У Братчикова комплект уже прикреплен ранее.
+            if (orderId === bratchikovOrderId) {
+                alreadyAttached += 1;
+                item.status =
+                    'already_attached';
+                results.push(item);
+
+                upsertLocalOrder({
+                    orderId,
+                    bitrixCdekDocsAttached:
+                        true,
+                    bitrixCdekDocsAttachedAt:
+                        new Date().toISOString()
+                });
+
+                continue;
+            }
+
+            const localOrder =
+                readOrders().find(order =>
+                    String(
+                        order?.orderId ||
+                        ''
+                    ) === orderId
+                );
+
+            if (
+                localOrder
+                    ?.bitrixCdekDocsAttached
+            ) {
+                alreadyAttached += 1;
+                item.status =
+                    'already_attached';
+                results.push(item);
+                continue;
+            }
+
+            const dealId =
+                await findExistingBitrixDeal(
+                    orderId
+                );
+
+            if (!dealId) {
+                throw new Error(
+                    'Сделка Bitrix24 не найдена'
+                );
+            }
+
+            const cdekOrder =
+                await cdekBackfillFindExisting(
+                    token,
+                    orderId
+                );
+
+            if (!cdekOrder?.uuid) {
+                throw new Error(
+                    'Отправление CDEK не найдено'
+                );
+            }
+
+            const detailsResponse =
+                await axios.get(
+                    `${CDEK_API}/orders/${cdekOrder.uuid}`,
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${token}`
+                        },
+                        timeout:
+                            10000
+                    }
+                );
+
+            const entity =
+                detailsResponse.data?.entity ||
+                cdekOrder;
+
+            const cdekNumber =
+                String(
+                    entity?.cdek_number ||
+                    cdekOrder?.cdek_number ||
+                    ''
+                ).trim();
+
+            const [
+                barcodePdf,
+                waybillPdf
+            ] =
+                await Promise.all([
+                    cdekCreatePrintPdf({
+                        token,
+                        kind:
+                            'barcodes',
+                        orderUuid:
+                            cdekOrder.uuid
+                    }),
+                    cdekCreatePrintPdf({
+                        token,
+                        kind:
+                            'orders',
+                        orderUuid:
+                            cdekOrder.uuid
+                    })
+                ]);
+
+            const commentId =
+                await addBitrixTimelineComment({
+                    dealId,
+                    comment: [
+                        '📎 ДОКУМЕНТЫ СДЭК',
+                        cdekNumber
+                            ? `Номер СДЭК: ${cdekNumber}`
+                            : '',
+                        `№ ИМ: ${orderId}`,
+                        '',
+                        'Во вложении: наклейка СДЭК и накладная СДЭК.'
+                    ]
+                        .filter(Boolean)
+                        .join('\n'),
+                    files: [
+                        {
+                            name:
+                                `CDEK_наклейка_${cdekNumber || orderId}.pdf`,
+                            buffer:
+                                barcodePdf.buffer
+                        },
+                        {
+                            name:
+                                `CDEK_накладная_${cdekNumber || orderId}.pdf`,
+                            buffer:
+                                waybillPdf.buffer
+                        }
+                    ]
+                });
+
+            upsertLocalOrder({
+                orderId,
+                paymentId:
+                    payment?.id,
+                bitrixDealId:
+                    Number(dealId),
+                cdekUuid:
+                    cdekOrder.uuid,
+                cdekNumber,
+                bitrixCdekDocsAttached:
+                    true,
+                bitrixCdekDocsAttachedAt:
+                    new Date().toISOString(),
+                bitrixCdekDocsCommentId:
+                    commentId
+            });
+
+            attached += 1;
+            item.status = 'attached';
+            item.dealId =
+                Number(dealId);
+            item.cdekNumber =
+                cdekNumber;
+            item.commentId =
+                commentId;
+            item.barcodePrintUuid =
+                barcodePdf.printUuid;
+            item.waybillPrintUuid =
+                waybillPdf.printUuid;
+        } catch (error) {
+            failed += 1;
+            item.status = 'error';
+            item.error =
+                error.response?.data
+                    ? JSON.stringify(
+                        error.response.data
+                    )
+                    : error.message;
+        }
+
+        results.push(item);
+        await sleep(500);
+    }
+
+    console.log(
+        'Bitrix CDEK docs backfill result:',
+        JSON.stringify({
+            candidates:
+                candidates.length,
+            attached,
+            alreadyAttached,
+            skipped,
+            failed,
+            results
         })
     );
 }
@@ -16817,6 +17100,20 @@ app.listen(PORT, () => {
                 );
             }
         }, 18000);
+    }
+
+    if (BITRIX_CDEK_DOCS_MODE === 'execute') {
+        setTimeout(async () => {
+            try {
+                await runBitrixCdekDocsBackfill();
+            } catch (error) {
+                console.error(
+                    'Bitrix CDEK docs backfill startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 20000);
     }
 
     if (BITRIX_DELIVERY_CLEANUP_MODE === 'execute') {
