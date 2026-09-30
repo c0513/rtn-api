@@ -606,6 +606,31 @@ async function runPaidSafeRouteBackfill() {
         return;
     }
 
+    const safeRouteApi =
+        await getSafeRouteApi();
+
+    console.log(
+        'SafeRoute API orders methods:',
+        JSON.stringify(
+            Object.keys(
+                safeRouteApi?.orders ||
+                {}
+            )
+        )
+    );
+
+    if (
+        typeof safeRouteApi?.orders?.createOrder ===
+        'function'
+    ) {
+        console.log(
+            'SafeRoute API createOrder signature:',
+            String(
+                safeRouteApi.orders.createOrder
+            ).slice(0, 1500)
+        );
+    }
+
     const paymentResult =
         await fetchAllYooKassaPayments();
 
