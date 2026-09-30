@@ -1714,6 +1714,18 @@ async function runPaidCdekBackfill() {
         };
 
         try {
+            if (
+                /САМОВЫВОЗ|SELF\s*PICKUP/i.test(
+                    summary.deliveryMethod
+                )
+            ) {
+                summary.status =
+                    'skip_self_pickup';
+                skipped += 1;
+                report.push(summary);
+                continue;
+            }
+
             if (!imNumber) {
                 summary.status =
                     'skip_no_order_number';
@@ -1806,21 +1818,35 @@ async function runPaidCdekBackfill() {
                     254
                 );
 
-            const deliveryCity =
-                cdekBackfillClean(
-                    metadata.deliveryCity,
-                    200
-                );
-
             const deliveryAddress =
                 cdekBackfillClean(
                     metadata.deliveryAddress,
                     1000
                 );
 
+            const pvzMatch =
+                deliveryAddress.match(
+                    /ПВЗ\s+СДЭК\s+([A-ZА-Я0-9-]+),\s*([^,()]+),/i
+                );
+
+            const inferredPickupCode =
+                cdekBackfillClean(
+                    pvzMatch?.[1],
+                    100
+                );
+
+            const inferredCity =
+                cdekBackfillClean(
+                    metadata.deliveryCity ||
+                    pvzMatch?.[2] ||
+                    deliveryAddress
+                        .split(',')[0],
+                    200
+                );
+
             if (
                 !recipientPhone ||
-                !deliveryCity ||
+                !inferredCity ||
                 !deliveryAddress
             ) {
                 summary.status =
@@ -1833,7 +1859,7 @@ async function runPaidCdekBackfill() {
             const city =
                 await cdekBackfillResolveCity(
                     token,
-                    deliveryCity
+                    inferredCity
                 );
 
             if (!city?.code) {
@@ -1844,6 +1870,10 @@ async function runPaidCdekBackfill() {
                 continue;
             }
 
+            summary.deliveryCity =
+                city.fullName ||
+                inferredCity;
+
             const isCourier =
                 /КУРЬЕР|COURIER|ДВЕР/i.test(
                     String(
@@ -1853,9 +1883,18 @@ async function runPaidCdekBackfill() {
                 );
 
             let pickupPoint =
-                null;
+                inferredPickupCode
+                    ? {
+                        code:
+                            inferredPickupCode,
+                        score:
+                            100,
+                        address:
+                            deliveryAddress
+                    }
+                    : null;
 
-            if (!isCourier) {
+            if (!isCourier && !pickupPoint) {
                 pickupPoint =
                     await cdekBackfillResolvePickupPoint(
                         token,
