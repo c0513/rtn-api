@@ -582,6 +582,225 @@ async function fetchAllYooKassaPayments() {
     };
 }
 
+
+const SAFEROUTE_BACKFILL_MODE =
+    normalizeEnvValue(
+        process.env.SAFEROUTE_BACKFILL_MODE ||
+        ''
+    ).toLowerCase();
+
+async function runPaidSafeRouteBackfill() {
+    if (
+        !['dry-run', 'execute']
+            .includes(
+                SAFEROUTE_BACKFILL_MODE
+            )
+    ) {
+        return;
+    }
+
+    if (!isSafeRouteConfigured()) {
+        console.error(
+            'SafeRoute paid backfill: SafeRoute is not configured'
+        );
+        return;
+    }
+
+    const paymentResult =
+        await fetchAllYooKassaPayments();
+
+    const candidates =
+        paymentResult.payments.filter(
+            payment => {
+                const amount =
+                    Number(
+                        payment?.amount?.value ||
+                        0
+                    );
+
+                const refunded =
+                    Number(
+                        payment?.refunded_amount?.value ||
+                        0
+                    );
+
+                return (
+                    payment?.status ===
+                        'succeeded' &&
+                    payment?.paid === true &&
+                    amount > 0 &&
+                    refunded <= 0
+                );
+            }
+        );
+
+    const withSafeRouteId = [];
+    const withoutSafeRouteId = [];
+
+    for (const payment of candidates) {
+        const metadata =
+            payment?.metadata || {};
+
+        const safeRouteId =
+            cleanSafeRouteReference(
+                metadata.saferouteOrderId ||
+                metadata.saferouteCabinetId
+            );
+
+        const summary = {
+            paymentId:
+                String(
+                    payment?.id || ''
+                ),
+            orderId:
+                cleanSafeRouteReference(
+                    metadata.orderId,
+                    100
+                ),
+            safeRouteId:
+                safeRouteId || '',
+            checkoutSessionId:
+                cleanSafeRouteReference(
+                    metadata.saferouteCheckoutSessId
+                ),
+            deliveryMethod:
+                cleanOrderValue(
+                    metadata.deliveryMethod,
+                    100
+                ),
+            deliveryCity:
+                cleanOrderValue(
+                    metadata.deliveryCity,
+                    200
+                ),
+            hasDeliveryAddress:
+                Boolean(
+                    cleanOrderValue(
+                        metadata.deliveryAddress,
+                        1000
+                    )
+                )
+        };
+
+        if (safeRouteId) {
+            withSafeRouteId.push({
+                payment,
+                summary
+            });
+        } else {
+            withoutSafeRouteId.push(
+                summary
+            );
+        }
+    }
+
+    console.log(
+        'SafeRoute paid backfill audit:',
+        JSON.stringify({
+            mode:
+                SAFEROUTE_BACKFILL_MODE,
+            yooKassaPages:
+                paymentResult.pages,
+            paidCandidates:
+                candidates.length,
+            withSafeRouteId:
+                withSafeRouteId.length,
+            withoutSafeRouteId:
+                withoutSafeRouteId.length,
+            withoutSafeRouteIdOrders:
+                withoutSafeRouteId.map(
+                    item =>
+                        item.orderId ||
+                        item.paymentId
+                )
+        })
+    );
+
+    if (
+        SAFEROUTE_BACKFILL_MODE !==
+        'execute'
+    ) {
+        return;
+    }
+
+    let confirmed = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (
+        const {
+            payment,
+            summary
+        }
+        of withSafeRouteId
+    ) {
+        try {
+            const result =
+                await confirmPaidSafeRouteOrder(
+                    payment
+                );
+
+            if (result?.ok) {
+                confirmed += 1;
+
+                try {
+                    upsertLocalOrder({
+                        orderId:
+                            summary.orderId,
+                        paymentId:
+                            summary.paymentId,
+                        saferouteOrderId:
+                            result.orderId ||
+                            summary.safeRouteId,
+                        saferouteCabinetId:
+                            result.cabinetId ||
+                            '',
+                        saferouteConfirmedAt:
+                            new Date()
+                                .toISOString()
+                    });
+                } catch (
+                    storageError
+                ) {
+                    console.warn(
+                        'SafeRoute backfill local order update warning:',
+                        storageError.message
+                    );
+                }
+            }
+        } catch (error) {
+            failed += 1;
+
+            errors.push({
+                orderId:
+                    summary.orderId ||
+                    summary.paymentId,
+                message:
+                    cleanOrderValue(
+                        error?.message ||
+                        'SafeRoute confirmation failed',
+                        300
+                    )
+            });
+        }
+
+        await sleep(150);
+    }
+
+    console.log(
+        'SafeRoute paid backfill result:',
+        JSON.stringify({
+            attempted:
+                withSafeRouteId.length,
+            confirmed,
+            failed,
+            skippedNoSafeRouteId:
+                withoutSafeRouteId.length,
+            errors
+        })
+    );
+}
+
 async function fetchAllYooKassaReceipts() {
     if (!YOOKASSA_SHOP_ID || !YOOKASSA_SECRET_KEY) {
         throw new Error('YooKassa не настроена');
@@ -14035,6 +14254,24 @@ app.listen(PORT, () => {
         `RTN API запущен на порту ${PORT}`
     );
 
+
+    if (
+        ['dry-run', 'execute'].includes(
+            SAFEROUTE_BACKFILL_MODE
+        )
+    ) {
+        setTimeout(async () => {
+            try {
+                await runPaidSafeRouteBackfill();
+            } catch (error) {
+                console.error(
+                    'SafeRoute paid backfill startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 8000);
+    }
 
     if (isBitrixConfigured()) {
         setTimeout(async () => {
