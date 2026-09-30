@@ -196,6 +196,12 @@ const BITRIX_CDEK_DOCS_MODE =
         ''
     ).toLowerCase();
 
+const BITRIX_CONTACT_REPAIR_MODE =
+    normalizeEnvValue(
+        process.env.BITRIX_CONTACT_REPAIR_MODE ||
+        ''
+    ).toLowerCase();
+
 const CDEK_API = 'https://api.cdek.ru/v2';
 
 const CDEK_PICKUP_MODE =
@@ -4780,6 +4786,223 @@ async function findBitrixContactId(phone, email) {
     return null;
 }
 
+
+function splitBitrixCustomerName(value) {
+    const parts =
+        String(value || '')
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean);
+
+    if (!parts.length) {
+        return {};
+    }
+
+    if (parts.length === 1) {
+        return {
+            name:
+                parts[0]
+        };
+    }
+
+    return {
+        lastName:
+            parts[0],
+        name:
+            parts[1],
+        secondName:
+            parts.slice(2).join(' ')
+    };
+}
+
+function looksLikeBitrixUsername(value) {
+    const text =
+        String(value || '').trim();
+
+    if (!text) {
+        return true;
+    }
+
+    if (/^(покупатель|клиент|customer|user)\b/i.test(text)) {
+        return true;
+    }
+
+    if (
+        !/\s/.test(text) &&
+        /^[a-z0-9._@-]{4,}$/i.test(text)
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+async function enrichExistingBitrixContact(
+    contactId,
+    customer = {}
+) {
+    if (!contactId) {
+        return;
+    }
+
+    const existing =
+        await bitrixCall(
+            'crm.contact.get',
+            {
+                id:
+                    Number(contactId)
+            }
+        );
+
+    const incomingName =
+        String(
+            customer?.name ||
+            ''
+        ).trim();
+
+    const parsed =
+        splitBitrixCustomerName(
+            incomingName
+        );
+
+    const fields = {};
+
+    const existingFullName =
+        [
+            existing?.LAST_NAME,
+            existing?.NAME,
+            existing?.SECOND_NAME
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+
+    if (
+        incomingName &&
+        (
+            looksLikeBitrixUsername(
+                existingFullName
+            ) ||
+            incomingName.split(/\s+/)
+                .filter(Boolean)
+                .length >= 2
+        )
+    ) {
+        if (parsed.name) {
+            fields.NAME =
+                parsed.name;
+        }
+
+        if (parsed.lastName) {
+            fields.LAST_NAME =
+                parsed.lastName;
+        }
+
+        if (parsed.secondName) {
+            fields.SECOND_NAME =
+                parsed.secondName;
+        }
+    }
+
+    const normalizeComm =
+        value =>
+            String(value || '')
+                .trim()
+                .toLowerCase();
+
+    const currentPhones =
+        Array.isArray(
+            existing?.PHONE
+        )
+            ? existing.PHONE
+            : [];
+
+    const currentEmails =
+        Array.isArray(
+            existing?.EMAIL
+        )
+            ? existing.EMAIL
+            : [];
+
+    const incomingPhone =
+        normalizeBitrixPhone(
+            customer?.phone
+        );
+
+    const incomingEmail =
+        String(
+            customer?.email ||
+            ''
+        )
+            .trim()
+            .toLowerCase();
+
+    if (
+        incomingPhone &&
+        !currentPhones.some(item =>
+            normalizeBitrixPhone(
+                item?.VALUE
+            ) === incomingPhone
+        )
+    ) {
+        fields.PHONE = [
+            ...currentPhones.map(item => ({
+                ID:
+                    item?.ID,
+                VALUE:
+                    item?.VALUE,
+                VALUE_TYPE:
+                    item?.VALUE_TYPE ||
+                    'MOBILE'
+            })),
+            {
+                VALUE:
+                    incomingPhone,
+                VALUE_TYPE:
+                    'MOBILE'
+            }
+        ];
+    }
+
+    if (
+        incomingEmail &&
+        !currentEmails.some(item =>
+            normalizeComm(
+                item?.VALUE
+            ) === incomingEmail
+        )
+    ) {
+        fields.EMAIL = [
+            ...currentEmails.map(item => ({
+                ID:
+                    item?.ID,
+                VALUE:
+                    item?.VALUE,
+                VALUE_TYPE:
+                    item?.VALUE_TYPE ||
+                    'WORK'
+            })),
+            {
+                VALUE:
+                    incomingEmail,
+                VALUE_TYPE:
+                    'WORK'
+            }
+        ];
+    }
+
+    if (Object.keys(fields).length) {
+        await bitrixCall(
+            'crm.contact.update',
+            {
+                id:
+                    Number(contactId),
+                fields
+            }
+        );
+    }
+}
+
 async function getOrCreateBitrixContact(customer = {}) {
     const existingId =
         await findBitrixContactId(
@@ -4788,6 +5011,19 @@ async function getOrCreateBitrixContact(customer = {}) {
         );
 
     if (existingId) {
+        try {
+            await enrichExistingBitrixContact(
+                existingId,
+                customer
+            );
+        } catch (error) {
+            console.error(
+                'Bitrix24 existing contact enrichment error:',
+                error.response?.data ||
+                error.message
+            );
+        }
+
         return existingId;
     }
 
@@ -6158,6 +6394,176 @@ async function runBitrixDeliveryCleanup() {
     );
 }
 
+
+
+async function runBitrixContactRepair() {
+    if (BITRIX_CONTACT_REPAIR_MODE !== 'execute') {
+        return;
+    }
+
+    const orderId =
+        '1790761621151-1s9wg8';
+
+    const paymentResult =
+        await fetchAllYooKassaPayments();
+
+    const payment =
+        paymentResult.payments.find(item =>
+            String(
+                item?.metadata?.orderId ||
+                ''
+            ).trim() === orderId
+        );
+
+    if (!payment) {
+        throw new Error(
+            'Платеж заказа #300920261247 не найден'
+        );
+    }
+
+    const order =
+        await buildPaidOrderPayload(
+            payment
+        );
+
+    const dealId =
+        await findExistingBitrixDeal(
+            orderId
+        );
+
+    if (!dealId) {
+        throw new Error(
+            'Сделка заказа #300920261247 не найдена'
+        );
+    }
+
+    const deal =
+        await bitrixCall(
+            'crm.deal.get',
+            {
+                id:
+                    Number(dealId)
+            }
+        );
+
+    const contactId =
+        Number(
+            deal?.CONTACT_ID ||
+            0
+        );
+
+    if (!contactId) {
+        throw new Error(
+            'У сделки #300920261247 нет связанного контакта'
+        );
+    }
+
+    const before =
+        await bitrixCall(
+            'crm.contact.get',
+            {
+                id:
+                    contactId
+            }
+        );
+
+    const customer = {
+        ...order.customer,
+        name:
+            String(
+                order?.customer?.name ||
+                payment?.metadata
+                    ?.customerName ||
+                ''
+            ).trim(),
+        phone:
+            String(
+                order?.customer?.phone ||
+                payment?.metadata
+                    ?.customerPhone ||
+                ''
+            ).trim(),
+        email:
+            String(
+                order?.customer?.email ||
+                payment?.metadata
+                    ?.customerEmail ||
+                ''
+            ).trim()
+    };
+
+    await enrichExistingBitrixContact(
+        contactId,
+        customer
+    );
+
+    const after =
+        await bitrixCall(
+            'crm.contact.get',
+            {
+                id:
+                    contactId
+            }
+        );
+
+    console.log(
+        'Bitrix contact repair result:',
+        JSON.stringify({
+            orderId,
+            publicOrderNumber:
+                getPublicOrderNumber(
+                    orderId
+                ),
+            dealId:
+                Number(dealId),
+            contactId,
+            sourceCustomer:
+                customer,
+            before: {
+                name:
+                    [
+                        before?.LAST_NAME,
+                        before?.NAME,
+                        before?.SECOND_NAME
+                    ]
+                        .filter(Boolean)
+                        .join(' ')
+                        .trim(),
+                phones:
+                    (before?.PHONE || [])
+                        .map(item =>
+                            item?.VALUE
+                        ),
+                emails:
+                    (before?.EMAIL || [])
+                        .map(item =>
+                            item?.VALUE
+                        )
+            },
+            after: {
+                name:
+                    [
+                        after?.LAST_NAME,
+                        after?.NAME,
+                        after?.SECOND_NAME
+                    ]
+                        .filter(Boolean)
+                        .join(' ')
+                        .trim(),
+                phones:
+                    (after?.PHONE || [])
+                        .map(item =>
+                            item?.VALUE
+                        ),
+                emails:
+                    (after?.EMAIL || [])
+                        .map(item =>
+                            item?.VALUE
+                        )
+            }
+        })
+    );
+}
 
 async function runBitrixCdekDocsBackfill() {
     if (BITRIX_CDEK_DOCS_MODE !== 'execute') {
@@ -17100,6 +17506,20 @@ app.listen(PORT, () => {
                 );
             }
         }, 18000);
+    }
+
+    if (BITRIX_CONTACT_REPAIR_MODE === 'execute') {
+        setTimeout(async () => {
+            try {
+                await runBitrixContactRepair();
+            } catch (error) {
+                console.error(
+                    'Bitrix contact repair startup error:',
+                    error.response?.data ||
+                    error.message
+                );
+            }
+        }, 16000);
     }
 
     if (BITRIX_CDEK_DOCS_MODE === 'execute') {
