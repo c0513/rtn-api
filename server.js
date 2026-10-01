@@ -15768,13 +15768,18 @@ function oneCEmptyCommerceMl(cmlVersion = '2.07') {
             .toISOString()
             .replace(/\.\d{3}Z$/, '');
 
+    const requestedVersion =
+        String(cmlVersion || '').trim();
+
     const version =
-        String(cmlVersion || '').trim() === '2.10'
-            ? '2.10'
+        ['2.07', '2.08', '2.10'].includes(
+            requestedVersion
+        )
+            ? requestedVersion
             : '2.07';
 
     const namespace =
-        version === '2.10'
+        ['2.08', '2.10'].includes(version)
             ? 'urn:1C.ru:commerceml_210'
             : 'urn:1C.ru:commerceml_2';
 
@@ -16359,7 +16364,7 @@ function oneCOrderXml(order) {
         `<Номер>${oneCXmlEscape(order.paymentId)}</Номер>`,
         `<Дата>${oneCXmlEscape(order.paidDate)}</Дата>`,
         '<ХозОперация>Эквайринговая операция</ХозОперация>',
-        '<Валюта>643</Валюта>',
+        '<Валюта>RUB</Валюта>',
         '<Курс>1</Курс>',
         `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
         '<ЗначенияРеквизитов>',
@@ -16387,7 +16392,7 @@ function oneCOrderXml(order) {
         `<Дата>${oneCXmlEscape(order.date)}</Дата>`,
         '<ХозОперация>Заказ товара</ХозОперация>',
         '<Роль>Продавец</Роль>',
-        '<Валюта>643</Валюта>',
+        '<Валюта>RUB</Валюта>',
         '<Курс>1</Курс>',
         `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
         '<Контрагенты>',
@@ -16416,7 +16421,6 @@ function oneCOrderXml(order) {
         )}</Комментарий>`,
         `<Товары>${itemsXml}</Товары>`,
         `<ЗначенияРеквизитов>${requisites}</ЗначенияРеквизитов>`,
-        paymentDocumentXml,
         '</Документ>'
     ].join('');
 }
@@ -16430,13 +16434,18 @@ function oneCOrdersCommerceMl(
             .toISOString()
             .replace(/\.\d{3}Z$/, '');
 
+    const requestedVersion =
+        String(cmlVersion || '').trim();
+
     const version =
-        String(cmlVersion || '').trim() === '2.10'
-            ? '2.10'
+        ['2.07', '2.08', '2.10'].includes(
+            requestedVersion
+        )
+            ? requestedVersion
             : '2.07';
 
     const namespace =
-        version === '2.10'
+        ['2.08', '2.10'].includes(version)
             ? 'urn:1C.ru:commerceml_210'
             : 'urn:1C.ru:commerceml_2';
 
@@ -17253,14 +17262,35 @@ app.all(
                 ''
             ).trim().toLowerCase();
 
-        const requestedCmlVersion =
+        const requestedCmlVersionRaw =
             String(
+                req.query?.version ||
                 req.query?.cmlVersion ||
                 req.query?.cmlversion ||
                 ''
-            ).trim() === '2.10'
-                ? '2.10'
+            ).trim();
+
+        const requestedCmlVersion =
+            ['2.07', '2.08', '2.10'].includes(
+                requestedCmlVersionRaw
+            )
+                ? requestedCmlVersionRaw
                 : '';
+
+        console.log(
+            '1C exchange request:',
+            JSON.stringify({
+                method: req.method,
+                type,
+                mode,
+                version:
+                    requestedCmlVersionRaw ||
+                    null,
+                filename:
+                    req.query?.filename ||
+                    null
+            })
+        );
 
         // 1С УТ при кнопке "Проверить соединение" может сначала
         // обращаться с type=catalog, даже если нам нужен обмен заказами.
