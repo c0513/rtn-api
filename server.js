@@ -16080,6 +16080,510 @@ async function buildOneCTestOrderCommerceMl(
     };
 }
 
+
+async function listBitrixPaidRtnDeals() {
+    const deals =
+        await bitrixCall(
+            'crm.deal.list',
+            {
+                order: {
+                    DATE_CREATE:
+                        'ASC'
+                },
+                filter: {
+                    ORIGINATOR_ID:
+                        'RTN.PRO',
+                    STAGE_ID:
+                        BITRIX_STAGE_PAID
+                },
+                select: [
+                    'ID',
+                    'TITLE',
+                    'ORIGIN_ID',
+                    'OPPORTUNITY',
+                    'DATE_CREATE',
+                    'BEGINDATE',
+                    'CONTACT_ID',
+                    BITRIX_ORDER_FIELDS.orderNumber,
+                    BITRIX_ORDER_FIELDS.deliveryAddress,
+                    BITRIX_ORDER_FIELDS.deliveryCost
+                ],
+                start: 0
+            }
+        );
+
+    return Array.isArray(deals)
+        ? deals
+        : [];
+}
+
+async function getBitrixContactForOneC(contactId) {
+    if (!Number(contactId)) {
+        return {
+            name:
+                'Покупатель RTN.PRO',
+            phone:
+                '',
+            email:
+                ''
+        };
+    }
+
+    const contact =
+        await bitrixCall(
+            'crm.contact.get',
+            {
+                id:
+                    Number(contactId)
+            }
+        );
+
+    const name =
+        [
+            contact?.LAST_NAME,
+            contact?.NAME,
+            contact?.SECOND_NAME
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .trim() ||
+        'Покупатель RTN.PRO';
+
+    const phone =
+        Array.isArray(
+            contact?.PHONE
+        )
+            ? String(
+                contact.PHONE[0]?.VALUE ||
+                ''
+            ).trim()
+            : '';
+
+    const email =
+        Array.isArray(
+            contact?.EMAIL
+        )
+            ? String(
+                contact.EMAIL[0]?.VALUE ||
+                ''
+            )
+                .trim()
+                .toLowerCase()
+            : '';
+
+    return {
+        name,
+        phone,
+        email
+    };
+}
+
+async function buildOneCOrderFromBitrixDeal(
+    deal,
+    productExternalIdCache
+) {
+    const dealId =
+        Number(
+            deal?.ID ||
+            deal?.id ||
+            0
+        );
+
+    if (!dealId) {
+        throw new Error(
+            'Bitrix deal без ID'
+        );
+    }
+
+    const orderId =
+        String(
+            deal?.ORIGIN_ID ||
+            deal?.originId ||
+            deal?.[
+                BITRIX_ORDER_FIELDS.orderNumber
+            ] ||
+            dealId
+        ).trim();
+
+    const customer =
+        await getBitrixContactForOneC(
+            deal?.CONTACT_ID ||
+            deal?.contactId
+        );
+
+    customer.address =
+        String(
+            deal?.[
+                BITRIX_ORDER_FIELDS.deliveryAddress
+            ] ||
+            ''
+        ).trim();
+
+    customer.city =
+        '';
+
+    const rawRows =
+        await bitrixCall(
+            'crm.deal.productrows.get',
+            {
+                id:
+                    dealId
+            }
+        );
+
+    const rows =
+        Array.isArray(rawRows)
+            ? rawRows
+            : [];
+
+    if (!rows.length) {
+        throw new Error(
+            `Bitrix deal ${dealId}: нет товарных строк`
+        );
+    }
+
+    const lines = [];
+    let calculatedTotal = 0;
+    let deliveryMethod = '';
+
+    for (const row of rows) {
+        const name =
+            String(
+                row?.PRODUCT_NAME ||
+                row?.productName ||
+                ''
+            ).trim();
+
+        const quantity =
+            Math.max(
+                1,
+                Number(
+                    row?.QUANTITY ||
+                    row?.quantity ||
+                    1
+                )
+            );
+
+        const unitPrice =
+            Math.max(
+                0,
+                Number(
+                    row?.PRICE ||
+                    row?.price ||
+                    0
+                )
+            );
+
+        const total =
+            Number(
+                (
+                    quantity *
+                    unitPrice
+                ).toFixed(2)
+            );
+
+        if (
+            /^ДОСТАВКА\s*[—-]/i.test(
+                name
+            )
+        ) {
+            deliveryMethod =
+                name
+                    .replace(
+                        /^ДОСТАВКА\s*[—-]\s*/i,
+                        ''
+                    )
+                    .trim();
+
+            lines.push({
+                id:
+                    'ORDER_DELIVERY',
+                catalogId:
+                    '',
+                name:
+                    name ||
+                    'Доставка заказа',
+                quantity,
+                unitPrice,
+                total,
+                type:
+                    'Услуга'
+            });
+
+            calculatedTotal +=
+                total;
+
+            continue;
+        }
+
+        const productId =
+            Number(
+                row?.PRODUCT_ID ||
+                row?.productId ||
+                0
+            );
+
+        if (!productId) {
+            throw new Error(
+                `Bitrix deal ${dealId}: у позиции "${name}" нет PRODUCT_ID`
+            );
+        }
+
+        let externalId =
+            productExternalIdCache.get(
+                productId
+            ) ||
+            '';
+
+        if (!externalId) {
+            const productResult =
+                await bitrixCall(
+                    'catalog.product.get',
+                    {
+                        id:
+                            productId
+                    }
+                );
+
+            const product =
+                productResult?.product ||
+                productResult?.item ||
+                productResult ||
+                {};
+
+            externalId =
+                String(
+                    product?.xmlId ||
+                    product?.XML_ID ||
+                    ''
+                )
+                    .trim()
+                    .replace(
+                        /^RTN:/i,
+                        ''
+                    );
+
+            if (externalId) {
+                productExternalIdCache.set(
+                    productId,
+                    externalId
+                );
+            }
+        }
+
+        const mapped =
+            ONEC_PRODUCT_MAP[
+                externalId
+            ];
+
+        if (!mapped) {
+            throw new Error(
+                `Bitrix deal ${dealId}: нет GUID 1С для ${externalId || name || productId}`
+            );
+        }
+
+        lines.push({
+            id:
+                mapped.id,
+            catalogId:
+                ONEC_CATALOG_ID,
+            name:
+                mapped.name,
+            quantity,
+            unitPrice,
+            total,
+            type:
+                'Товар'
+        });
+
+        calculatedTotal +=
+            total;
+    }
+
+    const amount =
+        Math.max(
+            0,
+            Number(
+                deal?.OPPORTUNITY ||
+                deal?.opportunity ||
+                0
+            )
+        );
+
+    if (
+        Math.abs(
+            calculatedTotal -
+            amount
+        ) > 0.05
+    ) {
+        throw new Error(
+            `Bitrix deal ${dealId}: сумма строк ${calculatedTotal} != сумма сделки ${amount}`
+        );
+    }
+
+    const created =
+        oneCDateTimeParts(
+            deal?.DATE_CREATE ||
+            deal?.dateCreate ||
+            new Date().toISOString()
+        );
+
+    const paid =
+        oneCDateTimeParts(
+            deal?.BEGINDATE ||
+            deal?.begindate ||
+            deal?.DATE_CREATE ||
+            deal?.dateCreate ||
+            new Date().toISOString()
+        );
+
+    return {
+        orderId,
+        publicNumber:
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.orderNumber
+                ] ||
+                getPublicOrderNumber(
+                    orderId
+                )
+            ).trim(),
+        date:
+            created.date,
+        time:
+            created.time,
+        paidDate:
+            paid.date,
+        paidTime:
+            paid.time,
+        amount,
+        customer,
+        customerId:
+            oneCCustomerId(
+                customer
+            ),
+        deliveryMethod,
+        fulfillment: {
+            store:
+                RTN_FULFILLMENT_STORE,
+            city:
+                RTN_FULFILLMENT_CITY,
+            address:
+                RTN_FULFILLMENT_ADDRESS
+        },
+        promoCode:
+            '',
+        paymentId:
+            `RTN-${orderId}`,
+        lines
+    };
+}
+
+async function buildOneCBitrixPaidOrdersCommerceMl(
+    cmlVersion = '2.07'
+) {
+    const deals =
+        await listBitrixPaidRtnDeals();
+
+    const localOrders =
+        readOrders();
+
+    const productExternalIdCache =
+        new Map();
+
+    const orders = [];
+    const skipped = [];
+    const errors = [];
+
+    for (const deal of deals) {
+        const dealId =
+            Number(
+                deal?.ID ||
+                deal?.id ||
+                0
+            );
+
+        const orderId =
+            String(
+                deal?.ORIGIN_ID ||
+                deal?.originId ||
+                deal?.[
+                    BITRIX_ORDER_FIELDS.orderNumber
+                ] ||
+                dealId
+            ).trim();
+
+        const existing =
+            localOrders.find(order =>
+                String(
+                    order?.orderId ||
+                    ''
+                ).trim() ===
+                    orderId
+            );
+
+        if (
+            existing?.onecDocumentId ||
+            existing?.onecExportedAt
+        ) {
+            skipped.push({
+                orderId,
+                dealId,
+                reason:
+                    existing?.onecDocumentId
+                        ? 'already_linked_1c'
+                        : 'already_exported_1c'
+            });
+            continue;
+        }
+
+        try {
+            orders.push(
+                await buildOneCOrderFromBitrixDeal(
+                    deal,
+                    productExternalIdCache
+                )
+            );
+        } catch (error) {
+            errors.push({
+                orderId,
+                dealId,
+                error:
+                    error?.message ||
+                    'Не удалось собрать заказ из Bitrix'
+            });
+        }
+
+        await sleep(120);
+    }
+
+    if (errors.length) {
+        const preview =
+            errors
+                .slice(0, 10)
+                .map(item =>
+                    `${item.orderId || item.dealId}: ${item.error}`
+                )
+                .join('; ');
+
+        throw new Error(
+            `1С Bitrix bulk export заблокирован: ${errors.length} заказ(ов) не готовы. ${preview}`
+        );
+    }
+
+    return {
+        orders,
+        skipped,
+        candidates:
+            deals.length,
+        xml:
+            oneCOrdersCommerceMl(
+                orders,
+                cmlVersion
+            )
+    };
+}
+
 async function buildOneCPaidOrdersCommerceMl(
     cmlVersion = '2.07'
 ) {
@@ -16468,7 +16972,7 @@ app.all(
 
             try {
                 const generated =
-                    await buildOneCPaidOrdersCommerceMl(
+                    await buildOneCBitrixPaidOrdersCommerceMl(
                         effectiveCmlVersion
                     );
 
@@ -18081,12 +18585,12 @@ app.listen(PORT, () => {
         setTimeout(async () => {
             try {
                 const audit =
-                    await buildOneCPaidOrdersCommerceMl(
+                    await buildOneCBitrixPaidOrdersCommerceMl(
                         '2.07'
                     );
 
                 console.log(
-                    `1C bulk export audit: paid candidates=${audit.candidates}, ready=${audit.orders.length}, skipped=${audit.skipped.length}`
+                    `1C Bitrix bulk export audit: paid candidates=${audit.candidates}, ready=${audit.orders.length}, skipped=${audit.skipped.length}`
                 );
             } catch (error) {
                 console.error(
