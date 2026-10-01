@@ -8970,33 +8970,65 @@ async function sendPaidOrderToTelegram(payment) {
     const metadata =
         payment?.metadata || {};
 
+    const localOrder =
+        readOrders().find(order =>
+            (
+                metadata.orderId &&
+                String(order?.orderId || '') ===
+                    String(metadata.orderId)
+            ) ||
+            (
+                payment?.id &&
+                String(order?.paymentId || '') ===
+                    String(payment.id)
+            )
+        ) || null;
+
+    const localDelivery =
+        localOrder?.delivery || {};
+
     const deliveryAddress = [
-        metadata.deliveryCity,
-        metadata.deliveryAddress
+        localDelivery.city ||
+            metadata.deliveryCity,
+        localDelivery.address ||
+            metadata.deliveryAddress
     ]
         .filter(Boolean)
         .join(', ');
 
+    const deliveryPrice =
+        Math.max(
+            0,
+            Number(
+                localDelivery.price ||
+                0
+            )
+        );
+
     const text = [
         '✅ RTN.PRO — ЗАКАЗ ОПЛАЧЕН',
         '',
-        `Заказ: ${compactTelegramValue(metadata.orderId)}`,
+        `Заказ: ${compactTelegramValue(metadata.orderId || localOrder?.orderId)}`,
         `Платёж: ${paymentId}`,
         `Сумма: ${formatTelegramMoney(payment?.amount?.value)}`,
-        `Имя: ${compactTelegramValue(metadata.customerName)}`,
-        `Телефон: ${compactTelegramValue(metadata.customerPhone)}`,
-        `Email: ${compactTelegramValue(metadata.customerEmail)}`,
-        `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
+        `Имя: ${compactTelegramValue(localOrder?.customer?.name || metadata.customerName)}`,
+        `Телефон: ${compactTelegramValue(localOrder?.customer?.phone || metadata.customerPhone)}`,
+        `Email: ${compactTelegramValue(localOrder?.customer?.email || metadata.customerEmail)}`,
+        `Получение: ${compactTelegramValue(localDelivery.method || metadata.deliveryMethod)}`,
+        `Служба: ${compactTelegramValue(localDelivery.company || '—')}`,
+        `Стоимость доставки: ${deliveryPrice > 0 ? formatTelegramMoney(deliveryPrice) : '0 ₽'}`,
         `Адрес: ${compactTelegramValue(deliveryAddress)}`,
         `Отгрузка: ${compactTelegramValue(
             [
-                metadata.originStore || RTN_FULFILLMENT_STORE,
-                metadata.originCity || RTN_FULFILLMENT_CITY
+                localDelivery.originStore ||
+                    RTN_FULFILLMENT_STORE,
+                localDelivery.originCity ||
+                    RTN_FULFILLMENT_CITY
             ]
                 .filter(Boolean)
                 .join(' · ')
         )}`,
-        `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
+        `Промокод: ${normalizePromoCode(localOrder?.promoCode || metadata.promoCode) || 'НЕТ'}`,
         '',
         'Статус ЮKassa: ОПЛАЧЕН ✓'
     ].join('\n');
