@@ -16,6 +16,7 @@ const {
 const app = express();
 
 app.use(express.json({ limit: '12mb' }));
+app.use(express.urlencoded({ extended: true, limit: '12mb' }));
 
 // Личный кабинет RTN.PRO: отдельный CORS с credentials для серверной сессии.
 // Маршрут ставим до общего permissive CORS, чтобы preflight не перехватывался им.
@@ -8225,7 +8226,7 @@ app.get('/api/saferoute/health', async (req, res) => {
     }
 });
 
-app.all('/api/saferoute/widget', async (req, res) => {
+async function safeRouteWidgetProxy(req, res) {
     if (!isSafeRouteConfigured()) {
         return res.status(503).json({
             status: 'server_error',
@@ -8233,11 +8234,29 @@ app.all('/api/saferoute/widget', async (req, res) => {
         });
     }
 
-    const widgetUrl = normalizeSafeRouteWidgetUrl(
-        req.method === 'GET'
-            ? req.query?.url
-            : req.body?.url
-    );
+    const wildcardRoute =
+        req.params && typeof req.params[0] === 'string'
+            ? req.params[0]
+            : '';
+
+    const requestBody =
+        req.body && typeof req.body === 'object'
+            ? req.body
+            : {};
+
+    const routeCandidate =
+        req.query?.url ||
+        req.query?.route ||
+        req.query?.action ||
+        requestBody.url ||
+        requestBody.route ||
+        requestBody.action ||
+        wildcardRoute;
+
+    const widgetUrl =
+        normalizeSafeRouteWidgetUrl(
+            routeCandidate
+        );
 
     if (!widgetUrl) {
         console.warn(
@@ -8246,10 +8265,7 @@ app.all('/api/saferoute/widget', async (req, res) => {
             req.originalUrl,
             {
                 queryKeys: Object.keys(req.query || {}),
-                bodyKeys:
-                    req.body && typeof req.body === 'object'
-                        ? Object.keys(req.body)
-                        : []
+                bodyKeys: Object.keys(requestBody || {})
             }
         );
 
@@ -8259,16 +8275,51 @@ app.all('/api/saferoute/widget', async (req, res) => {
         });
     }
 
+    const stripRoutingFields = source => {
+        if (!source || typeof source !== 'object') {
+            return {};
+        }
+
+        const clone = { ...source };
+        delete clone.url;
+        delete clone.route;
+        delete clone.action;
+        return clone;
+    };
+
+    const explicitData =
+        req.method === 'GET'
+            ? req.query?.data
+            : requestBody?.data;
+
+    let data = explicitData;
+
+    if (
+        typeof explicitData === 'string'
+    ) {
+        try {
+            data = JSON.parse(explicitData);
+        } catch {
+            data = explicitData;
+        }
+    }
+
+    if (
+        data === undefined ||
+        data === null ||
+        data === ''
+    ) {
+        data =
+            req.method === 'GET'
+                ? stripRoutingFields(req.query)
+                : stripRoutingFields(requestBody);
+    }
+
     console.log(
         'SafeRoute widget proxy:',
         req.method,
         widgetUrl
     );
-
-    const data =
-        req.method === 'GET'
-            ? req.query?.data
-            : req.body?.data;
 
     try {
         const api = await getSafeRouteApi();
@@ -8287,7 +8338,10 @@ app.all('/api/saferoute/widget', async (req, res) => {
     } catch (error) {
         console.error(
             'SafeRoute widget proxy error:',
-            error?.message || error
+            widgetUrl,
+            error?.response?.data ||
+            error?.message ||
+            error
         );
 
         return res.status(502).json({
@@ -8295,7 +8349,10 @@ app.all('/api/saferoute/widget', async (req, res) => {
             error: 'SafeRoute request failed'
         });
     }
-});
+}
+
+app.all('/api/saferoute/widget', safeRouteWidgetProxy);
+app.all('/api/saferoute/widget/*', safeRouteWidgetProxy);
 
 app.get('/api/health', (req, res) => {
     // Основной контур доставки — SafeRoute. CDEK оставлен только
