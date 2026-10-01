@@ -12,6 +12,9 @@ const {
     resolveReferralCode,
     getReferralCheckoutTerms
 } = require('./rtn-bitrix-account');
+const {
+    touchUserPurchaseActivity
+} = require('./loyalty');
 
 const app = express();
 
@@ -7351,6 +7354,33 @@ async function runBitrixPaidBackfill() {
     );
 }
 
+async function touchPaidUserLoyalty(payment) {
+    try {
+        return await touchUserPurchaseActivity({
+            email:
+                payment?.metadata?.customerEmail ||
+                '',
+            phone:
+                payment?.metadata?.customerPhone ||
+                '',
+            purchasedAt:
+                payment?.captured_at ||
+                payment?.created_at ||
+                new Date()
+        });
+    } catch (error) {
+        console.error(
+            'RTN loyalty purchase activity error:',
+            error.message
+        );
+
+        return {
+            ok: false,
+            error: error.message
+        };
+    }
+}
+
 app.post('/api/yookassa/webhook', async (req, res) => {
     try {
         const event = req.body?.event;
@@ -7396,6 +7426,8 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             paid: true,
             paidAt: payment?.captured_at || new Date().toISOString()
         });
+
+        await touchPaidUserLoyalty(payment);
 
         // SafeRoute подтверждаем только после повторной проверки payment.succeeded
         // напрямую через API ЮKassa. Сбой доставки не должен ломать оплату.
@@ -14572,6 +14604,8 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                 paid: true,
                 paidAt: payment?.captured_at || new Date().toISOString()
             });
+
+            await touchPaidUserLoyalty(payment);
 
             // Webhook может не дойти, поэтому success-page fallback обязан
             // так же подтвердить внешний платёж в SafeRoute.
