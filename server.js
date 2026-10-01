@@ -66,6 +66,10 @@ app.use(cors());
 const CDEK_ACCOUNT = process.env.CDEK_ACCOUNT;
 const CDEK_SECRET = process.env.CDEK_SECRET;
 
+const RTN_FULFILLMENT_STORE = 'SuppStore';
+const RTN_FULFILLMENT_CITY = 'Санкт-Петербург';
+const RTN_FULFILLMENT_ADDRESS = 'Санкт-Петербург, улица Маршала Казакова, 58';
+
 function normalizeEnvValue(value) {
     let result = String(value || '')
         .replace(/^\uFEFF/, '')
@@ -538,18 +542,24 @@ function orderFromCheckout({ orderId, amount, items, customer, delivery, comment
                 delivery?.company,
                 120
             ),
-            originStore: cleanOrderValue(
-                delivery?.originStore,
-                120
-            ),
-            originCity: cleanOrderValue(
-                delivery?.originCity,
-                200
-            ),
-            originAddress: cleanOrderValue(
-                delivery?.originAddress,
-                1000
-            )
+            originStore:
+                cleanOrderValue(
+                    delivery?.originStore,
+                    120
+                ) ||
+                RTN_FULFILLMENT_STORE,
+            originCity:
+                cleanOrderValue(
+                    delivery?.originCity,
+                    200
+                ) ||
+                RTN_FULFILLMENT_CITY,
+            originAddress:
+                cleanOrderValue(
+                    delivery?.originAddress,
+                    1000
+                ) ||
+                RTN_FULFILLMENT_ADDRESS
         },
         items: (Array.isArray(items) ? items : []).map(item => ({
             externalId: cleanOrderValue(item?.externalId || item?.id, 150),
@@ -601,9 +611,9 @@ async function syncRecentYooKassaPayments() {
                 saferouteOrderId: cleanSafeRouteReference(metadata.saferouteOrderId),
                 saferouteCabinetId: cleanSafeRouteReference(metadata.saferouteCabinetId),
                 saferouteCheckoutSessId: cleanSafeRouteReference(metadata.saferouteCheckoutSessId),
-                originStore: cleanOrderValue(metadata.originStore, 120),
-                originCity: cleanOrderValue(metadata.originCity, 200),
-                originAddress: cleanOrderValue(metadata.originAddress, 1000)
+                originStore: RTN_FULFILLMENT_STORE,
+                originCity: RTN_FULFILLMENT_CITY,
+                originAddress: RTN_FULFILLMENT_ADDRESS
             },
             promoCode: normalizePromoCode(metadata.promoCode),
             source: 'yookassa'
@@ -8733,7 +8743,10 @@ async function sendPaidOrderToTelegram(payment) {
         `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
         `Адрес: ${compactTelegramValue(deliveryAddress)}`,
         `Отгрузка: ${compactTelegramValue(
-            [metadata.originStore, metadata.originCity]
+            [
+                metadata.originStore || RTN_FULFILLMENT_STORE,
+                metadata.originCity || RTN_FULFILLMENT_CITY
+            ]
                 .filter(Boolean)
                 .join(' · ')
         )}`,
@@ -14580,24 +14593,6 @@ app.post('/api/create-payment', async (req, res) => {
                         Number(delivery?.price || 0)
                     ).toFixed(2),
 
-                originStore:
-                    cleanOrderValue(
-                        delivery?.originStore,
-                        120
-                    ),
-
-                originCity:
-                    cleanOrderValue(
-                        delivery?.originCity,
-                        200
-                    ),
-
-                originAddress:
-                    cleanOrderValue(
-                        delivery?.originAddress,
-                        1000
-                    ),
-
                 orderId:
                     String(orderId || ''),
 
@@ -15747,17 +15742,17 @@ function buildOneCOrderFromPaymentReceipt(payment, receipt) {
             store:
                 String(
                     metadata.originStore ||
-                    ''
+                    RTN_FULFILLMENT_STORE
                 ).trim(),
             city:
                 String(
                     metadata.originCity ||
-                    ''
+                    RTN_FULFILLMENT_CITY
                 ).trim(),
             address:
                 String(
                     metadata.originAddress ||
-                    ''
+                    RTN_FULFILLMENT_ADDRESS
                 ).trim()
         },
         promoCode:
