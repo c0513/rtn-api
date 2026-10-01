@@ -16092,9 +16092,7 @@ async function listBitrixPaidRtnDeals() {
                 },
                 filter: {
                     ORIGINATOR_ID:
-                        'RTN.PRO',
-                    STAGE_ID:
-                        BITRIX_STAGE_PAID
+                        'RTN.PRO'
                 },
                 select: [
                     'ID',
@@ -16104,6 +16102,7 @@ async function listBitrixPaidRtnDeals() {
                     'DATE_CREATE',
                     'BEGINDATE',
                     'CONTACT_ID',
+                    'STAGE_ID',
                     BITRIX_ORDER_FIELDS.orderNumber,
                     BITRIX_ORDER_FIELDS.deliveryAddress,
                     BITRIX_ORDER_FIELDS.deliveryCost
@@ -16112,9 +16111,25 @@ async function listBitrixPaidRtnDeals() {
             }
         );
 
-    return Array.isArray(deals)
-        ? deals
-        : [];
+    const paidStageIds =
+        new Set([
+            'EXECUTING',
+            'UC_X6BQYM'
+        ]);
+
+    return (
+        Array.isArray(deals)
+            ? deals
+            : []
+    ).filter(deal =>
+        paidStageIds.has(
+            String(
+                deal?.STAGE_ID ||
+                deal?.stageId ||
+                ''
+            ).trim()
+        )
+    );
 }
 
 async function getBitrixContactForOneC(contactId) {
