@@ -16080,6 +16080,191 @@ async function buildOneCTestOrderCommerceMl(
     };
 }
 
+async function buildOneCPaidOrdersCommerceMl(
+    cmlVersion = '2.07'
+) {
+    const [
+        paymentResult,
+        receiptResult
+    ] = await Promise.all([
+        fetchAllYooKassaPayments(),
+        fetchAllYooKassaReceipts()
+    ]);
+
+    const receiptsByPaymentId =
+        new Map();
+
+    for (
+        const receipt
+        of receiptResult.receipts
+    ) {
+        if (
+            receipt?.type === 'payment' &&
+            receipt?.status === 'succeeded' &&
+            receipt?.payment_id
+        ) {
+            receiptsByPaymentId.set(
+                String(receipt.payment_id),
+                receipt
+            );
+        }
+    }
+
+    const localOrders =
+        readOrders();
+
+    const candidates =
+        paymentResult.payments
+            .filter(payment => {
+                const amount =
+                    Number(
+                        payment?.amount?.value ||
+                        0
+                    );
+
+                const refunded =
+                    Number(
+                        payment?.refunded_amount?.value ||
+                        0
+                    );
+
+                return (
+                    payment?.status === 'succeeded' &&
+                    payment?.paid === true &&
+                    amount > 0 &&
+                    refunded <= 0
+                );
+            })
+            .sort((left, right) =>
+                String(
+                    left?.created_at ||
+                    ''
+                ).localeCompare(
+                    String(
+                        right?.created_at ||
+                        ''
+                    )
+                )
+            );
+
+    const orders = [];
+    const skipped = [];
+    const errors = [];
+
+    for (const payment of candidates) {
+        const metadata =
+            payment?.metadata || {};
+
+        const orderId =
+            String(
+                metadata.orderId ||
+                payment?.id ||
+                ''
+            ).trim();
+
+        const paymentId =
+            String(
+                payment?.id ||
+                ''
+            ).trim();
+
+        const existing =
+            localOrders.find(order =>
+                (
+                    orderId &&
+                    String(
+                        order?.orderId ||
+                        ''
+                    ).trim() ===
+                        orderId
+                ) ||
+                (
+                    paymentId &&
+                    String(
+                        order?.paymentId ||
+                        ''
+                    ).trim() ===
+                        paymentId
+                )
+            );
+
+        if (
+            existing?.onecDocumentId ||
+            existing?.onecExportedAt
+        ) {
+            skipped.push({
+                orderId,
+                paymentId,
+                reason:
+                    existing?.onecDocumentId
+                        ? 'already_linked_1c'
+                        : 'already_exported_1c'
+            });
+            continue;
+        }
+
+        const receipt =
+            receiptsByPaymentId.get(
+                paymentId
+            );
+
+        if (!receipt) {
+            errors.push({
+                orderId,
+                paymentId,
+                error:
+                    'Не найден успешный фискальный чек'
+            });
+            continue;
+        }
+
+        try {
+            const order =
+                buildOneCOrderFromPaymentReceipt(
+                    payment,
+                    receipt
+                );
+
+            orders.push(order);
+        } catch (error) {
+            errors.push({
+                orderId,
+                paymentId,
+                error:
+                    error?.message ||
+                    'Не удалось собрать заказ CommerceML'
+            });
+        }
+    }
+
+    if (errors.length) {
+        const preview =
+            errors
+                .slice(0, 10)
+                .map(item =>
+                    `${item.orderId || item.paymentId}: ${item.error}`
+                )
+                .join('; ');
+
+        throw new Error(
+            `1С bulk export заблокирован: ${errors.length} заказ(ов) не готовы. ${preview}`
+        );
+    }
+
+    return {
+        orders,
+        skipped,
+        candidates:
+            candidates.length,
+        xml:
+            oneCOrdersCommerceMl(
+                orders,
+                cmlVersion
+            )
+    };
+}
+
+
 app.all(
     '/api/1c/exchange',
     express.raw({
@@ -16267,32 +16452,12 @@ app.all(
         }
 
         if (mode === 'query') {
-            const linkedOneCOrder =
-                onecSaleTestOrderId
-                    ? readOrders().find(order =>
-                        order.orderId ===
-                            onecSaleTestOrderId &&
-                        String(
-                            order.onecDocumentId ||
-                            ''
-                        ).trim()
-                    )
-                    : null;
-
-            if (
-                !ONEC_ORDER_EXPORT_ENABLED ||
-                !onecSaleExportArmed ||
-                linkedOneCOrder ||
-                (
-                    onecSaleTestOrderId &&
-                    onecSaleDeliveredOrders.has(
-                        onecSaleTestOrderId
-                    )
-                )
-            ) {
+            if (!ONEC_ORDER_EXPORT_ENABLED) {
                 res
                     .status(200)
-                    .type('application/xml; charset=utf-8');
+                    .type(
+                        'application/xml; charset=utf-8'
+                    );
 
                 return res.send(
                     oneCEmptyCommerceMl(
@@ -16303,16 +16468,36 @@ app.all(
 
             try {
                 const generated =
-                    await buildOneCTestOrderCommerceMl(
+                    await buildOneCPaidOrdersCommerceMl(
                         effectiveCmlVersion
                     );
 
-                session.lastSaleOrderId =
-                    generated.order.orderId;
+                const orderIds =
+                    generated.orders.map(
+                        order =>
+                            order.orderId
+                    );
+
+                session.lastSaleOrderIds =
+                    orderIds;
 
                 console.log(
-                    `1C sale query: exporting test order ${generated.order.orderId}, ${generated.order.amount} RUB, ${generated.order.lines.length} lines, CML ${effectiveCmlVersion}`
+                    `1C sale query: paid candidates=${generated.candidates}, exporting=${generated.orders.length}, skipped=${generated.skipped.length}, CML ${effectiveCmlVersion}`
                 );
+
+                if (!generated.orders.length) {
+                    res
+                        .status(200)
+                        .type(
+                            'application/xml; charset=utf-8'
+                        );
+
+                    return res.send(
+                        oneCEmptyCommerceMl(
+                            effectiveCmlVersion
+                        )
+                    );
+                }
 
                 res.set(
                     'Cache-Control',
@@ -16330,7 +16515,7 @@ app.all(
 
             } catch (error) {
                 console.error(
-                    '1C sale query error:',
+                    '1C sale bulk query error:',
                     error.response?.data ||
                     error.message
                 );
@@ -16338,21 +16523,45 @@ app.all(
                 return oneCText(
                     res,
                     500,
-                    `failure\n${error.message || 'Не удалось сформировать заказ для 1С'}`
+                    `failure\n${error.message || 'Не удалось сформировать оплаченные заказы для 1С'}`
                 );
             }
         }
 
         if (mode === 'success') {
-            if (session.lastSaleOrderId) {
-                onecSaleDeliveredOrders.add(
-                    session.lastSaleOrderId
-                );
+            const deliveredOrderIds =
+                Array.isArray(
+                    session.lastSaleOrderIds
+                )
+                    ? session.lastSaleOrderIds
+                    : session.lastSaleOrderId
+                        ? [session.lastSaleOrderId]
+                        : [];
+
+            if (deliveredOrderIds.length) {
+                const exportedAt =
+                    new Date().toISOString();
+
+                for (
+                    const orderId
+                    of deliveredOrderIds
+                ) {
+                    onecSaleDeliveredOrders.add(
+                        orderId
+                    );
+
+                    upsertLocalOrder({
+                        orderId,
+                        onecExportedAt:
+                            exportedAt
+                    });
+                }
 
                 console.log(
-                    `1C sale success: marked ${session.lastSaleOrderId} as delivered for this process`
+                    `1C sale success: persisted ${deliveredOrderIds.length} exported order(s)`
                 );
 
+                delete session.lastSaleOrderIds;
                 delete session.lastSaleOrderId;
                 onecSaleExportArmed = false;
             }
@@ -16900,6 +17109,9 @@ app.get(
 
             exportArmed:
                 onecSaleExportArmed,
+
+            exportMode:
+                'all_paid_missing_1c',
 
             deliveredThisProcess:
                 Array.from(
