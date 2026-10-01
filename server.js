@@ -17810,6 +17810,42 @@ app.listen(PORT, () => {
         `RTN API запущен на порту ${PORT}`
     );
 
+    setTimeout(async () => {
+        try {
+            const response = await axios.get(
+                'https://api.yookassa.ru/v3/me',
+                {
+                    auth: {
+                        username: YOOKASSA_SHOP_ID,
+                        password: YOOKASSA_SECRET_KEY
+                    },
+                    timeout: 12000
+                }
+            );
+
+            const data = response?.data || {};
+            console.log(
+                'YooKassa account status:',
+                JSON.stringify({
+                    status: data.status || null,
+                    test: data.test === true,
+                    fiscalizationEnabled:
+                        data.fiscalization_enabled === true,
+                    paymentMethods:
+                        Array.isArray(data.payment_methods)
+                            ? data.payment_methods
+                            : []
+                })
+            );
+        } catch (error) {
+            console.error(
+                'YooKassa account status error:',
+                error.response?.data ||
+                error.message
+            );
+        }
+    }, 3000);
+
 
 
     if (
