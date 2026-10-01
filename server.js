@@ -3430,7 +3430,8 @@ const BITRIX_ORDER_FIELDS = {
     deliveryAddress: 'UF_CRM_RTN_DELIVERY_ADDRESS',
     deliveryCost: 'UF_CRM_RTN_DELIVERY_COST',
     clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
-    paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS'
+    paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
+    onecExportedAt: 'UF_CRM_RTN_1C_EXPORTED_AT'
 };
 
 const RTN_DELIVERY_TYPES = [
@@ -4566,6 +4567,23 @@ async function syncOrderFieldsToBitrix() {
 
                 sort:
                     3270
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.onecExportedAt,
+
+                label:
+                    'Выгружен в 1С',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3280
             });
 
             await ensureBitrixEnumOptionsBatch({
@@ -16541,6 +16559,20 @@ async function buildOneCTestOrderCommerceMl(
 
 
 async function listBitrixPaidRtnDeals() {
+    await syncOrderFieldsToBitrix();
+
+    const paidStatusId =
+        await ensureBitrixEnumOption({
+            entity:
+                'deal',
+            fieldName:
+                BITRIX_ORDER_FIELDS.paymentStatus,
+            value:
+                'Оплачен',
+            xmlPrefix:
+                'RTN_PAYMENT_STATUS'
+        });
+
     const deals =
         await bitrixCall(
             'crm.deal.list',
@@ -16564,7 +16596,9 @@ async function listBitrixPaidRtnDeals() {
                     'STAGE_ID',
                     BITRIX_ORDER_FIELDS.orderNumber,
                     BITRIX_ORDER_FIELDS.deliveryAddress,
-                    BITRIX_ORDER_FIELDS.deliveryCost
+                    BITRIX_ORDER_FIELDS.deliveryCost,
+                    BITRIX_ORDER_FIELDS.paymentStatus,
+                    BITRIX_ORDER_FIELDS.onecExportedAt
                 ],
                 start: 0
             }
@@ -16587,15 +16621,30 @@ async function listBitrixPaidRtnDeals() {
         Array.isArray(deals)
             ? deals
             : []
-    ).filter(deal =>
-        paidStageIds.has(
+    ).filter(deal => {
+        const stageId =
             String(
                 deal?.STAGE_ID ||
                 deal?.stageId ||
                 ''
-            ).trim()
-        )
-    );
+            ).trim();
+
+        const paymentStatus =
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.paymentStatus
+                ] || ''
+            ).trim();
+
+        return (
+            paidStageIds.has(stageId) ||
+            (
+                paidStatusId &&
+                paymentStatus ===
+                    String(paidStatusId)
+            )
+        );
+    });
 }
 
 async function getBitrixContactForOneC(contactId) {
@@ -17003,7 +17052,15 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     orderId
             );
 
+        const bitrixExportedAt =
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.onecExportedAt
+                ] || ''
+            ).trim();
+
         if (
+            bitrixExportedAt ||
             existing?.onecDocumentId ||
             existing?.onecExportedAt
         ) {
@@ -17011,20 +17068,24 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 orderId,
                 dealId,
                 reason:
-                    existing?.onecDocumentId
-                        ? 'already_linked_1c'
-                        : 'already_exported_1c'
+                    bitrixExportedAt
+                        ? 'already_exported_1c_bitrix'
+                        : existing?.onecDocumentId
+                            ? 'already_linked_1c'
+                            : 'already_exported_1c'
             });
             continue;
         }
 
         try {
-            orders.push(
+            const order =
                 await buildOneCOrderFromBitrixDeal(
                     deal,
                     productExternalIdCache
-                )
-            );
+                );
+
+            order.bitrixDealId = dealId;
+            orders.push(order);
         } catch (error) {
             errors.push({
                 orderId,
@@ -17057,6 +17118,16 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
         skipped,
         candidates:
             deals.length,
+        exports:
+            orders.map(order => ({
+                orderId:
+                    order.orderId,
+                dealId:
+                    Number(
+                        order.bitrixDealId ||
+                        0
+                    )
+            })),
         xml:
             oneCOrdersCommerceMl(
                 orders,
@@ -17487,6 +17558,13 @@ app.all(
                 session.lastSaleOrderIds =
                     orderIds;
 
+                session.lastSaleExports =
+                    Array.isArray(
+                        generated.exports
+                    )
+                        ? generated.exports
+                        : [];
+
                 console.log(
                     `1C sale query: paid candidates=${generated.candidates}, exporting=${generated.orders.length}, skipped=${generated.skipped.length}, CML ${effectiveCmlVersion}`
                 );
@@ -17544,9 +17622,45 @@ app.all(
                         ? [session.lastSaleOrderId]
                         : [];
 
+            const deliveredExports =
+                Array.isArray(
+                    session.lastSaleExports
+                )
+                    ? session.lastSaleExports
+                    : [];
+
             if (deliveredOrderIds.length) {
                 const exportedAt =
                     new Date().toISOString();
+
+                for (
+                    const exported
+                    of deliveredExports
+                ) {
+                    const dealId =
+                        Number(
+                            exported?.dealId ||
+                            0
+                        );
+
+                    if (!dealId) {
+                        continue;
+                    }
+
+                    await bitrixCall(
+                        'crm.deal.update',
+                        {
+                            id:
+                                dealId,
+                            fields: {
+                                [BITRIX_ORDER_FIELDS.onecExportedAt]:
+                                    exportedAt
+                            }
+                        }
+                    );
+
+                    await sleep(120);
+                }
 
                 for (
                     const orderId
@@ -17564,9 +17678,10 @@ app.all(
                 }
 
                 console.log(
-                    `1C sale success: persisted ${deliveredOrderIds.length} exported order(s)`
+                    `1C sale success: persisted ${deliveredOrderIds.length} exported order(s), Bitrix markers=${deliveredExports.length}`
                 );
 
+                delete session.lastSaleExports;
                 delete session.lastSaleOrderIds;
                 delete session.lastSaleOrderId;
                 onecSaleExportArmed = false;
@@ -19029,94 +19144,139 @@ app.listen(PORT, () => {
     );
 
     setTimeout(async () => {
+        const previouslyExportedOrderIds =
+            new Set([
+                '1790114512138-l2hasn',
+                '1790084273315-t0lens',
+                '1790081281454-3et7co',
+                '1790067172022-v5swmy',
+                '1790014335717-0eqguh',
+                '1790001958148-zy4zp4',
+                '1789915386968-zbod14',
+                '1789906301170-0s867k',
+                '1789900355445-oia05n',
+                '1789895505137-h9djzi',
+                '1790230701131-7dn12y',
+                '1790255211283-te4qz0',
+                '1790324372204-f99af1',
+                '1790450506743-ynypvl',
+                '1790613387238-end93p',
+                '1790616359971-ergbv6',
+                '1790750084864-s2e6c9',
+                '1790761621151-1s9wg8'
+            ]);
+
         try {
-            const deal = await bitrixCall(
-                'crm.deal.get',
-                { id: 65 }
-            );
+            await syncOrderFieldsToBitrix();
 
-            const rows = await bitrixCall(
-                'crm.deal.productrows.get',
-                { id: 65 }
-            );
+            const deals =
+                await bitrixCall(
+                    'crm.deal.list',
+                    {
+                        order: {
+                            DATE_CREATE:
+                                'ASC'
+                        },
+                        filter: {
+                            ORIGINATOR_ID:
+                                'RTN.PRO'
+                        },
+                        select: [
+                            'ID',
+                            'ORIGIN_ID',
+                            BITRIX_ORDER_FIELDS.onecExportedAt
+                        ],
+                        start: 0
+                    }
+                );
 
-            console.log(
-                'RTN deal 65 diagnostic:',
-                JSON.stringify({
-                    id: deal?.ID || deal?.id || null,
-                    title: deal?.TITLE || deal?.title || '',
-                    originatorId:
-                        deal?.ORIGINATOR_ID ||
-                        deal?.originatorId ||
-                        '',
-                    originId:
+            const exportedAt =
+                new Date().toISOString();
+
+            let marked = 0;
+
+            for (
+                const deal
+                of Array.isArray(deals)
+                    ? deals
+                    : []
+            ) {
+                const orderId =
+                    String(
                         deal?.ORIGIN_ID ||
                         deal?.originId ||
-                        '',
-                    stageId:
-                        deal?.STAGE_ID ||
-                        deal?.stageId ||
-                        '',
-                    categoryId:
-                        deal?.CATEGORY_ID ||
-                        deal?.categoryId ||
-                        '',
-                    opportunity:
-                        Number(
-                            deal?.OPPORTUNITY ||
-                            deal?.opportunity ||
-                            0
-                        ),
-                    paidStageConfigured:
-                        BITRIX_STAGE_PAID,
-                    paymentStatus:
+                        ''
+                    ).trim();
+
+                if (
+                    !previouslyExportedOrderIds.has(
+                        orderId
+                    )
+                ) {
+                    continue;
+                }
+
+                const current =
+                    String(
                         deal?.[
-                            BITRIX_ORDER_FIELDS.paymentStatus
-                        ] || null,
-                    deliveryCost:
-                        Number(
-                            deal?.[
-                                BITRIX_ORDER_FIELDS.deliveryCost
-                            ] || 0
-                        ),
-                    rows:
-                        Array.isArray(rows)
-                            ? rows.map(row => ({
-                                productId:
-                                    Number(
-                                        row?.PRODUCT_ID ||
-                                        row?.productId ||
-                                        0
-                                    ),
-                                name:
-                                    row?.PRODUCT_NAME ||
-                                    row?.productName ||
-                                    '',
-                                price:
-                                    Number(
-                                        row?.PRICE ||
-                                        row?.price ||
-                                        0
-                                    ),
-                                quantity:
-                                    Number(
-                                        row?.QUANTITY ||
-                                        row?.quantity ||
-                                        0
-                                    )
-                            }))
-                            : []
+                            BITRIX_ORDER_FIELDS.onecExportedAt
+                        ] || ''
+                    ).trim();
+
+                if (current) {
+                    continue;
+                }
+
+                await bitrixCall(
+                    'crm.deal.update',
+                    {
+                        id:
+                            Number(
+                                deal?.ID ||
+                                deal?.id ||
+                                0
+                            ),
+                        fields: {
+                            [BITRIX_ORDER_FIELDS.onecExportedAt]:
+                                exportedAt
+                        }
+                    }
+                );
+
+                marked += 1;
+                await sleep(150);
+            }
+
+            const audit =
+                await buildOneCBitrixPaidOrdersCommerceMl(
+                    '2.07'
+                );
+
+            console.log(
+                'RTN 1C persistent export backfill:',
+                JSON.stringify({
+                    marked,
+                    candidates:
+                        audit.candidates,
+                    ready:
+                        audit.orders.length,
+                    skipped:
+                        audit.skipped.length,
+                    readyOrderIds:
+                        audit.orders.map(
+                            order => order.orderId
+                        )
                 })
             );
         } catch (error) {
             console.error(
-                'RTN deal 65 diagnostic error:',
+                'RTN 1C persistent export backfill error:',
                 error.response?.data ||
                 error.message ||
                 error
             );
         }
-    }, 3500);
+    }, 7000);
 
 
     if (
