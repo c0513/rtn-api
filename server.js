@@ -8445,6 +8445,63 @@ async function safeRouteWidgetProxy(req, res) {
 app.all('/api/saferoute/widget', safeRouteWidgetProxy);
 app.all('/api/saferoute/widget/*', safeRouteWidgetProxy);
 
+app.get('/api/yookassa/health', async (req, res) => {
+    if (!YOOKASSA_SHOP_ID || !YOOKASSA_SECRET_KEY) {
+        return res.status(503).json({
+            ok: false,
+            configured: false
+        });
+    }
+
+    try {
+        const response = await axios.get(
+            'https://api.yookassa.ru/v3/me',
+            {
+                auth: {
+                    username: YOOKASSA_SHOP_ID,
+                    password: YOOKASSA_SECRET_KEY
+                },
+                timeout: 12000
+            }
+        );
+
+        const data = response?.data || {};
+
+        return res.json({
+            ok: true,
+            configured: true,
+            status: data.status || null,
+            test: data.test === true,
+            fiscalizationEnabled:
+                data.fiscalization_enabled === true,
+            paymentMethods:
+                Array.isArray(data.payment_methods)
+                    ? data.payment_methods
+                    : []
+        });
+    } catch (error) {
+        console.error(
+            'YooKassa health error:',
+            error.response?.data ||
+            error.message
+        );
+
+        return res.status(
+            error.response?.status || 502
+        ).json({
+            ok: false,
+            configured: true,
+            statusCode:
+                error.response?.status || null,
+            code:
+                error.response?.data?.code || null,
+            description:
+                error.response?.data?.description ||
+                'YooKassa health check failed'
+        });
+    }
+});
+
 app.get('/api/health', (req, res) => {
     // Основной контур доставки — SafeRoute. CDEK оставлен только
     // как legacy-код для истории ранее созданных отправлений.
@@ -14577,21 +14634,6 @@ app.post('/api/create-payment', async (req, res) => {
 
                 deliveryAddress:
                     delivery?.address || '',
-
-                deliveryProvider:
-                    deliveryProvider,
-
-                deliveryCompany:
-                    cleanOrderValue(
-                        delivery?.company,
-                        120
-                    ),
-
-                deliveryPrice:
-                    Math.max(
-                        0,
-                        Number(delivery?.price || 0)
-                    ).toFixed(2),
 
                 orderId:
                     String(orderId || ''),
