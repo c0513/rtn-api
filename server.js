@@ -18993,53 +18993,224 @@ app.listen(PORT, () => {
 
     setTimeout(async () => {
         try {
-            const diagnosticIds = [23, 27, 51, 53, 55];
-            const details = [];
+            const repairs = [
+                {
+                    dealId: 23,
+                    amount: 5382,
+                    delivery: {
+                        method: 'Самовывоз',
+                        price: 0
+                    },
+                    items: [
+                        {
+                            name: 'WHEY PRO',
+                            flavor: 'МАЛИНА В БЕЛОМ ШОКОЛАДЕ',
+                            price: 2990,
+                            quantity: 2
+                        }
+                    ]
+                },
+                {
+                    dealId: 27,
+                    amount: 3892,
+                    delivery: {
+                        method: 'СДЭК ПВЗ',
+                        price: 400
+                    },
+                    items: [
+                        {
+                            name: 'MAGNESIUM',
+                            flavor: 'ГЛИЦИНАТ, 120 КАПСУЛ',
+                            price: 890,
+                            quantity: 1
+                        },
+                        {
+                            name: 'WHEY PRO',
+                            flavor: 'СОЛЁНАЯ КАРАМЕЛЬ',
+                            price: 2990,
+                            quantity: 1
+                        }
+                    ]
+                },
+                {
+                    dealId: 51,
+                    amount: 1706,
+                    delivery: {
+                        method: 'СДЭК ПВЗ',
+                        price: 455
+                    },
+                    items: [
+                        {
+                            name: 'CREATINE',
+                            flavor: 'БЕЗ ВКУСА',
+                            price: 1390,
+                            quantity: 1
+                        }
+                    ]
+                },
+                {
+                    dealId: 53,
+                    amount: 9690,
+                    delivery: {
+                        method: 'СДЭК ПВЗ',
+                        price: 465
+                    },
+                    items: [
+                        {
+                            name: 'WHEY PRO',
+                            flavor: 'СОЛЁНАЯ КАРАМЕЛЬ',
+                            price: 2990,
+                            quantity: 2
+                        },
+                        {
+                            name: 'PREWORKOUT',
+                            flavor: 'МАРМЕЛАДНАЯ КОЛА',
+                            price: 1990,
+                            quantity: 1
+                        },
+                        {
+                            name: 'CREATINE',
+                            flavor: 'ЛЕСНЫЕ ЯГОДЫ',
+                            price: 1390,
+                            quantity: 1
+                        },
+                        {
+                            name: 'MAGNESIUM',
+                            flavor: 'ГЛИЦИНАТ, 120 КАПСУЛ',
+                            price: 890,
+                            quantity: 1
+                        }
+                    ]
+                },
+                {
+                    dealId: 55,
+                    amount: 5094,
+                    delivery: {
+                        method: 'СДЭК Курьер',
+                        price: 630
+                    },
+                    items: [
+                        {
+                            name: 'AAKG',
+                            flavor: 'ЛИМОН-ЛАЙМ',
+                            price: 1090,
+                            quantity: 1
+                        },
+                        {
+                            name: 'AAKG',
+                            flavor: 'ЧЁРНАЯ СМОРОДИНА',
+                            price: 1090,
+                            quantity: 1
+                        },
+                        {
+                            name: 'CREATINE',
+                            flavor: 'ЯБЛОКО',
+                            price: 1390,
+                            quantity: 1
+                        },
+                        {
+                            name: 'CREATINE',
+                            flavor: 'ЛЕСНЫЕ ЯГОДЫ',
+                            price: 1390,
+                            quantity: 1
+                        }
+                    ]
+                }
+            ];
 
-            for (const dealId of diagnosticIds) {
-                const deal = await bitrixCall(
-                    'crm.deal.get',
-                    { id: dealId }
+            for (const repair of repairs) {
+                const productRows =
+                    await buildBitrixProductRows(
+                        repair.items,
+                        repair.delivery,
+                        repair.amount
+                    );
+
+                const goodsBeforeDiscount =
+                    repair.items.reduce(
+                        (sum, item) =>
+                            sum +
+                            Number(item.price || 0) *
+                            Number(item.quantity || 1),
+                        0
+                    );
+
+                const amountBeforeDiscount =
+                    goodsBeforeDiscount +
+                    Number(repair.delivery.price || 0);
+
+                const discountAmount =
+                    Math.max(
+                        0,
+                        Number(
+                            (
+                                amountBeforeDiscount -
+                                repair.amount
+                            ).toFixed(2)
+                        )
+                    );
+
+                await bitrixCall(
+                    'crm.item.productrow.set',
+                    {
+                        ownerType: 'D',
+                        ownerId: repair.dealId,
+                        productRows
+                    }
                 );
 
-                const rows = await bitrixCall(
-                    'crm.deal.productrows.get',
-                    { id: dealId }
+                await bitrixCall(
+                    'crm.deal.update',
+                    {
+                        id: repair.dealId,
+                        fields: {
+                            OPPORTUNITY: repair.amount,
+                            IS_MANUAL_OPPORTUNITY: 'Y',
+                            [BITRIX_ORDER_FIELDS.amountBeforeDiscount]:
+                                amountBeforeDiscount,
+                            [BITRIX_ORDER_FIELDS.discountAmount]:
+                                discountAmount,
+                            [BITRIX_ORDER_FIELDS.deliveryCost]:
+                                Number(repair.delivery.price || 0)
+                        }
+                    }
                 );
 
-                details.push({
-                    id: dealId,
-                    title: deal?.TITLE || deal?.title || '',
-                    originId: deal?.ORIGIN_ID || deal?.originId || '',
-                    opportunity: Number(deal?.OPPORTUNITY || deal?.opportunity || 0),
-                    deliveryCost: Number(deal?.[BITRIX_ORDER_FIELDS.deliveryCost] || 0),
-                    deliveryAddress: String(deal?.[BITRIX_ORDER_FIELDS.deliveryAddress] || ''),
-                    deliveryTypeRaw: deal?.[BITRIX_ORDER_FIELDS.deliveryType] || null,
-                    discountAmount: Number(deal?.[BITRIX_ORDER_FIELDS.discountAmount] || 0),
-                    amountBeforeDiscount: Number(deal?.[BITRIX_ORDER_FIELDS.amountBeforeDiscount] || 0),
-                    comments: String(deal?.COMMENTS || deal?.comments || '').slice(0, 4000),
-                    additionalInfo: String(deal?.ADDITIONAL_INFO || deal?.additionalInfo || '').slice(0, 2000),
-                    rows: Array.isArray(rows)
-                        ? rows.map(row => ({
-                            productId: Number(row?.PRODUCT_ID || row?.productId || 0),
-                            name: row?.PRODUCT_NAME || row?.productName || '',
-                            price: Number(row?.PRICE || row?.price || 0),
-                            quantity: Number(row?.QUANTITY || row?.quantity || 0)
-                        }))
-                        : []
-                });
+                console.log(
+                    'RTN 1C legacy Bitrix deal repaired:',
+                    JSON.stringify({
+                        dealId: repair.dealId,
+                        rows: productRows.length,
+                        amount: repair.amount,
+                        delivery: repair.delivery.price,
+                        amountBeforeDiscount,
+                        discountAmount
+                    })
+                );
 
-                await sleep(120);
+                await sleep(180);
             }
 
+            const audit =
+                await buildOneCBitrixPaidOrdersCommerceMl(
+                    '2.07'
+                );
+
             console.log(
-                'RTN 1C bad deal diagnostic:',
-                JSON.stringify(details)
+                'RTN 1C post-repair audit:',
+                JSON.stringify({
+                    candidates: audit.candidates,
+                    ready: audit.orders.length,
+                    skipped: audit.skipped.length,
+                    orderIds: audit.orders.map(order => order.orderId)
+                })
             );
         } catch (error) {
             console.error(
-                'RTN 1C bad deal diagnostic error:',
-                error.response?.data || error.message
+                'RTN 1C legacy Bitrix repair error:',
+                error.response?.data ||
+                error.message ||
+                error
             );
         }
     }, 3500);
