@@ -537,6 +537,18 @@ function orderFromCheckout({ orderId, amount, items, customer, delivery, comment
             company: cleanOrderValue(
                 delivery?.company,
                 120
+            ),
+            originStore: cleanOrderValue(
+                delivery?.originStore,
+                120
+            ),
+            originCity: cleanOrderValue(
+                delivery?.originCity,
+                200
+            ),
+            originAddress: cleanOrderValue(
+                delivery?.originAddress,
+                1000
             )
         },
         items: (Array.isArray(items) ? items : []).map(item => ({
@@ -588,7 +600,10 @@ async function syncRecentYooKassaPayments() {
                 company: cleanOrderValue(metadata.deliveryCompany, 120),
                 saferouteOrderId: cleanSafeRouteReference(metadata.saferouteOrderId),
                 saferouteCabinetId: cleanSafeRouteReference(metadata.saferouteCabinetId),
-                saferouteCheckoutSessId: cleanSafeRouteReference(metadata.saferouteCheckoutSessId)
+                saferouteCheckoutSessId: cleanSafeRouteReference(metadata.saferouteCheckoutSessId),
+                originStore: cleanOrderValue(metadata.originStore, 120),
+                originCity: cleanOrderValue(metadata.originCity, 200),
+                originAddress: cleanOrderValue(metadata.originAddress, 1000)
             },
             promoCode: normalizePromoCode(metadata.promoCode),
             source: 'yookassa'
@@ -8717,6 +8732,11 @@ async function sendPaidOrderToTelegram(payment) {
         `Email: ${compactTelegramValue(metadata.customerEmail)}`,
         `Получение: ${compactTelegramValue(metadata.deliveryMethod)}`,
         `Адрес: ${compactTelegramValue(deliveryAddress)}`,
+        `Отгрузка: ${compactTelegramValue(
+            [metadata.originStore, metadata.originCity]
+                .filter(Boolean)
+                .join(' · ')
+        )}`,
         `Промокод: ${normalizePromoCode(metadata.promoCode) || 'НЕТ'}`,
         '',
         'Статус ЮKassa: ОПЛАЧЕН ✓'
@@ -14560,6 +14580,24 @@ app.post('/api/create-payment', async (req, res) => {
                         Number(delivery?.price || 0)
                     ).toFixed(2),
 
+                originStore:
+                    cleanOrderValue(
+                        delivery?.originStore,
+                        120
+                    ),
+
+                originCity:
+                    cleanOrderValue(
+                        delivery?.originCity,
+                        200
+                    ),
+
+                originAddress:
+                    cleanOrderValue(
+                        delivery?.originAddress,
+                        1000
+                    ),
+
                 orderId:
                     String(orderId || ''),
 
@@ -15705,6 +15743,23 @@ function buildOneCOrderFromPaymentReceipt(payment, receipt) {
                 metadata.deliveryMethod ||
                 ''
             ).trim(),
+        fulfillment: {
+            store:
+                String(
+                    metadata.originStore ||
+                    ''
+                ).trim(),
+            city:
+                String(
+                    metadata.originCity ||
+                    ''
+                ).trim(),
+            address:
+                String(
+                    metadata.originAddress ||
+                    ''
+                ).trim()
+        },
         promoCode:
             normalizePromoCode(
                 metadata.promoCode
@@ -15787,6 +15842,9 @@ function oneCOrderXml(order) {
         ['Статус заказа', 'Оплачен'],
         ['Способ доставки', order.deliveryMethod],
         ['Адрес доставки', order.customer.address],
+        ['Склад отгрузки', order.fulfillment?.store],
+        ['Город отгрузки', order.fulfillment?.city],
+        ['Адрес отгрузки', order.fulfillment?.address],
         ['Промокод', order.promoCode],
         ['RTN orderId', order.orderId],
         ['Дата заказа на сайте', order.date],
