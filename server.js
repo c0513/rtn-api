@@ -19012,6 +19012,11 @@ app.listen(PORT, () => {
                     title: deal?.TITLE || deal?.title || '',
                     originId: deal?.ORIGIN_ID || deal?.originId || '',
                     opportunity: Number(deal?.OPPORTUNITY || deal?.opportunity || 0),
+                    deliveryCost: Number(deal?.[BITRIX_ORDER_FIELDS.deliveryCost] || 0),
+                    deliveryAddress: String(deal?.[BITRIX_ORDER_FIELDS.deliveryAddress] || ''),
+                    deliveryTypeRaw: deal?.[BITRIX_ORDER_FIELDS.deliveryType] || null,
+                    discountAmount: Number(deal?.[BITRIX_ORDER_FIELDS.discountAmount] || 0),
+                    amountBeforeDiscount: Number(deal?.[BITRIX_ORDER_FIELDS.amountBeforeDiscount] || 0),
                     comments: String(deal?.COMMENTS || deal?.comments || '').slice(0, 4000),
                     additionalInfo: String(deal?.ADDITIONAL_INFO || deal?.additionalInfo || '').slice(0, 2000),
                     rows: Array.isArray(rows)
