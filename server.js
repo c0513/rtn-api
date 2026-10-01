@@ -3427,6 +3427,195 @@ const RTN_KNOWN_PROMO_CODES = [
     'SJ10'
 ];
 
+const RTN_STATIC_PROMO_DISCOUNTS = {
+    RTN2026: 0.05,
+    RHINO: 0.10,
+    BIGGY: 0.10,
+    BATR: 0.10,
+    DOC: 0.10,
+    TOPLIVO10: 0.10,
+    LION: 0.10,
+    PANTERA: 0.10,
+    VEPR: 0.10,
+    SJ10: 0.10
+};
+
+const RTN_GOAL_BUNDLE_IDS =
+    new Set([
+        'weight-loss',
+        'mass-gain'
+    ]);
+
+function calculateAuthoritativeCheckoutPricing({
+    items,
+    delivery,
+    promoCode,
+    referralDiscountRate = 0,
+    rcDiscount = 0
+}) {
+    const goodsSubtotal =
+        (Array.isArray(items) ? items : [])
+            .reduce(
+                (sum, item) =>
+                    sum +
+                    Math.max(
+                        0,
+                        Number(item?.price || 0)
+                    ) *
+                    Math.max(
+                        1,
+                        Number(item?.quantity || 1)
+                    ),
+                0
+            );
+
+    const normalizedPromo =
+        normalizePromoCode(
+            promoCode
+        );
+
+    const staticPromoRate =
+        Number(
+            RTN_STATIC_PROMO_DISCOUNTS[
+                normalizedPromo
+            ] ||
+            0
+        );
+
+    const bundleRate =
+        (Array.isArray(items) ? items : [])
+            .some(item =>
+                RTN_GOAL_BUNDLE_IDS.has(
+                    String(
+                        item?.goalId ||
+                        ''
+                    ).trim()
+                )
+            )
+                ? 0.05
+                : 0;
+
+    const effectiveDiscountRate =
+        Math.min(
+            1,
+            Math.max(
+                0,
+                staticPromoRate,
+                Number(
+                    referralDiscountRate ||
+                    0
+                ),
+                bundleRate
+            )
+        );
+
+    const percentageDiscount =
+        Math.round(
+            goodsSubtotal *
+            effectiveDiscountRate
+        );
+
+    const goodsAfterDiscount =
+        Math.max(
+            0,
+            goodsSubtotal -
+            percentageDiscount
+        );
+
+    const rcDiscountMax =
+        Math.round(
+            goodsAfterDiscount *
+            0.30
+        );
+
+    const normalizedRcDiscount =
+        Math.max(
+            0,
+            Math.round(
+                Number(
+                    rcDiscount ||
+                    0
+                )
+            )
+        );
+
+    if (
+        normalizedRcDiscount >
+        rcDiscountMax
+    ) {
+        const error =
+            new Error(
+                'Скидка RhinoCoins превышает допустимые 30%'
+            );
+
+        error.code =
+            'RC_DISCOUNT_TOO_HIGH';
+
+        error.rcDiscountMax =
+            rcDiscountMax;
+
+        throw error;
+    }
+
+    const goodsPayable =
+        Math.max(
+            0,
+            goodsAfterDiscount -
+            normalizedRcDiscount
+        );
+
+    const deliveryPrice =
+        Math.max(
+            0,
+            Number(
+                delivery?.price ||
+                0
+            )
+        );
+
+    const total =
+        Number(
+            (
+                goodsPayable +
+                deliveryPrice
+            ).toFixed(2)
+        );
+
+    return {
+        goodsSubtotal:
+            Number(
+                goodsSubtotal.toFixed(2)
+            ),
+        promoCode:
+            normalizedPromo,
+        staticPromoRate,
+        referralDiscountRate:
+            Number(
+                referralDiscountRate ||
+                0
+            ),
+        bundleRate,
+        effectiveDiscountRate,
+        percentageDiscount,
+        goodsAfterDiscount:
+            Number(
+                goodsAfterDiscount.toFixed(2)
+            ),
+        rcDiscount:
+            normalizedRcDiscount,
+        rcDiscountMax,
+        goodsPayable:
+            Number(
+                goodsPayable.toFixed(2)
+            ),
+        deliveryPrice:
+            Number(
+                deliveryPrice.toFixed(2)
+            ),
+        total
+    };
+}
+
 const bitrixEnumOptionPromises = new Map();
 const bitrixEnumOptionIdCache = new Map();
 let bitrixPromoFieldsBootstrapPromise = null;
@@ -14397,20 +14586,18 @@ app.post('/api/create-payment', async (req, res) => {
             delivery,
             orderId,
             comment,
-            promoCode
+            promoCode,
+            pricing
         } = req.body;
 
-        // Проверяем сумму
-        const paymentAmount =
+        // Сумма с фронта используется только как контроль.
+        // Финальную сумму рассчитывает backend из товаров, скидок и доставки.
+        const clientPaymentAmount =
             Number(amount);
 
-        console.log(
-            `RTN checkout: promo=${normalizePromoCode(promoCode) || 'NONE'}, amount=${paymentAmount}`
-        );
-
         if (
-            !Number.isFinite(paymentAmount) ||
-            paymentAmount <= 0
+            !Number.isFinite(clientPaymentAmount) ||
+            clientPaymentAmount <= 0
         ) {
             return res.status(400).json({
                 error: 'Некорректная сумма платежа'
@@ -14442,6 +14629,7 @@ app.post('/api/create-payment', async (req, res) => {
         }
 
         const referralPromo = normalizePromoCode(promoCode);
+        let referralTerms = null;
 
         if (
             referralPromo &&
@@ -14477,7 +14665,7 @@ app.post('/api/create-payment', async (req, res) => {
                 });
             }
 
-            const referralTerms =
+            referralTerms =
                 await getReferralCheckoutTerms(
                     referralPromo,
                     {
@@ -14560,6 +14748,117 @@ app.post('/api/create-payment', async (req, res) => {
                 });
             }
         }
+
+        const pricingWithoutRc =
+            calculateAuthoritativeCheckoutPricing({
+                items,
+                delivery,
+                promoCode:
+                    referralPromo,
+                referralDiscountRate:
+                    Number(
+                        referralTerms
+                            ?.discountPercent ||
+                        0
+                    ) / 100,
+                rcDiscount:
+                    0
+            });
+
+        const suppliedRcDiscount =
+            Number(
+                pricing?.rcDiscount
+            );
+
+        const inferredRcDiscount =
+            Math.max(
+                0,
+                Math.round(
+                    (
+                        pricingWithoutRc.total -
+                        clientPaymentAmount
+                    )
+                )
+            );
+
+        let checkoutPricing;
+
+        try {
+            checkoutPricing =
+                calculateAuthoritativeCheckoutPricing({
+                    items,
+                    delivery,
+                    promoCode:
+                        referralPromo,
+                    referralDiscountRate:
+                        Number(
+                            referralTerms
+                                ?.discountPercent ||
+                            0
+                        ) / 100,
+                    rcDiscount:
+                        Number.isFinite(
+                            suppliedRcDiscount
+                        )
+                            ? suppliedRcDiscount
+                            : inferredRcDiscount
+                });
+        } catch (pricingError) {
+            if (
+                pricingError?.code ===
+                'RC_DISCOUNT_TOO_HIGH'
+            ) {
+                return res.status(400).json({
+                    code:
+                        pricingError.code,
+                    error:
+                        pricingError.message,
+                    rcDiscountMax:
+                        pricingError
+                            .rcDiscountMax
+                });
+            }
+
+            throw pricingError;
+        }
+
+        const paymentAmount =
+            checkoutPricing.total;
+
+        const amountDifference =
+            Math.abs(
+                paymentAmount -
+                clientPaymentAmount
+            );
+
+        console.log(
+            'RTN checkout pricing:',
+            JSON.stringify({
+                promo:
+                    checkoutPricing
+                        .promoCode ||
+                    'NONE',
+                goodsSubtotal:
+                    checkoutPricing
+                        .goodsSubtotal,
+                percentageDiscount:
+                    checkoutPricing
+                        .percentageDiscount,
+                rcDiscount:
+                    checkoutPricing
+                        .rcDiscount,
+                delivery:
+                    checkoutPricing
+                        .deliveryPrice,
+                clientTotal:
+                    clientPaymentAmount,
+                serverTotal:
+                    paymentAmount,
+                corrected:
+                    amountDifference >
+                    0.01
+            })
+        );
 
         const customerFullName =
             String(customer?.name || '')
@@ -14745,6 +15044,9 @@ app.post('/api/create-payment', async (req, res) => {
 
             confirmation:
                 response.data.confirmation,
+
+            pricing:
+                checkoutPricing,
 
             bitrixDealId
         });
