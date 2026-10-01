@@ -319,6 +319,7 @@ function normalizeSafeRouteWidgetUrl(value) {
     }
 
     if (
+        /^https:\/\/api\.saferoute\.ru\/v2\/widgets\//i.test(raw) ||
         /^https:\/\/(?:widgets\.)?saferoute\.ru\//i.test(raw)
     ) {
         return raw;
