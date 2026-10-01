@@ -339,6 +339,53 @@ function cleanSafeRouteReference(value, max = 120) {
         .slice(0, max);
 }
 
+const SAFEROUTE_WIDGET_SELECTION_TTL_MS = 30 * 60 * 1000;
+const safeRouteWidgetSelections = new Map();
+
+function normalizeSafeRouteWidgetSession(value) {
+    const session = String(value || '').trim();
+
+    if (!/^[a-z0-9_-]{12,120}$/i.test(session)) {
+        return '';
+    }
+
+    return session;
+}
+
+function rememberSafeRouteWidgetSelection(session, snapshot) {
+    if (!session) return;
+
+    const now = Date.now();
+
+    safeRouteWidgetSelections.set(session, {
+        ...snapshot,
+        savedAt: new Date(now).toISOString(),
+        expiresAt: now + SAFEROUTE_WIDGET_SELECTION_TTL_MS
+    });
+
+    if (safeRouteWidgetSelections.size > 200) {
+        for (const [key, value] of safeRouteWidgetSelections.entries()) {
+            if (!value?.expiresAt || value.expiresAt <= now) {
+                safeRouteWidgetSelections.delete(key);
+            }
+        }
+    }
+}
+
+function getSafeRouteWidgetSelection(session) {
+    const snapshot = safeRouteWidgetSelections.get(session);
+
+    if (!snapshot) return null;
+
+    if (!snapshot.expiresAt || snapshot.expiresAt <= Date.now()) {
+        safeRouteWidgetSelections.delete(session);
+        return null;
+    }
+
+    const { expiresAt, ...publicSnapshot } = snapshot;
+    return publicSnapshot;
+}
+
 async function confirmPaidSafeRouteOrder(payment) {
     if (!isSafeRouteConfigured()) {
         return {
@@ -8441,6 +8488,29 @@ app.get('/api/saferoute/health', async (req, res) => {
     }
 });
 
+app.get('/api/saferoute/selection', (req, res) => {
+    const rtSession = normalizeSafeRouteWidgetSession(
+        req.query?.rtSession
+    );
+
+    if (!rtSession) {
+        return res.status(400).json({
+            error: 'Invalid SafeRoute session'
+        });
+    }
+
+    const snapshot = getSafeRouteWidgetSelection(rtSession);
+
+    if (!snapshot) {
+        return res.status(404).json({
+            error: 'SafeRoute selection not found'
+        });
+    }
+
+    res.set('Cache-Control', 'no-store');
+    return res.json(snapshot);
+});
+
 async function safeRouteWidgetProxy(req, res) {
     if (!isSafeRouteConfigured()) {
         return res.status(503).json({
@@ -8448,6 +8518,10 @@ async function safeRouteWidgetProxy(req, res) {
             error: 'SafeRoute is not configured'
         });
     }
+
+    const rtSession = normalizeSafeRouteWidgetSession(
+        req.query?.rtSession
+    );
 
     const wildcardRoute =
         req.params && typeof req.params[0] === 'string'
@@ -8499,6 +8573,7 @@ async function safeRouteWidgetProxy(req, res) {
         delete clone.url;
         delete clone.route;
         delete clone.action;
+        delete clone.rtSession;
         return clone;
     };
 
@@ -8548,6 +8623,31 @@ async function safeRouteWidgetProxy(req, res) {
             },
             getSafeRouteClientIp(req)
         );
+
+        const normalizedWidgetUrl =
+            String(widgetUrl || '')
+                .toLowerCase()
+                .split('?')[0];
+
+        if (
+            rtSession &&
+            /(?:^|\/)widgets\/save-order$/.test(normalizedWidgetUrl)
+        ) {
+            rememberSafeRouteWidgetSelection(
+                rtSession,
+                {
+                    rtSession,
+                    widgetUrl,
+                    request: data || {},
+                    response: result
+                }
+            );
+
+            console.log(
+                'SafeRoute save-order captured:',
+                JSON.stringify({ rtSession })
+            );
+        }
 
         // widgetApi может возвращать готовый HTML/JS/CSS как строку.
         // Нельзя оборачивать такую строку через res.json(): браузер тогда
