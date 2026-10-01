@@ -297,8 +297,27 @@ function normalizeSafeRouteWidgetUrl(value) {
         return '';
     }
 
+    // SafeRoute cart/api.js обращается к apiScript внутренними
+    // относительными командами, например "t-widget-settings".
+    // Разрешаем только локальные route-like значения без схемы,
+    // traversal и query/hash, чтобы endpoint не превратился в SSRF proxy.
     if (
-        raw.startsWith('/') ||
+        /^[a-z0-9][a-z0-9._\/-]*$/i.test(raw) &&
+        !raw.includes('..') &&
+        !raw.includes('://')
+    ) {
+        return raw;
+    }
+
+    if (
+        raw.startsWith('/') &&
+        !raw.includes('..') &&
+        !raw.startsWith('//')
+    ) {
+        return raw;
+    }
+
+    if (
         /^https:\/\/(?:widgets\.)?saferoute\.ru\//i.test(raw)
     ) {
         return raw;
@@ -8221,11 +8240,30 @@ app.all('/api/saferoute/widget', async (req, res) => {
     );
 
     if (!widgetUrl) {
+        console.warn(
+            'SafeRoute widget invalid route:',
+            req.method,
+            req.originalUrl,
+            {
+                queryKeys: Object.keys(req.query || {}),
+                bodyKeys:
+                    req.body && typeof req.body === 'object'
+                        ? Object.keys(req.body)
+                        : []
+            }
+        );
+
         return res.status(400).json({
             status: 'request_error',
             error: 'Invalid SafeRoute widget url'
         });
     }
+
+    console.log(
+        'SafeRoute widget proxy:',
+        req.method,
+        widgetUrl
+    );
 
     const data =
         req.method === 'GET'
