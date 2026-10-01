@@ -14739,12 +14739,28 @@ app.post('/api/create-payment', async (req, res) => {
 
             if (
                 !Number.isFinite(safeRoutePrice) ||
-                safeRoutePrice < 0
+                safeRoutePrice <= 0
             ) {
+                console.warn(
+                    'SafeRoute checkout rejected: invalid delivery price',
+                    JSON.stringify({
+                        orderId:
+                            cleanOrderValue(orderId, 100),
+                        price:
+                            Number.isFinite(safeRoutePrice)
+                                ? safeRoutePrice
+                                : null,
+                        hasOrderId:
+                            Boolean(safeRouteOrderId),
+                        hasCabinetId:
+                            Boolean(safeRouteCabinetId)
+                    })
+                );
+
                 return res.status(400).json({
                     code: 'SAFEROUTE_PRICE_INVALID',
                     error:
-                        'SafeRoute не передал корректную стоимость доставки.'
+                        'SafeRoute не передал стоимость доставки. Выберите и подтвердите доставку ещё раз.'
                 });
             }
         }
