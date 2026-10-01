@@ -8335,6 +8335,63 @@ async function safeRouteWidgetProxy(req, res) {
             getSafeRouteClientIp(req)
         );
 
+        // widgetApi может возвращать готовый HTML/JS/CSS как строку.
+        // Нельзя оборачивать такую строку через res.json(): браузер тогда
+        // получает "\\n" и кавычки и показывает исходник вместо виджета.
+        if (Buffer.isBuffer(result)) {
+            return res
+                .status(200)
+                .type('application/octet-stream')
+                .send(result);
+        }
+
+        if (typeof result === 'string') {
+            const trimmed = result.trimStart();
+            const normalizedUrl =
+                String(widgetUrl || '')
+                    .toLowerCase()
+                    .split('?')[0];
+
+            if (
+                /^<!doctype\\s+html/i.test(trimmed) ||
+                /^<html[\\s>]/i.test(trimmed)
+            ) {
+                return res
+                    .status(200)
+                    .type('html')
+                    .send(result);
+            }
+
+            if (normalizedUrl.endsWith('.js')) {
+                return res
+                    .status(200)
+                    .type('application/javascript')
+                    .send(result);
+            }
+
+            if (normalizedUrl.endsWith('.css')) {
+                return res
+                    .status(200)
+                    .type('text/css')
+                    .send(result);
+            }
+
+            if (
+                trimmed.startsWith('{') ||
+                trimmed.startsWith('[')
+            ) {
+                return res
+                    .status(200)
+                    .type('application/json')
+                    .send(result);
+            }
+
+            return res
+                .status(200)
+                .type('text/plain')
+                .send(result);
+        }
+
         return res.status(200).json(result);
     } catch (error) {
         console.error(
