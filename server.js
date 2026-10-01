@@ -16571,10 +16571,17 @@ async function listBitrixPaidRtnDeals() {
         );
 
     const paidStageIds =
-        new Set([
-            'EXECUTING',
-            'UC_X6BQYM'
-        ]);
+        new Set(
+            [
+                BITRIX_STAGE_PAID,
+                'EXECUTING',
+                'UC_X6BQYM'
+            ]
+                .map(value =>
+                    String(value || '').trim()
+                )
+                .filter(Boolean)
+        );
 
     return (
         Array.isArray(deals)
