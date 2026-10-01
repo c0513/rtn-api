@@ -18022,6 +18022,27 @@ app.listen(PORT, () => {
         `RTN API запущен на порту ${PORT}`
     );
 
+    if (ONEC_ORDER_EXPORT_ENABLED) {
+        setTimeout(async () => {
+            try {
+                const audit =
+                    await buildOneCPaidOrdersCommerceMl(
+                        '2.07'
+                    );
+
+                console.log(
+                    `1C bulk export audit: paid candidates=${audit.candidates}, ready=${audit.orders.length}, skipped=${audit.skipped.length}`
+                );
+            } catch (error) {
+                console.error(
+                    '1C bulk export audit error:',
+                    error?.message ||
+                    error
+                );
+            }
+        }, 5000);
+    }
+
 
 
 
