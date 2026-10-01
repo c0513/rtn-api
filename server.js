@@ -562,7 +562,12 @@ async function syncRecentYooKassaPayments() {
                 method: cleanOrderValue(metadata.deliveryMethod, 100),
                 address: cleanOrderValue(metadata.deliveryAddress, 1000),
                 city: cleanOrderValue(metadata.deliveryCity, 200),
-                price: 0
+                price: Math.max(0, Number(metadata.deliveryPrice || 0)),
+                provider: cleanOrderValue(metadata.deliveryProvider, 40),
+                company: cleanOrderValue(metadata.deliveryCompany, 120),
+                saferouteOrderId: cleanSafeRouteReference(metadata.saferouteOrderId),
+                saferouteCabinetId: cleanSafeRouteReference(metadata.saferouteCabinetId),
+                saferouteCheckoutSessId: cleanSafeRouteReference(metadata.saferouteCheckoutSessId)
             },
             promoCode: normalizePromoCode(metadata.promoCode),
             source: 'yookassa'
@@ -8255,18 +8260,15 @@ app.all('/api/saferoute/widget', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-    // Возвращаем health сразу, а токен СДЭК прогреваем параллельно.
-    // Поэтому открытие checkout будит Render и заодно готовит СДЭК к поиску.
-    getCdekToken()
-        .then(token => getTariffModeMap(token))
-        .catch(error => {
-            console.warn('CDEK warm-up failed:', error.response?.data || error.message);
-        });
-
+    // Основной контур доставки — SafeRoute. CDEK оставлен только
+    // как legacy-код для истории ранее созданных отправлений.
     res.json({
         ok: true,
         service: 'rhino-api',
-        cdekTokenCached: Boolean(cdekToken && Date.now() < cdekTokenExpiresAt - 60000),
+        shippingProvider: 'saferoute',
+        safeRouteConfigured: isSafeRouteConfigured(),
+        safeRouteShopId: SAFEROUTE_SHOP_ID || null,
+        legacyCdekActive: false,
         bitrixConfigured: isBitrixConfigured(),
         bitrixCategoryId: BITRIX_CATEGORY_ID,
         bitrixStageNew: BITRIX_STAGE_NEW,
@@ -13980,6 +13982,29 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                 paid: true,
                 paidAt: payment?.captured_at || new Date().toISOString()
             });
+
+            // Webhook может не дойти, поэтому success-page fallback обязан
+            // так же подтвердить внешний платёж в SafeRoute.
+            try {
+                const safeRouteResult =
+                    await confirmPaidSafeRouteOrder(
+                        payment
+                    );
+
+                if (safeRouteResult?.ok) {
+                    console.log(
+                        `SafeRoute order ${safeRouteResult.orderId}: payment confirmed by success-page fallback`
+                    );
+                }
+            } catch (safeRouteError) {
+                console.error(
+                    'SafeRoute payment confirmation fallback error:',
+                    safeRouteError?.safeRouteResult ||
+                    safeRouteError?.message ||
+                    safeRouteError
+                );
+            }
+
             try {
                 const sent =
                     await sendPaidOrderToTelegram(
@@ -14222,6 +14247,69 @@ app.post('/api/create-payment', async (req, res) => {
             }
         }
 
+        const deliveryProvider =
+            cleanOrderValue(
+                delivery?.provider,
+                40
+            )
+                .toLowerCase();
+
+        if (
+            deliveryProvider !== 'saferoute' &&
+            deliveryProvider !== 'pickup'
+        ) {
+            return res.status(400).json({
+                code: 'UNSUPPORTED_DELIVERY_PROVIDER',
+                error:
+                    'СДЭК отключен. Для доставки выберите SafeRoute или самовывоз.'
+            });
+        }
+
+        if (deliveryProvider === 'saferoute') {
+            if (!isSafeRouteConfigured()) {
+                return res.status(503).json({
+                    code: 'SAFEROUTE_NOT_CONFIGURED',
+                    error:
+                        'SafeRoute временно недоступен. Попробуйте оформить заказ позже.'
+                });
+            }
+
+            const safeRouteOrderId =
+                cleanSafeRouteReference(
+                    delivery?.saferouteOrderId
+                );
+
+            const safeRouteCabinetId =
+                cleanSafeRouteReference(
+                    delivery?.saferouteCabinetId
+                );
+
+            if (
+                !safeRouteOrderId &&
+                !safeRouteCabinetId
+            ) {
+                return res.status(400).json({
+                    code: 'SAFEROUTE_ORDER_REQUIRED',
+                    error:
+                        'Подтвердите способ доставки в SafeRoute перед оплатой.'
+                });
+            }
+
+            const safeRoutePrice =
+                Number(delivery?.price);
+
+            if (
+                !Number.isFinite(safeRoutePrice) ||
+                safeRoutePrice < 0
+            ) {
+                return res.status(400).json({
+                    code: 'SAFEROUTE_PRICE_INVALID',
+                    error:
+                        'SafeRoute не передал корректную стоимость доставки.'
+                });
+            }
+        }
+
         const customerFullName =
             String(customer?.name || '')
                 .trim()
@@ -14295,6 +14383,21 @@ app.post('/api/create-payment', async (req, res) => {
 
                 deliveryAddress:
                     delivery?.address || '',
+
+                deliveryProvider:
+                    deliveryProvider,
+
+                deliveryCompany:
+                    cleanOrderValue(
+                        delivery?.company,
+                        120
+                    ),
+
+                deliveryPrice:
+                    Math.max(
+                        0,
+                        Number(delivery?.price || 0)
+                    ).toFixed(2),
 
                 orderId:
                     String(orderId || ''),
