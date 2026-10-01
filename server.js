@@ -18023,6 +18023,61 @@ app.listen(PORT, () => {
     );
 
     if (ONEC_ORDER_EXPORT_ENABLED) {
+        const localPaid =
+            readOrders().filter(order =>
+                order?.paid === true &&
+                String(
+                    order?.paymentStatus ||
+                    ''
+                ).toLowerCase() === 'succeeded' &&
+                Number(
+                    order?.amount ||
+                    0
+                ) > 0
+            );
+
+        const localReady =
+            localPaid.filter(order =>
+                Array.isArray(order?.items) &&
+                order.items.length > 0 &&
+                !String(
+                    order?.onecDocumentId ||
+                    ''
+                ).trim() &&
+                !String(
+                    order?.onecExportedAt ||
+                    ''
+                ).trim()
+            );
+
+        console.log(
+            '1C local paid audit:',
+            JSON.stringify({
+                paid: localPaid.length,
+                ready: localReady.length,
+                missingItems:
+                    localPaid
+                        .filter(order =>
+                            !Array.isArray(order?.items) ||
+                            !order.items.length
+                        )
+                        .map(order =>
+                            order?.orderId ||
+                            order?.paymentId
+                        ),
+                already1c:
+                    localPaid
+                        .filter(order =>
+                            String(order?.onecDocumentId || '').trim() ||
+                            String(order?.onecExportedAt || '').trim()
+                        )
+                        .map(order =>
+                            order?.orderId ||
+                            order?.paymentId
+                        )
+            })
+        );
+
         setTimeout(async () => {
             try {
                 const audit =
