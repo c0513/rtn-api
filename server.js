@@ -8353,13 +8353,21 @@ async function safeRouteWidgetProxy(req, res) {
                     .split('?')[0];
 
             if (
-                /^<!doctype\\s+html/i.test(trimmed) ||
-                /^<html[\\s>]/i.test(trimmed)
+                /^<!doctype\s+html/i.test(trimmed) ||
+                /^<html[\s>]/i.test(trimmed)
             ) {
+                res.set({
+                    'Content-Type': 'text/html; charset=utf-8',
+                    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0',
+                    'X-Content-Type-Options': 'nosniff',
+                    'Content-Disposition': 'inline'
+                });
+
                 return res
                     .status(200)
-                    .type('html')
-                    .send(result);
+                    .send(Buffer.from(result, 'utf8'));
             }
 
             if (normalizedUrl.endsWith('.js')) {
