@@ -18527,6 +18527,69 @@ app.listen(PORT, () => {
     );
 
     if (ONEC_ORDER_EXPORT_ENABLED) {
+        setTimeout(async () => {
+            try {
+                const result =
+                    await bitrixCall(
+                        'crm.item.list',
+                        {
+                            entityTypeId: 2,
+                            filter: {
+                                originatorId:
+                                    'RTN.PRO'
+                            },
+                            select: [
+                                'id',
+                                'originId',
+                                'stageId',
+                                'title',
+                                BITRIX_ORDER_FIELDS.orderNumber,
+                                BITRIX_ORDER_FIELDS.paymentStatus
+                            ],
+                            order: {
+                                id:
+                                    'ASC'
+                            }
+                        }
+                    );
+
+                const items =
+                    Array.isArray(result?.items)
+                        ? result.items
+                        : [];
+
+                console.log(
+                    '1C Bitrix RTN deal audit:',
+                    JSON.stringify(
+                        items.map(item => ({
+                            id:
+                                item?.id,
+                            orderId:
+                                item?.originId ||
+                                item?.[
+                                    BITRIX_ORDER_FIELDS.orderNumber
+                                ] ||
+                                '',
+                            stageId:
+                                item?.stageId ||
+                                '',
+                            paymentStatusRaw:
+                                item?.[
+                                    BITRIX_ORDER_FIELDS.paymentStatus
+                                ] ||
+                                ''
+                        }))
+                    )
+                );
+            } catch (error) {
+                console.error(
+                    '1C Bitrix RTN deal audit error:',
+                    error?.message ||
+                    error
+                );
+            }
+        }, 2500);
+
         const localPaid =
             readOrders().filter(order =>
                 order?.paid === true &&
