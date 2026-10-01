@@ -8227,118 +8227,6 @@ app.get('/api/saferoute/health', async (req, res) => {
     }
 });
 
-function describeSafeRouteWidgetResult(result) {
-    const summary = {
-        type: Buffer.isBuffer(result) ? 'buffer' : typeof result,
-        isArray: Array.isArray(result),
-        keys:
-            result && typeof result === 'object' && !Buffer.isBuffer(result)
-                ? Object.keys(result).slice(0, 20)
-                : [],
-        status:
-            result && typeof result === 'object'
-                ? result.status ?? null
-                : null,
-        dataType:
-            result && typeof result === 'object' && 'data' in result
-                ? (Buffer.isBuffer(result.data) ? 'buffer' : typeof result.data)
-                : null,
-        dataPrefix:
-            result && typeof result === 'object' && typeof result.data === 'string'
-                ? result.data.slice(0, 80).replace(/[\r\n]+/g, ' ')
-                : null,
-        stringPrefix:
-            typeof result === 'string'
-                ? result.slice(0, 80).replace(/[\r\n]+/g, ' ')
-                : null,
-        headers:
-            result && typeof result === 'object' && result.headers
-                ? Object.fromEntries(
-                    Object.entries(result.headers)
-                        .filter(([key]) =>
-                            ['content-type', 'content-length'].includes(
-                                String(key).toLowerCase()
-                            )
-                        )
-                )
-                : null
-    };
-
-    return summary;
-}
-
-async function safeRouteWidgetStartupDiagnostic() {
-    if (!isSafeRouteConfigured()) return;
-
-    const api = await getSafeRouteApi();
-    const urls = [
-        'https://api.saferoute.ru/v2/widgets/cart-widget-settings',
-        'https://widgets.saferoute.ru/cart/widget.html'
-    ];
-
-    for (const url of urls) {
-        try {
-            const result = await api.widgets.widgetApi(
-                url,
-                'GET',
-                {},
-                {
-                    token: SAFEROUTE_TOKEN,
-                    shopId: SAFEROUTE_SHOP_ID
-                },
-                '127.0.0.1'
-            );
-
-            console.log(
-                'SafeRoute widget diagnostic:',
-                url,
-                JSON.stringify(
-                    describeSafeRouteWidgetResult(result)
-                )
-            );
-        } catch (error) {
-            console.error(
-                'SafeRoute widget diagnostic error:',
-                url,
-                error?.message || error
-            );
-        }
-    }
-
-    try {
-        const loaderResponse = await axios.get(
-            'https://widgets.saferoute.ru/cart/api.js',
-            {
-                responseType: 'text',
-                timeout: 15000
-            }
-        );
-
-        const source = String(loaderResponse.data || '');
-        for (const needle of ['widget.html', 'apiScript']) {
-            const index = source.indexOf(needle);
-            console.log(
-                'SafeRoute loader source diagnostic:',
-                needle,
-                index,
-                index >= 0
-                    ? source
-                        .slice(
-                            Math.max(0, index - 1800),
-                            Math.min(source.length, index + 3200)
-                        )
-                        .replace(/[\r\n]+/g, ' ')
-                    : 'NOT_FOUND'
-            );
-        }
-    } catch (error) {
-        console.error(
-            'SafeRoute loader source diagnostic error:',
-            error?.message || error
-        );
-    }
-}
-
 async function safeRouteWidgetProxy(req, res) {
     if (!isSafeRouteConfigured()) {
         return res.status(503).json({
@@ -17819,15 +17707,6 @@ app.listen(PORT, () => {
         `RTN API запущен на порту ${PORT}`
     );
 
-    setTimeout(() => {
-        safeRouteWidgetStartupDiagnostic()
-            .catch(error => {
-                console.error(
-                    'SafeRoute widget startup diagnostic failed:',
-                    error?.message || error
-                );
-            });
-    }, 3000);
 
 
     if (
