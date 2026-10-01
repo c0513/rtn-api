@@ -8304,6 +8304,39 @@ async function safeRouteWidgetStartupDiagnostic() {
             );
         }
     }
+
+    try {
+        const loaderResponse = await axios.get(
+            'https://widgets.saferoute.ru/cart/api.js',
+            {
+                responseType: 'text',
+                timeout: 15000
+            }
+        );
+
+        const source = String(loaderResponse.data || '');
+        for (const needle of ['widget.html', 'apiScript']) {
+            const index = source.indexOf(needle);
+            console.log(
+                'SafeRoute loader source diagnostic:',
+                needle,
+                index,
+                index >= 0
+                    ? source
+                        .slice(
+                            Math.max(0, index - 1800),
+                            Math.min(source.length, index + 3200)
+                        )
+                        .replace(/[\r\n]+/g, ' ')
+                    : 'NOT_FOUND'
+            );
+        }
+    } catch (error) {
+        console.error(
+            'SafeRoute loader source diagnostic error:',
+            error?.message || error
+        );
+    }
 }
 
 async function safeRouteWidgetProxy(req, res) {
