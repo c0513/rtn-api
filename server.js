@@ -18991,6 +18991,54 @@ app.listen(PORT, () => {
         `RTN API запущен на порту ${PORT}`
     );
 
+    setTimeout(async () => {
+        try {
+            const diagnosticIds = [23, 27, 51, 53, 55];
+            const details = [];
+
+            for (const dealId of diagnosticIds) {
+                const deal = await bitrixCall(
+                    'crm.deal.get',
+                    { id: dealId }
+                );
+
+                const rows = await bitrixCall(
+                    'crm.deal.productrows.get',
+                    { id: dealId }
+                );
+
+                details.push({
+                    id: dealId,
+                    title: deal?.TITLE || deal?.title || '',
+                    originId: deal?.ORIGIN_ID || deal?.originId || '',
+                    opportunity: Number(deal?.OPPORTUNITY || deal?.opportunity || 0),
+                    comments: String(deal?.COMMENTS || deal?.comments || '').slice(0, 4000),
+                    additionalInfo: String(deal?.ADDITIONAL_INFO || deal?.additionalInfo || '').slice(0, 2000),
+                    rows: Array.isArray(rows)
+                        ? rows.map(row => ({
+                            productId: Number(row?.PRODUCT_ID || row?.productId || 0),
+                            name: row?.PRODUCT_NAME || row?.productName || '',
+                            price: Number(row?.PRICE || row?.price || 0),
+                            quantity: Number(row?.QUANTITY || row?.quantity || 0)
+                        }))
+                        : []
+                });
+
+                await sleep(120);
+            }
+
+            console.log(
+                'RTN 1C bad deal diagnostic:',
+                JSON.stringify(details)
+            );
+        } catch (error) {
+            console.error(
+                'RTN 1C bad deal diagnostic error:',
+                error.response?.data || error.message
+            );
+        }
+    }, 3500);
+
     if (
         ['dry-run', 'execute'].includes(
             SAFEROUTE_BACKFILL_MODE
