@@ -384,7 +384,7 @@ async function getCoinHistory(userId, limit = 50) {
     }));
 }
 
-async function findFriendUser(connection, { email, phone }) {
+async function findUserByIdentity(connection, { email, phone }) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     const normalizedPhone = String(phone || '').trim();
 
@@ -416,6 +416,10 @@ async function findFriendUser(connection, { email, phone }) {
     );
 
     return rows?.[0] || null;
+}
+
+async function findFriendUser(connection, { email, phone }) {
+    return findUserByIdentity(connection, { email, phone });
 }
 
 async function awardReferralRewards({
@@ -672,108 +676,266 @@ async function awardReferralRewards({
     }
 }
 
+async function expireCoinsForUser(userId) {
+    const normalizedUserId = Number(userId || 0);
+    if (!normalizedUserId) {
+        return {
+            userId: normalizedUserId,
+            expiredAmount: 0
+        };
+    }
+
+    await ensureLoyaltyTables();
+
+    const db = getPool();
+    const connection = await db.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        const [expiredRows] = await connection.execute(
+            `SELECT COALESCE(SUM(amount), 0) AS expiring_amount
+             FROM coins_transactions
+             WHERE user_id = ?
+               AND status = 'ACTIVE'
+               AND amount > 0
+               AND expires_at IS NOT NULL
+               AND expires_at <= NOW()
+             FOR UPDATE`,
+            [normalizedUserId]
+        );
+
+        const requested = Math.max(
+            0,
+            Number(expiredRows?.[0]?.expiring_amount || 0)
+        );
+
+        if (requested <= 0) {
+            await connection.commit();
+            return {
+                userId: normalizedUserId,
+                expiredAmount: 0
+            };
+        }
+
+        const [accountRows] = await connection.execute(
+            `SELECT COALESCE(balance, 0) AS balance
+             FROM rhino_coin_accounts
+             WHERE user_id = ?
+             FOR UPDATE`,
+            [normalizedUserId]
+        );
+
+        const balance = Math.max(
+            0,
+            Number(accountRows?.[0]?.balance || 0)
+        );
+        const expiredAmount = Math.min(balance, requested);
+        const newBalance = Math.max(0, balance - expiredAmount);
+
+        await connection.execute(
+            `UPDATE coins_transactions
+             SET status = 'EXPIRED'
+             WHERE user_id = ?
+               AND status = 'ACTIVE'
+               AND amount > 0
+               AND expires_at IS NOT NULL
+               AND expires_at <= NOW()`,
+            [normalizedUserId]
+        );
+
+        await connection.execute(
+            `UPDATE referral_rewards
+             SET status = 'EXPIRED'
+             WHERE user_id = ?
+               AND status = 'ACTIVE'
+               AND expires_at IS NOT NULL
+               AND expires_at <= NOW()`,
+            [normalizedUserId]
+        );
+
+        if (expiredAmount > 0) {
+            await connection.execute(
+                `UPDATE rhino_coin_accounts
+                 SET balance = ?
+                 WHERE user_id = ?`,
+                [newBalance, normalizedUserId]
+            );
+
+            await connection.execute(
+                `INSERT INTO coins_transactions
+                    (
+                        user_id,
+                        type,
+                        amount,
+                        balance_after,
+                        description,
+                        status
+                    )
+                 VALUES (?, 'EXPIRED', ?, ?, 'RhinoCoins сгорели после 180 дней без покупок', 'POSTED')`,
+                [normalizedUserId, -expiredAmount, newBalance]
+            );
+        }
+
+        await connection.execute(
+            `UPDATE loyalty_profiles
+             SET available_coins = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ?`,
+            [newBalance, normalizedUserId]
+        );
+
+        await connection.commit();
+
+        return {
+            userId: normalizedUserId,
+            expiredAmount
+        };
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch {}
+
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function touchUserPurchaseActivity({
+    email,
+    phone,
+    purchasedAt = new Date()
+}) {
+    await ensureLoyaltyTables();
+
+    const db = getPool();
+    const connection = await db.getConnection();
+
+    try {
+        const user = await findUserByIdentity(
+            connection,
+            { email, phone }
+        );
+
+        if (!user?.id) {
+            return {
+                ok: true,
+                ignored: true,
+                reason: 'account_not_found'
+            };
+        }
+
+        const purchaseDate = new Date(purchasedAt || new Date());
+
+        if (Number.isNaN(purchaseDate.getTime())) {
+            return {
+                ok: true,
+                ignored: true,
+                reason: 'invalid_purchase_date'
+            };
+        }
+
+        const expiresAt = addDays(
+            purchaseDate,
+            COIN_TTL_DAYS
+        );
+
+        await connection.beginTransaction();
+
+        // Любая новая покупка продлевает жизнь всех активных бонусных RC
+        // ещё на 180 дней. Поэтому они сгорают только после 6 месяцев
+        // без собственных покупок пользователя.
+        await connection.execute(
+            `UPDATE coins_transactions
+             SET expires_at = ?
+             WHERE user_id = ?
+               AND status = 'ACTIVE'
+               AND amount > 0`,
+            [expiresAt, Number(user.id)]
+        );
+
+        await connection.execute(
+            `UPDATE referral_rewards
+             SET expires_at = ?
+             WHERE user_id = ?
+               AND status = 'ACTIVE'`,
+            [expiresAt, Number(user.id)]
+        );
+
+        await connection.execute(
+            `UPDATE loyalty_profiles
+             SET last_purchase_at =
+                    CASE
+                        WHEN last_purchase_at IS NULL OR last_purchase_at < ?
+                            THEN ?
+                        ELSE last_purchase_at
+                    END,
+                 level_expires_at =
+                    CASE
+                        WHEN last_purchase_at IS NULL OR last_purchase_at < ?
+                            THEN ?
+                        ELSE level_expires_at
+                    END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ?`,
+            [
+                purchaseDate,
+                purchaseDate,
+                purchaseDate,
+                addMonths(purchaseDate, SIX_MONTHS),
+                Number(user.id)
+            ]
+        );
+
+        await connection.commit();
+
+        return {
+            ok: true,
+            ignored: false,
+            userId: Number(user.id),
+            expiresAt
+        };
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch {}
+
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 async function expireCoins() {
     await ensureLoyaltyTables();
 
     const db = getPool();
     const [groups] = await db.execute(
-        `SELECT
-            user_id,
-            COALESCE(SUM(amount), 0) AS expiring_amount
+        `SELECT DISTINCT user_id
          FROM coins_transactions
          WHERE status = 'ACTIVE'
            AND amount > 0
            AND expires_at IS NOT NULL
-           AND expires_at <= NOW()
-         GROUP BY user_id`
+           AND expires_at <= NOW()`
     );
 
     let usersProcessed = 0;
     let totalExpired = 0;
 
     for (const group of groups) {
-        const userId = Number(group.user_id);
-        const connection = await db.getConnection();
-
         try {
-            await connection.beginTransaction();
-
-            const [accountRows] = await connection.execute(
-                `SELECT COALESCE(balance, 0) AS balance
-                 FROM rhino_coin_accounts
-                 WHERE user_id = ?
-                 FOR UPDATE`,
-                [userId]
+            const result = await expireCoinsForUser(
+                Number(group.user_id)
             );
 
-            const balance = Math.max(
-                0,
-                Number(accountRows?.[0]?.balance || 0)
-            );
-            const requested = Math.max(
-                0,
-                Number(group.expiring_amount || 0)
-            );
-            const expiredAmount = Math.min(balance, requested);
-            const newBalance = Math.max(0, balance - expiredAmount);
-
-            await connection.execute(
-                `UPDATE coins_transactions
-                 SET status = 'EXPIRED'
-                 WHERE user_id = ?
-                   AND status = 'ACTIVE'
-                   AND amount > 0
-                   AND expires_at IS NOT NULL
-                   AND expires_at <= NOW()`,
-                [userId]
-            );
-
-            if (expiredAmount > 0) {
-                await connection.execute(
-                    `UPDATE rhino_coin_accounts
-                     SET balance = ?
-                     WHERE user_id = ?`,
-                    [newBalance, userId]
-                );
-
-                await connection.execute(
-                    `INSERT INTO coins_transactions
-                        (
-                            user_id,
-                            type,
-                            amount,
-                            balance_after,
-                            description,
-                            status
-                        )
-                     VALUES (?, 'EXPIRED', ?, ?, 'Сгорание RhinoCoins через 180 дней', 'POSTED')`,
-                    [userId, -expiredAmount, newBalance]
-                );
-
-                totalExpired += expiredAmount;
-            }
-
-            await connection.execute(
-                `UPDATE loyalty_profiles
-                 SET available_coins = ?,
-                     updated_at = CURRENT_TIMESTAMP
-                 WHERE user_id = ?`,
-                [newBalance, userId]
-            );
-
-            await connection.commit();
             usersProcessed += 1;
+            totalExpired += Number(result.expiredAmount || 0);
         } catch (error) {
-            try {
-                await connection.rollback();
-            } catch {}
-
             console.error(
-                `RTN loyalty coin expiry error for user ${userId}:`,
+                `RTN loyalty coin expiry error for user ${group.user_id}:`,
                 error.message
             );
-        } finally {
-            connection.release();
         }
     }
 
@@ -864,6 +1026,8 @@ module.exports = {
     upsertLoyaltyProfile,
     getCoinHistory,
     awardReferralRewards,
+    expireCoinsForUser,
+    touchUserPurchaseActivity,
     expireCoins,
     downgradeInactiveProfiles,
     runDailyLoyaltyMaintenance,
