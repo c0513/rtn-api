@@ -19,6 +19,7 @@ const {
 const { getOrderReceipt } = require('./rtn-yookassa-account');
 const {
     getCoinHistory,
+    expireCoinsForUser,
     startLoyaltyMaintenanceScheduler
 } = require('./loyalty');
 
@@ -1317,6 +1318,8 @@ function createAccountRouter() {
                     error: 'Требуется вход'
                 });
             }
+
+            await expireCoinsForUser(user.id);
 
             const loyalty = await getAccountLoyaltySnapshot(
                 user
