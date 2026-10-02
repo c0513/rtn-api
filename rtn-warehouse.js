@@ -728,6 +728,7 @@ async function findBitrixStockProduct(externalId) {
         {
             select: [
                 'id',
+                'iblockId',
                 'name',
                 'xmlId',
                 'quantity',
