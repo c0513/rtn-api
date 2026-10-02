@@ -10,9 +10,39 @@ const PAYMENT_FIELD = 'UF_CRM_RTN_PAYMENT_STATUS';
 const STAGE_PICKING = process.env.BITRIX_STAGE_PICKING || 'EXECUTING';
 const STAGE_READY = process.env.BITRIX_STAGE_READY || 'FINAL_INVOICE';
 
+const RTN_PRODUCT_IMAGE_PATHS = Object.freeze({
+    'whey-caramel': '/images/Whey/salted caramel_whey.jpg',
+    'whey-lemon': '/images/Whey/lemon mousse_whey.jpg',
+    'whey-raspberry': '/images/Whey/chocolate raspberry_whey.jpg',
+    'mass-choco': '/images/Gainer/chocolate_gainer.jpg',
+    'mass-lemon': '/images/Gainer/lemon mousse_gainer.jpg',
+    'mass-caramel': '/images/Gainer/salted caramel_gainer.jpg',
+    'mass-raspberry': '/images/Gainer/chocolate raspberry_gainer.jpg',
+    'bcaa-wildberries': '/images/BCAA/wildberries_BCAA_65x275.jpg',
+    'bcaa-lime': '/images/BCAA/lemon lime_BCAA_65x275.jpg',
+    'bcaa-grapefruit': '/images/BCAA/grapefruit_BCAA_65x275.jpg',
+    'bcaa-currant': '/images/BCAA/black currant_BCAA_65x275.jpg',
+    'arg-wildberries': '/images/AAKG/wildberries_AAKG_65x275.jpg',
+    'arg-lime': '/images/AAKG/lemon lime_AAKG_65x275.jpg',
+    'arg-grapefruit': '/images/AAKG/grapefruit_AAKG_65x275.jpg',
+    'arg-currant': '/images/AAKG/black currant_AAKG_65x275.jpg',
+    'pre-cola': '/images/Rage/cola_Rhino Fury_65x275.jpg',
+    'pre-orange': '/images/Rage/orange_Rhino Fury_65x275.jpg',
+    'pre-bubblegum': '/images/Rage/bubble gum_Rhino Fury_65x275.jpg',
+    'creatine-orange': '/images/Creatine/orange_creatine_65x275.jpg',
+    'creatine-wildberries': '/images/Creatine/wildberries_creatine_65x275.jpg',
+    'creatine-apple': '/images/Creatine/apple_creatine_65x275.jpg',
+    'creatine-neutral': '/images/Creatine/neutral_creatine_65x275.jpg',
+    'amylo-neutral': '/images/Amylopectin_1000.jpg',
+    'magnesium-caps': '/images/magnesium.jpg',
+    'chondro-caps': '/images/joint support.jpg',
+    'omega3-caps': '/images/omega 3.jpg'
+});
+
 let tablesReadyPromise = null;
 let paymentOptionsCache = { expiresAt: 0, values: new Map() };
 let bitrixCatalogContextPromise = null;
+let bitrixImageSyncPromise = null;
 
 function clean(value, max = 500) {
     return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, max);
@@ -828,7 +858,9 @@ async function loadBitrixStockProductMap() {
                     'xmlId',
                     'quantity',
                     'quantityReserved',
-                    'canBuyZero'
+                    'canBuyZero',
+                    'previewPicture',
+                    'detailPicture'
                 ],
                 filter: {
                     iblockId
@@ -883,6 +915,238 @@ function wait(ms) {
                 ms
             )
     );
+}
+
+async function downloadRtnProductImage(externalId) {
+    const imagePath =
+        RTN_PRODUCT_IMAGE_PATHS[externalId];
+
+    if (!imagePath) {
+        throw new Error(
+            'Image path not configured for ' +
+            externalId
+        );
+    }
+
+    const imageUrl =
+        new URL(
+            imagePath,
+            'https://rtn.pro'
+        ).toString();
+
+    const response =
+        await axios.get(
+            imageUrl,
+            {
+                responseType: 'arraybuffer',
+                timeout: 15000,
+                maxContentLength:
+                    12 * 1024 * 1024,
+                maxBodyLength:
+                    12 * 1024 * 1024,
+                headers: {
+                    'User-Agent':
+                        'RTN-Product-Image-Sync/1.0'
+                }
+            }
+        );
+
+    const buffer =
+        Buffer.from(response.data);
+
+    if (!buffer.length) {
+        throw new Error(
+            'Empty image response: ' +
+            imageUrl
+        );
+    }
+
+    const pathname =
+        new URL(imageUrl).pathname;
+
+    const filename =
+        decodeURIComponent(
+            pathname.split('/').pop() ||
+            (externalId + '.jpg')
+        );
+
+    return {
+        filename,
+        base64:
+            buffer.toString('base64'),
+        bytes:
+            buffer.length,
+        imageUrl
+    };
+}
+
+async function syncMissingBitrixImages(
+    productMap
+) {
+    let updated = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (
+        const externalId
+        of Object.keys(
+            RTN_PRODUCT_IMAGE_PATHS
+        )
+    ) {
+        const xmlId =
+            'RTN:' + externalId;
+
+        const product =
+            productMap?.get(xmlId);
+
+        if (!product?.id) {
+            failed += 1;
+            console.warn(
+                'RTN image -> Bitrix warning:',
+                externalId,
+                'product not found'
+            );
+            continue;
+        }
+
+        const hasPreview =
+            Boolean(
+                product.previewPicture?.id ||
+                product.previewPicture?.url
+            );
+
+        const hasDetail =
+            Boolean(
+                product.detailPicture?.id ||
+                product.detailPicture?.url
+            );
+
+        if (
+            hasPreview &&
+            hasDetail
+        ) {
+            skipped += 1;
+            continue;
+        }
+
+        try {
+            const image =
+                await downloadRtnProductImage(
+                    externalId
+                );
+
+            const fields = {};
+
+            if (!hasPreview) {
+                fields.previewPicture = {
+                    fileData: [
+                        image.filename,
+                        image.base64
+                    ]
+                };
+            }
+
+            if (!hasDetail) {
+                fields.detailPicture = {
+                    fileData: [
+                        image.filename,
+                        image.base64
+                    ]
+                };
+            }
+
+            let lastError = null;
+
+            for (
+                let attempt = 1;
+                attempt <= 2;
+                attempt += 1
+            ) {
+                try {
+                    await bitrixCall(
+                        'catalog.product.update',
+                        {
+                            id:
+                                Number(product.id),
+                            fields
+                        },
+                        {
+                            timeoutMs:
+                                20000
+                        }
+                    );
+
+                    lastError = null;
+                    break;
+                } catch (error) {
+                    lastError = error;
+
+                    if (
+                        attempt < 2
+                    ) {
+                        await wait(800);
+                    }
+                }
+            }
+
+            if (lastError) {
+                throw lastError;
+            }
+
+            updated += 1;
+
+            console.log(
+                'RTN image -> Bitrix updated:',
+                externalId,
+                image.bytes,
+                'bytes'
+            );
+
+            await wait(250);
+        } catch (error) {
+            failed += 1;
+
+            console.warn(
+                'RTN image -> Bitrix warning:',
+                externalId,
+                error.response?.data ||
+                error.message
+            );
+        }
+    }
+
+    console.log(
+        `RTN image sync finished: updated=${updated}, skipped=${skipped}, failed=${failed}`
+    );
+
+    return {
+        updated,
+        skipped,
+        failed
+    };
+}
+
+function scheduleBitrixImageSync(
+    productMap
+) {
+    if (bitrixImageSyncPromise) {
+        return;
+    }
+
+    bitrixImageSyncPromise =
+        syncMissingBitrixImages(
+            productMap
+        )
+            .catch(error => {
+                console.error(
+                    'RTN image sync background error:',
+                    error.response?.data ||
+                    error.message
+                );
+            })
+            .finally(() => {
+                bitrixImageSyncPromise = null;
+            });
 }
 
 async function updateBitrixStockProduct(
@@ -1193,6 +1457,15 @@ async function syncWarehouseStocks(
             available,
             bitrix
         });
+    }
+
+    if (
+        syncBitrix &&
+        bitrixProductMap?.size
+    ) {
+        scheduleBitrixImageSync(
+            bitrixProductMap
+        );
     }
 
     console.log(
