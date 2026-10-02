@@ -809,7 +809,7 @@ async function syncBitrixStockItem(item) {
 
                 fields: {
                     quantity:
-                        available,
+                        quantity,
 
                     quantityReserved:
                         Math.max(
