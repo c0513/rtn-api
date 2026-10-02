@@ -15773,8 +15773,10 @@ async function processOneCCatalogImport(filename) {
             await syncWarehouseStocks(
                 parsed.items,
                 {
+                    // 1C is the source of truth for inventory.
+                    // Bitrix warehouse stock must not be mutated by CommerceML sync.
                     syncBitrix:
-                        true
+                        false
                 }
             );
     }
