@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
-const { createWarehouseRouter } = require('./rtn-warehouse');
+const { createWarehouseRouter, syncWarehouseStocks } = require('./rtn-warehouse');
 const { createBitrixWarehouseAppRouter } = require('./rtn-bitrix-warehouse-app');
 const {
     awardReferralCoinsForPayment,
@@ -3434,7 +3434,8 @@ const BITRIX_ORDER_FIELDS = {
     deliveryCost: 'UF_CRM_RTN_DELIVERY_COST',
     clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
     paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
-    onecExportedAt: 'UF_CRM_RTN_1C_EXPORTED_AT'
+    onecExportedAt: 'UF_CRM_RTN_1C_EXPORTED_AT',
+    onecStatus: 'UF_CRM_RTN_1C_STATUS'
 };
 
 const RTN_DELIVERY_TYPES = [
@@ -4587,6 +4588,23 @@ async function syncOrderFieldsToBitrix() {
 
                 sort:
                     3280
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.onecStatus,
+
+                label:
+                    'Статус 1С',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3290
             });
 
             await ensureBitrixEnumOptionsBatch({
@@ -15559,7 +15577,599 @@ function oneCExtractRequisite(xml, name) {
     return '';
 }
 
-function processOneCSaleImport(filename) {
+function resolveOneCExternalId(oneCId) {
+    const raw =
+        oneCXmlDecode(
+            oneCId
+        );
+
+    if (!raw) {
+        return '';
+    }
+
+    const candidates =
+        Array.from(
+            new Set(
+                [
+                    raw,
+                    ...raw
+                        .split('#')
+                        .map(value => value.trim())
+                        .filter(Boolean)
+                ]
+            )
+        );
+
+    for (
+        const [
+            externalId,
+            oneCProduct
+        ]
+        of Object.entries(
+            ONEC_PRODUCT_MAP
+        )
+    ) {
+        const mappedId =
+            String(
+                oneCProduct?.id ||
+                ''
+            ).trim();
+
+        if (
+            mappedId &&
+            candidates.includes(
+                mappedId
+            )
+        ) {
+            return externalId;
+        }
+    }
+
+    return '';
+}
+
+function extractOneCCatalogStockItems(xml) {
+    const source =
+        String(xml || '');
+
+    const offerBlocks =
+        source.match(
+            /<Предложение>[\s\S]*?<\/Предложение>/gi
+        ) || [];
+
+    const productBlocks =
+        offerBlocks.length
+            ? offerBlocks
+            : (
+                source.match(
+                    /<Товар>[\s\S]*?<\/Товар>/gi
+                ) || []
+            );
+
+    const items = [];
+    let withQuantity = 0;
+    let mapped = 0;
+
+    for (const block of productBlocks) {
+        const rawQuantity =
+            oneCExtractTag(
+                block,
+                'Количество'
+            );
+
+        if (rawQuantity === '') {
+            continue;
+        }
+
+        withQuantity += 1;
+
+        const oneCId =
+            oneCExtractTag(
+                block,
+                'Ид'
+            );
+
+        const externalId =
+            resolveOneCExternalId(
+                oneCId
+            );
+
+        if (!externalId) {
+            continue;
+        }
+
+        mapped += 1;
+
+        const quantity =
+            Number(
+                String(rawQuantity)
+                    .replace(',', '.')
+            );
+
+        if (!Number.isFinite(quantity)) {
+            continue;
+        }
+
+        items.push({
+            externalId,
+            productName:
+                oneCExtractTag(
+                    block,
+                    'Наименование'
+                ),
+            gtin:
+                oneCExtractTag(
+                    block,
+                    'Штрихкод'
+                ),
+            quantity,
+            reserved:
+                0,
+            available:
+                Math.max(
+                    0,
+                    quantity
+                ),
+            oneCId
+        });
+    }
+
+    return {
+        blocks:
+            productBlocks.length,
+        withQuantity,
+        mapped,
+        items
+    };
+}
+
+async function processOneCCatalogImport(filename) {
+    const safeName =
+        sanitizeOneCCatalogFilename(
+            filename
+        );
+
+    if (!safeName) {
+        throw new Error(
+            '1С не передала имя файла каталога'
+        );
+    }
+
+    const fullPath =
+        path.join(
+            ONEC_CATALOG_CAPTURE_DIR,
+            safeName
+        );
+
+    if (
+        !fs.existsSync(fullPath) ||
+        !fs.statSync(fullPath).isFile()
+    ) {
+        throw new Error(
+            'Файл каталога 1С не найден на сервере'
+        );
+    }
+
+    const xml =
+        fs.readFileSync(
+            fullPath,
+            'utf8'
+        );
+
+    const parsed =
+        extractOneCCatalogStockItems(
+            xml
+        );
+
+    let stockSync = {
+        updated: 0,
+        bitrixUpdated: 0,
+        bitrixFailed: 0,
+        results: []
+    };
+
+    if (parsed.items.length) {
+        stockSync =
+            await syncWarehouseStocks(
+                parsed.items,
+                {
+                    syncBitrix:
+                        true
+                }
+            );
+    }
+
+    return {
+        file:
+            safeName,
+        blocks:
+            parsed.blocks,
+        withQuantity:
+            parsed.withQuantity,
+        mapped:
+            parsed.mapped,
+        stockItems:
+            parsed.items.length,
+        stored:
+            Number(
+                stockSync.updated ||
+                0
+            ),
+        bitrixUpdated:
+            Number(
+                stockSync.bitrixUpdated ||
+                0
+            ),
+        bitrixFailed:
+            Number(
+                stockSync.bitrixFailed ||
+                0
+            )
+    };
+}
+
+function getOneCOrderStatus(documentXml) {
+    const names = [
+        'Статус заказа',
+        'Статус',
+        'Состояние заказа',
+        'Состояние'
+    ];
+
+    for (const name of names) {
+        const value =
+            oneCExtractRequisite(
+                documentXml,
+                name
+            );
+
+        if (value) {
+            return value;
+        }
+    }
+
+    return (
+        oneCExtractTag(
+            documentXml,
+            'Статус'
+        ) ||
+        ''
+    );
+}
+
+function oneCBoolean(value) {
+    return [
+        'true',
+        '1',
+        'yes',
+        'y',
+        'да'
+    ].includes(
+        String(value || '')
+            .trim()
+            .toLowerCase()
+    );
+}
+
+function mapOneCStatusToBitrixStage({
+    status,
+    cancelled
+}) {
+    if (cancelled) {
+        return 'LOSE';
+    }
+
+    const normalized =
+        String(status || '')
+            .trim()
+            .toLowerCase()
+            .replace(/ё/g, 'е');
+
+    if (!normalized) {
+        return '';
+    }
+
+    if (
+        /отмен|аннулир/.test(
+            normalized
+        )
+    ) {
+        return 'LOSE';
+    }
+
+    if (
+        /сбор|комплект|обработ|резерв/.test(
+            normalized
+        )
+    ) {
+        return (
+            process.env.BITRIX_STAGE_PICKING ||
+            'EXECUTING'
+        );
+    }
+
+    if (
+        /готов.*отгруз|отгруж|реализ/.test(
+            normalized
+        )
+    ) {
+        return (
+            process.env.BITRIX_STAGE_READY ||
+            'FINAL_INVOICE'
+        );
+    }
+
+    return '';
+}
+
+async function findBitrixDealForOneC({
+    orderId,
+    siteNumber
+}) {
+    if (orderId) {
+        const byOrigin =
+            await findExistingBitrixDeal(
+                orderId
+            );
+
+        if (byOrigin) {
+            const deal =
+                await bitrixCall(
+                    'crm.deal.get',
+                    {
+                        id:
+                            Number(byOrigin)
+                    }
+                );
+
+            if (deal) {
+                return deal;
+            }
+        }
+    }
+
+    if (!siteNumber) {
+        return null;
+    }
+
+    await syncOrderFieldsToBitrix();
+
+    const deals =
+        await bitrixCall(
+            'crm.deal.list',
+            {
+                order: {
+                    ID:
+                        'ASC'
+                },
+                filter: {
+                    ORIGINATOR_ID:
+                        'RTN.PRO',
+                    [
+                        BITRIX_ORDER_FIELDS
+                            .orderNumber
+                    ]:
+                        String(
+                            siteNumber
+                        )
+                },
+                select: [
+                    'ID',
+                    'ORIGIN_ID',
+                    'STAGE_ID',
+                    BITRIX_ORDER_FIELDS
+                        .orderNumber,
+                    BITRIX_ORDER_FIELDS
+                        .onecStatus
+                ],
+                start:
+                    0
+            }
+        );
+
+    return (
+        Array.isArray(deals)
+            ? deals[0]
+            : null
+    ) || null;
+}
+
+async function syncOneCOrderStatusToBitrix({
+    orderId,
+    siteNumber,
+    documentXml
+}) {
+    const status =
+        getOneCOrderStatus(
+            documentXml
+        );
+
+    const cancelled =
+        oneCBoolean(
+            oneCExtractRequisite(
+                documentXml,
+                'Отменен'
+            ) ||
+            oneCExtractRequisite(
+                documentXml,
+                'Отменён'
+            )
+        ) ||
+        /отмен|аннулир/i.test(
+            status
+        );
+
+    const posted =
+        oneCBoolean(
+            oneCExtractRequisite(
+                documentXml,
+                'Проведен'
+            )
+        );
+
+    const deal =
+        await findBitrixDealForOneC({
+            orderId,
+            siteNumber
+        });
+
+    if (!deal) {
+        return {
+            linked: false,
+            changed: false,
+            status,
+            cancelled,
+            posted
+        };
+    }
+
+    const dealId =
+        Number(
+            deal?.ID ||
+            deal?.id ||
+            0
+        );
+
+    if (!dealId) {
+        return {
+            linked: false,
+            changed: false,
+            status,
+            cancelled,
+            posted
+        };
+    }
+
+    await syncOrderFieldsToBitrix();
+
+    const displayStatus =
+        status ||
+        (
+            cancelled
+                ? 'Отменен'
+                : posted
+                    ? 'Проведен'
+                    : ''
+        );
+
+    const targetStage =
+        mapOneCStatusToBitrixStage({
+            status:
+                displayStatus,
+            cancelled
+        });
+
+    const currentStage =
+        String(
+            deal?.STAGE_ID ||
+            deal?.stageId ||
+            ''
+        ).trim();
+
+    const currentOneCStatus =
+        String(
+            deal?.[
+                BITRIX_ORDER_FIELDS
+                    .onecStatus
+            ] ||
+            ''
+        ).trim();
+
+    const fields = {};
+
+    if (
+        displayStatus &&
+        displayStatus !==
+            currentOneCStatus
+    ) {
+        fields[
+            BITRIX_ORDER_FIELDS
+                .onecStatus
+        ] =
+            displayStatus;
+    }
+
+    if (
+        targetStage &&
+        targetStage !==
+            currentStage
+    ) {
+        fields.STAGE_ID =
+            targetStage;
+    }
+
+    if (!Object.keys(fields).length) {
+        return {
+            linked: true,
+            changed: false,
+            dealId,
+            status:
+                displayStatus,
+            stage:
+                currentStage,
+            cancelled,
+            posted
+        };
+    }
+
+    await bitrixCall(
+        'crm.deal.update',
+        {
+            id:
+                dealId,
+            fields
+        }
+    );
+
+    try {
+        await bitrixCall(
+            'crm.timeline.comment.add',
+            {
+                fields: {
+                    ENTITY_ID:
+                        dealId,
+                    ENTITY_TYPE:
+                        'deal',
+                    COMMENT:
+                        [
+                            '🔄 Синхронизация с 1С',
+                            displayStatus
+                                ? 'Статус 1С: ' +
+                                    displayStatus
+                                : '',
+                            targetStage &&
+                            targetStage !== currentStage
+                                ? 'Стадия Bitrix: ' +
+                                    targetStage
+                                : ''
+                        ]
+                            .filter(Boolean)
+                            .join('\n')
+                }
+            }
+        );
+    } catch (error) {
+        console.warn(
+            '1C -> Bitrix timeline warning:',
+            error.message
+        );
+    }
+
+    return {
+        linked: true,
+        changed: true,
+        dealId,
+        status:
+            displayStatus,
+        stage:
+            targetStage ||
+            currentStage,
+        cancelled,
+        posted
+    };
+}
+
+async function processOneCSaleImport(filename) {
     const safeName =
         sanitizeOneCCatalogFilename(filename);
 
@@ -15599,6 +16209,8 @@ function processOneCSaleImport(filename) {
         readOrders();
 
     let linked = 0;
+    let bitrixChanged = 0;
+    let bitrixLinked = 0;
 
     for (const documentXml of documents) {
         const siteNumber =
@@ -15624,46 +16236,101 @@ function processOneCSaleImport(filename) {
                     siteNumber
             );
 
-        if (!existing?.orderId) {
-            continue;
-        }
+        const status =
+            getOneCOrderStatus(
+                documentXml
+            );
 
-        upsertLocalOrder({
-            orderId:
-                existing.orderId,
-
-            onecDocumentId:
-                oneCExtractTag(
-                    documentXml,
-                    'Ид'
-                ),
-
-            onecDocumentNumber:
+        const cancelled =
+            oneCBoolean(
                 oneCExtractRequisite(
                     documentXml,
-                    'Номер по 1С'
-                ),
-
-            onecDocumentDate:
+                    'Отменен'
+                ) ||
                 oneCExtractRequisite(
                     documentXml,
-                    'Дата по 1С'
-                ),
+                    'Отменён'
+                )
+            ) ||
+            /отмен|аннулир/i.test(
+                status
+            );
 
-            onecPosted:
+        const posted =
+            oneCBoolean(
                 oneCExtractRequisite(
                     documentXml,
                     'Проведен'
-                ) === 'true',
+                )
+            );
 
-            onecSyncedAt:
-                new Date().toISOString(),
+        if (existing?.orderId) {
+            upsertLocalOrder({
+                orderId:
+                    existing.orderId,
 
-            onecLastImportFile:
-                safeName
-        });
+                onecDocumentId:
+                    oneCExtractTag(
+                        documentXml,
+                        'Ид'
+                    ),
 
-        linked += 1;
+                onecDocumentNumber:
+                    oneCExtractRequisite(
+                        documentXml,
+                        'Номер по 1С'
+                    ),
+
+                onecDocumentDate:
+                    oneCExtractRequisite(
+                        documentXml,
+                        'Дата по 1С'
+                    ),
+
+                onecPosted:
+                    posted,
+
+                onecStatus:
+                    status,
+
+                onecCancelled:
+                    cancelled,
+
+                onecSyncedAt:
+                    new Date().toISOString(),
+
+                onecLastImportFile:
+                    safeName
+            });
+
+            linked += 1;
+        }
+
+        try {
+            const synced =
+                await syncOneCOrderStatusToBitrix({
+                    orderId:
+                        existing?.orderId ||
+                        '',
+                    siteNumber,
+                    documentXml
+                });
+
+            if (synced.linked) {
+                bitrixLinked += 1;
+            }
+
+            if (synced.changed) {
+                bitrixChanged += 1;
+            }
+        } catch (error) {
+            console.error(
+                '1C -> Bitrix order status error:',
+                siteNumber,
+                error.response?.data ||
+                error.message
+            );
+        }
     }
 
     return {
@@ -15671,7 +16338,9 @@ function processOneCSaleImport(filename) {
             safeName,
         documents:
             documents.length,
-        linked
+        linked,
+        bitrixLinked,
+        bitrixChanged
     };
 }
 
@@ -17530,8 +18199,52 @@ app.all(
                 }
             }
 
+            if (mode === 'import') {
+                try {
+                    const result =
+                        await processOneCCatalogImport(
+                            req.query?.filename
+                        );
+
+                    console.log(
+                        '1C catalog import: ' +
+                        result.file +
+                        ', blocks=' +
+                        result.blocks +
+                        ', qty=' +
+                        result.withQuantity +
+                        ', mapped=' +
+                        result.mapped +
+                        ', stored=' +
+                        result.stored +
+                        ', bitrixUpdated=' +
+                        result.bitrixUpdated +
+                        ', bitrixFailed=' +
+                        result.bitrixFailed
+                    );
+
+                    return oneCText(
+                        res,
+                        200,
+                        'success'
+                    );
+                } catch (error) {
+                    console.error(
+                        '1C catalog import error:',
+                        error.response?.data ||
+                        error.message
+                    );
+
+                    return oneCText(
+                        res,
+                        500,
+                        'failure\n' +
+                        error.message
+                    );
+                }
+            }
+
             if (
-                mode === 'import' ||
                 mode === 'complete' ||
                 mode === 'deactivate'
             ) {
@@ -17763,7 +18476,7 @@ app.all(
         if (mode === 'import') {
             try {
                 const result =
-                    processOneCSaleImport(
+                    await processOneCSaleImport(
                         req.query?.filename
                     );
 
@@ -17774,7 +18487,11 @@ app.all(
                     result.documents +
                     ' documents, ' +
                     result.linked +
-                    ' linked'
+                    ' local linked, ' +
+                    result.bitrixLinked +
+                    ' Bitrix linked, ' +
+                    result.bitrixChanged +
+                    ' Bitrix changed'
                 );
 
                 return oneCText(
