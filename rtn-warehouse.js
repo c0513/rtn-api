@@ -12,6 +12,7 @@ const STAGE_READY = process.env.BITRIX_STAGE_READY || 'FINAL_INVOICE';
 
 let tablesReadyPromise = null;
 let paymentOptionsCache = { expiresAt: 0, values: new Map() };
+let bitrixCatalogContextPromise = null;
 
 function clean(value, max = 500) {
     return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, max);
@@ -720,8 +721,100 @@ function stockNumber(value, fallback = 0) {
     return Number.isFinite(number) ? number : fallback;
 }
 
+async function getWarehouseBitrixCatalogContext() {
+    if (bitrixCatalogContextPromise) {
+        return bitrixCatalogContextPromise;
+    }
+
+    bitrixCatalogContextPromise = (async () => {
+        const result = await bitrixCall(
+            'catalog.catalog.list',
+            {
+                select: [
+                    'id',
+                    'iblockId',
+                    'name',
+                    'productIblockId'
+                ],
+                order: {
+                    id: 'asc'
+                }
+            }
+        );
+
+        const catalogs =
+            result?.catalogs ||
+            (Array.isArray(result) ? result : []);
+
+        if (!catalogs.length) {
+            throw new Error(
+                'Bitrix24 не вернул торговый каталог'
+            );
+        }
+
+        const configuredIblockId =
+            Number(
+                process.env.BITRIX_CATALOG_IBLOCK_ID ||
+                0
+            );
+
+        let catalog = null;
+
+        if (configuredIblockId > 0) {
+            catalog =
+                catalogs.find(
+                    item =>
+                        Number(item.iblockId) ===
+                        configuredIblockId
+                ) ||
+                null;
+        }
+
+        if (!catalog) {
+            catalog =
+                catalogs.find(
+                    item =>
+                        !Number(
+                            item.productIblockId ||
+                            0
+                        )
+                ) ||
+                catalogs[0];
+        }
+
+        const iblockId =
+            Number(
+                catalog?.iblockId ||
+                0
+            );
+
+        if (!iblockId) {
+            throw new Error(
+                'Не удалось определить iblockId каталога Bitrix24'
+            );
+        }
+
+        return {
+            iblockId,
+            catalogName:
+                clean(
+                    catalog?.name,
+                    300
+                )
+        };
+    })().catch(error => {
+        bitrixCatalogContextPromise = null;
+        throw error;
+    });
+
+    return bitrixCatalogContextPromise;
+}
+
 async function findBitrixStockProduct(externalId) {
     const xmlId = 'RTN:' + clean(externalId, 180);
+
+    const { iblockId } =
+        await getWarehouseBitrixCatalogContext();
 
     const result = await bitrixCall(
         'catalog.product.list',
@@ -736,6 +829,7 @@ async function findBitrixStockProduct(externalId) {
                 'canBuyZero'
             ],
             filter: {
+                iblockId,
                 xmlId
             },
             order: {
