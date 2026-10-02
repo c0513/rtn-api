@@ -2185,7 +2185,7 @@ function createWarehouseRouter() {
                     req.body?.items,
                     {
                         syncBitrix:
-                            req.body?.syncBitrix !== false
+                            req.body?.syncBitrix === true
                     }
                 );
 
