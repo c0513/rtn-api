@@ -810,43 +810,169 @@ async function getWarehouseBitrixCatalogContext() {
     return bitrixCatalogContextPromise;
 }
 
-async function findBitrixStockProduct(externalId) {
-    const xmlId = 'RTN:' + clean(externalId, 180);
-
+async function loadBitrixStockProductMap() {
     const { iblockId } =
         await getWarehouseBitrixCatalogContext();
 
-    const result = await bitrixCall(
-        'catalog.product.list',
-        {
-            select: [
-                'id',
-                'iblockId',
-                'name',
-                'xmlId',
-                'quantity',
-                'quantityReserved',
-                'canBuyZero'
-            ],
-            filter: {
-                iblockId,
-                xmlId
+    const map = new Map();
+    let start = 0;
+
+    for (let page = 0; page < 20; page += 1) {
+        const result = await bitrixCall(
+            'catalog.product.list',
+            {
+                select: [
+                    'id',
+                    'iblockId',
+                    'name',
+                    'xmlId',
+                    'quantity',
+                    'quantityReserved',
+                    'canBuyZero'
+                ],
+                filter: {
+                    iblockId
+                },
+                order: {
+                    id: 'asc'
+                },
+                start
             },
-            order: {
-                id: 'asc'
-            },
-            start: 0
+            {
+                timeoutMs: 10000
+            }
+        );
+
+        const products =
+            result?.products ||
+            (Array.isArray(result) ? result : []);
+
+        for (const product of products) {
+            const xmlId =
+                clean(
+                    product?.xmlId,
+                    240
+                );
+
+            if (
+                xmlId &&
+                xmlId.startsWith('RTN:')
+            ) {
+                map.set(
+                    xmlId,
+                    product
+                );
+            }
         }
-    );
 
-    const products =
-        result?.products ||
-        (Array.isArray(result) ? result : []);
+        if (products.length < 50) {
+            break;
+        }
 
-    return products[0] || null;
+        start += products.length;
+    }
+
+    return map;
 }
 
-async function syncBitrixStockItem(item) {
+function wait(ms) {
+    return new Promise(
+        resolve =>
+            setTimeout(
+                resolve,
+                ms
+            )
+    );
+}
+
+async function updateBitrixStockProduct(
+    product,
+    {
+        quantity,
+        reserved
+    }
+) {
+    let lastError = null;
+
+    for (
+        let attempt = 1;
+        attempt <= 2;
+        attempt += 1
+    ) {
+        try {
+            await bitrixCall(
+                'catalog.product.update',
+                {
+                    id:
+                        Number(product.id),
+
+                    fields: {
+                        quantity:
+                            quantity,
+
+                        quantityReserved:
+                            Math.max(
+                                0,
+                                Math.min(
+                                    reserved,
+                                    quantity
+                                )
+                            ),
+
+                        quantityTrace:
+                            'Y',
+
+                        canBuyZero:
+                            'N'
+                    }
+                },
+                {
+                    timeoutMs: 8000
+                }
+            );
+
+            return;
+        } catch (error) {
+            lastError = error;
+
+            const message =
+                String(
+                    error?.message ||
+                    ''
+                );
+
+            const retryable =
+                error?.name ===
+                    'AbortError' ||
+                /aborted|timeout|timed out/i.test(
+                    message
+                );
+
+            if (
+                !retryable ||
+                attempt >= 2
+            ) {
+                break;
+            }
+
+            console.warn(
+                'RTN stock -> Bitrix retry:',
+                product?.xmlId ||
+                product?.id,
+                message
+            );
+
+            await wait(600);
+        }
+    }
+
+    throw lastError;
+}
+
+async function syncBitrixStockItem(
+    item,
+    productMap
+) {
     const externalId =
         clean(item?.externalId, 180);
 
@@ -858,18 +984,20 @@ async function syncBitrixStockItem(item) {
         };
     }
 
+    const xmlId =
+        'RTN:' + externalId;
+
     const product =
-        await findBitrixStockProduct(
-            externalId
-        );
+        productMap?.get(xmlId) ||
+        null;
 
     if (!product?.id) {
         return {
             ok: false,
             externalId,
             error:
-                'Bitrix product not found by XML_ID RTN:' +
-                externalId
+                'Bitrix product not found by XML_ID ' +
+                xmlId
         };
     }
 
@@ -896,31 +1024,11 @@ async function syncBitrixStockItem(item) {
         );
 
     try {
-        await bitrixCall(
-            'catalog.product.update',
+        await updateBitrixStockProduct(
+            product,
             {
-                id:
-                    Number(product.id),
-
-                fields: {
-                    quantity:
-                        quantity,
-
-                    quantityReserved:
-                        Math.max(
-                            0,
-                            Math.min(
-                                reserved,
-                                quantity
-                            )
-                        ),
-
-                    quantityTrace:
-                        'Y',
-
-                    canBuyZero:
-                        'N'
-                }
+                quantity,
+                reserved
             }
         );
 
@@ -967,6 +1075,21 @@ async function syncWarehouseStocks(
 
     const db = getPool();
     const results = [];
+
+    let bitrixProductMap = null;
+
+    if (
+        syncBitrix &&
+        items.length
+    ) {
+        bitrixProductMap =
+            await loadBitrixStockProductMap();
+
+        console.log(
+            'RTN stock Bitrix map loaded:',
+            bitrixProductMap.size
+        );
+    }
 
     let updated = 0;
     let bitrixUpdated = 0;
@@ -1039,13 +1162,16 @@ async function syncWarehouseStocks(
 
         if (syncBitrix) {
             bitrix =
-                await syncBitrixStockItem({
-                    ...item,
-                    externalId,
-                    quantity,
-                    reserved,
-                    available
-                });
+                await syncBitrixStockItem(
+                    {
+                        ...item,
+                        externalId,
+                        quantity,
+                        reserved,
+                        available
+                    },
+                    bitrixProductMap
+                );
 
             if (bitrix.ok) {
                 bitrixUpdated += 1;
