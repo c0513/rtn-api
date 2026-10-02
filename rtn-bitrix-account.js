@@ -31,7 +31,7 @@ function getBitrixWebhookUrl() {
     return String(process.env.BITRIX_WEBHOOK_URL || '').replace(/\/+$/, '');
 }
 
-async function bitrixCall(method, params = {}) {
+async function bitrixCall(method, params = {}, options = {}) {
     const base = getBitrixWebhookUrl();
 
     if (!base) {
@@ -41,7 +41,14 @@ async function bitrixCall(method, params = {}) {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeoutMs = Math.max(
+        1000,
+        Number(options?.timeoutMs || 30000)
+    );
+    const timeout = setTimeout(
+        () => controller.abort(),
+        timeoutMs
+    );
 
     try {
         const response = await fetch(`${base}/${method}.json`, {
