@@ -714,6 +714,279 @@ function validateCompletion(session) {
     return { ok: true };
 }
 
+
+function stockNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+async function findBitrixStockProduct(externalId) {
+    const xmlId = 'RTN:' + clean(externalId, 180);
+
+    const result = await bitrixCall(
+        'catalog.product.list',
+        {
+            select: [
+                'id',
+                'name',
+                'xmlId',
+                'quantity',
+                'quantityReserved',
+                'canBuyZero'
+            ],
+            filter: {
+                xmlId
+            },
+            order: {
+                id: 'asc'
+            },
+            start: 0
+        }
+    );
+
+    const products =
+        result?.products ||
+        (Array.isArray(result) ? result : []);
+
+    return products[0] || null;
+}
+
+async function syncBitrixStockItem(item) {
+    const externalId =
+        clean(item?.externalId, 180);
+
+    if (!externalId) {
+        return {
+            ok: false,
+            externalId: '',
+            error: 'externalId is required'
+        };
+    }
+
+    const product =
+        await findBitrixStockProduct(
+            externalId
+        );
+
+    if (!product?.id) {
+        return {
+            ok: false,
+            externalId,
+            error:
+                'Bitrix product not found by XML_ID RTN:' +
+                externalId
+        };
+    }
+
+    const quantity =
+        stockNumber(
+            item?.quantity ??
+            item?.stock,
+            0
+        );
+
+    const reserved =
+        stockNumber(
+            item?.reserved,
+            0
+        );
+
+    const available =
+        stockNumber(
+            item?.available,
+            Math.max(
+                0,
+                quantity - reserved
+            )
+        );
+
+    try {
+        await bitrixCall(
+            'catalog.product.update',
+            {
+                id:
+                    Number(product.id),
+
+                fields: {
+                    quantity:
+                        available,
+
+                    quantityReserved:
+                        Math.max(
+                            0,
+                            Math.min(
+                                reserved,
+                                quantity
+                            )
+                        ),
+
+                    quantityTrace:
+                        'Y',
+
+                    canBuyZero:
+                        'N'
+                }
+            }
+        );
+
+        return {
+            ok: true,
+            externalId,
+            productId:
+                Number(product.id),
+            quantity,
+            reserved,
+            available
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            externalId,
+            productId:
+                Number(product.id),
+            quantity,
+            reserved,
+            available,
+            error:
+                error.response?.data?.error_description ||
+                error.response?.data?.description ||
+                error.response?.data?.error ||
+                error.message ||
+                'Bitrix stock update failed'
+        };
+    }
+}
+
+async function syncWarehouseStocks(
+    sourceItems,
+    {
+        syncBitrix = true
+    } = {}
+) {
+    await ensureTables();
+
+    const items =
+        Array.isArray(sourceItems)
+            ? sourceItems.slice(0, 5000)
+            : [];
+
+    const db = getPool();
+    const results = [];
+
+    let updated = 0;
+    let bitrixUpdated = 0;
+    let bitrixFailed = 0;
+
+    for (const item of items) {
+        const externalId =
+            clean(
+                item?.externalId,
+                180
+            );
+
+        if (!externalId) {
+            continue;
+        }
+
+        const quantity =
+            stockNumber(
+                item?.quantity ??
+                item?.stock,
+                0
+            );
+
+        const reserved =
+            stockNumber(
+                item?.reserved,
+                0
+            );
+
+        const available =
+            stockNumber(
+                item?.available,
+                Math.max(
+                    0,
+                    quantity - reserved
+                )
+            );
+
+        await db.execute(
+            `INSERT INTO rtn_warehouse_stock
+                (external_id, product_name, gtin, quantity, reserved, available)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                product_name = VALUES(product_name),
+                gtin = VALUES(gtin),
+                quantity = VALUES(quantity),
+                reserved = VALUES(reserved),
+                available = VALUES(available),
+                updated_at = CURRENT_TIMESTAMP`,
+            [
+                externalId,
+                clean(
+                    item?.productName ||
+                    item?.name,
+                    300
+                ) || null,
+                clean(
+                    item?.gtin,
+                    14
+                ) || null,
+                quantity,
+                reserved,
+                available
+            ]
+        );
+
+        updated += 1;
+
+        let bitrix = null;
+
+        if (syncBitrix) {
+            bitrix =
+                await syncBitrixStockItem({
+                    ...item,
+                    externalId,
+                    quantity,
+                    reserved,
+                    available
+                });
+
+            if (bitrix.ok) {
+                bitrixUpdated += 1;
+            } else {
+                bitrixFailed += 1;
+
+                console.warn(
+                    'RTN stock -> Bitrix warning:',
+                    externalId,
+                    bitrix.error
+                );
+            }
+        }
+
+        results.push({
+            externalId,
+            quantity,
+            reserved,
+            available,
+            bitrix
+        });
+    }
+
+    console.log(
+        `RTN stock sync: stored=${updated}, bitrixUpdated=${bitrixUpdated}, bitrixFailed=${bitrixFailed}`
+    );
+
+    return {
+        ok: true,
+        updated,
+        bitrixUpdated,
+        bitrixFailed,
+        results
+    };
+}
+
 function createWarehouseRouter() {
     const router = express.Router();
 
@@ -1412,43 +1685,34 @@ function createWarehouseRouter() {
     });
 
     router.post('/1c/stocks', oneCAuth, async (req, res) => {
-        await ensureTables();
-        const items = Array.isArray(req.body?.items) ? req.body.items : [];
-        const db = getPool();
-        let updated = 0;
+        try {
+            const result =
+                await syncWarehouseStocks(
+                    req.body?.items,
+                    {
+                        syncBitrix:
+                            req.body?.syncBitrix !== false
+                    }
+                );
 
-        for (const item of items.slice(0, 5000)) {
-            const externalId = clean(item?.externalId, 180);
-            if (!externalId) continue;
-
-            const quantity = Number(item?.quantity ?? item?.stock ?? 0) || 0;
-            const reserved = Number(item?.reserved ?? 0) || 0;
-            const available = Number(item?.available ?? Math.max(0, quantity - reserved)) || 0;
-
-            await db.execute(
-                `INSERT INTO rtn_warehouse_stock
-                    (external_id, product_name, gtin, quantity, reserved, available)
-                 VALUES (?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE
-                    product_name = VALUES(product_name),
-                    gtin = VALUES(gtin),
-                    quantity = VALUES(quantity),
-                    reserved = VALUES(reserved),
-                    available = VALUES(available),
-                    updated_at = CURRENT_TIMESTAMP`,
-                [
-                    externalId,
-                    clean(item?.productName || item?.name, 300) || null,
-                    clean(item?.gtin, 14) || null,
-                    quantity,
-                    reserved,
-                    available
-                ]
+            return res.json(result);
+        } catch (error) {
+            console.error(
+                'RTN 1C stock sync error:',
+                error.response?.data ||
+                error.message
             );
-            updated += 1;
-        }
 
-        return res.json({ ok: true, updated });
+            return res.status(500).json({
+                ok: false,
+                error:
+                    error.response?.data?.error_description ||
+                    error.response?.data?.description ||
+                    error.response?.data?.error ||
+                    error.message ||
+                    'Stock sync failed'
+            });
+        }
     });
 
     return router;
@@ -1456,5 +1720,6 @@ function createWarehouseRouter() {
 
 module.exports = {
     createWarehouseRouter,
-    ensureWarehouseTables: ensureTables
+    ensureWarehouseTables: ensureTables,
+    syncWarehouseStocks
 };
