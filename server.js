@@ -3435,6 +3435,7 @@ const BITRIX_ORDER_FIELDS = {
     clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
     paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
     onecExportedAt: 'UF_CRM_RTN_1C_EXPORTED_AT',
+    onecReceiptSyncedAt: 'UF_CRM_RTN_1C_RECEIPT_SYNCED_AT',
     onecStatus: 'UF_CRM_RTN_1C_STATUS'
 };
 
@@ -4588,6 +4589,23 @@ async function syncOrderFieldsToBitrix() {
 
                 sort:
                     3280
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.onecReceiptSyncedAt,
+
+                label:
+                    'Чек ЮKassa выгружен в 1С',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3285
             });
 
             await ensureBitrixSimpleField({
@@ -17348,7 +17366,8 @@ async function listBitrixPaidRtnDeals() {
                     BITRIX_ORDER_FIELDS.deliveryAddress,
                     BITRIX_ORDER_FIELDS.deliveryCost,
                     BITRIX_ORDER_FIELDS.paymentStatus,
-                    BITRIX_ORDER_FIELDS.onecExportedAt
+                    BITRIX_ORDER_FIELDS.onecExportedAt,
+                    BITRIX_ORDER_FIELDS.onecReceiptSyncedAt
                 ],
                 start: 0
             }
@@ -17861,20 +17880,29 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 ] || ''
             ).trim();
 
+        const bitrixReceiptSyncedAt =
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.onecReceiptSyncedAt
+                ] || ''
+            ).trim();
+
+        const alreadyExported =
+            Boolean(
+                bitrixExportedAt ||
+                existing?.onecDocumentId ||
+                existing?.onecExportedAt
+            );
+
         if (
-            bitrixExportedAt ||
-            existing?.onecDocumentId ||
-            existing?.onecExportedAt
+            bitrixReceiptSyncedAt ||
+            existing?.onecReceiptSyncedAt
         ) {
             skipped.push({
                 orderId,
                 dealId,
                 reason:
-                    bitrixExportedAt
-                        ? 'already_exported_1c_bitrix'
-                        : existing?.onecDocumentId
-                            ? 'already_linked_1c'
-                            : 'already_exported_1c'
+                    'receipt_already_synced_1c'
             });
             continue;
         }
@@ -17892,6 +17920,16 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 );
 
             if (!yooKassaPayment) {
+                if (alreadyExported) {
+                    skipped.push({
+                        orderId,
+                        dealId,
+                        reason:
+                            'legacy_order_without_yookassa_payment'
+                    });
+                    continue;
+                }
+
                 throw new Error(
                     `Не найден успешный платеж ЮKassa для заказа ${orderId}`
                 );
@@ -17909,6 +17947,18 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 );
 
             if (!yooKassaReceipt) {
+                if (alreadyExported) {
+                    skipped.push({
+                        orderId,
+                        dealId,
+                        paymentId:
+                            yooKassaPaymentId,
+                        reason:
+                            'legacy_order_without_yookassa_receipt'
+                    });
+                    continue;
+                }
+
                 throw new Error(
                     `Не найден успешный фискальный чек ЮKassa для платежа ${yooKassaPaymentId}`
                 );
@@ -17988,6 +18038,8 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             };
 
             order.bitrixDealId = dealId;
+            order.receiptBackfill =
+                alreadyExported;
             orders.push(order);
         } catch (error) {
             errors.push({
@@ -18601,6 +18653,8 @@ app.all(
                                 dealId,
                             fields: {
                                 [BITRIX_ORDER_FIELDS.onecExportedAt]:
+                                    exportedAt,
+                                [BITRIX_ORDER_FIELDS.onecReceiptSyncedAt]:
                                     exportedAt
                             }
                         }
@@ -18620,6 +18674,8 @@ app.all(
                     upsertLocalOrder({
                         orderId,
                         onecExportedAt:
+                            exportedAt,
+                        onecReceiptSyncedAt:
                             exportedAt
                     });
                 }
