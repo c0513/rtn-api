@@ -16984,6 +16984,43 @@ function buildOneCOrderFromPaymentReceipt(payment, receipt) {
                 payment?.id ||
                 ''
             ).trim(),
+        yooKassaReceipt: {
+            id:
+                String(
+                    receipt?.id ||
+                    ''
+                ).trim(),
+            status:
+                String(
+                    receipt?.status ||
+                    ''
+                ).trim(),
+            type:
+                String(
+                    receipt?.type ||
+                    ''
+                ).trim(),
+            registeredAt:
+                String(
+                    receipt?.registered_at ||
+                    ''
+                ).trim(),
+            fiscalDocumentNumber:
+                String(
+                    receipt?.fiscal_document_number ||
+                    ''
+                ).trim(),
+            fiscalStorageNumber:
+                String(
+                    receipt?.fiscal_storage_number ||
+                    ''
+                ).trim(),
+            fiscalAttribute:
+                String(
+                    receipt?.fiscal_attribute ||
+                    ''
+                ).trim()
+        },
         lines
     };
 }
@@ -17048,6 +17085,13 @@ function oneCOrderXml(order) {
     const requisites = [
         ['Дата оплаты', order.paidDate],
         ['Номер платежного документа', order.paymentId],
+        ['Чек ЮKassa', order.yooKassaReceipt?.id],
+        ['Статус чека ЮKassa', order.yooKassaReceipt?.status],
+        ['Тип чека ЮKassa', order.yooKassaReceipt?.type],
+        ['Дата регистрации чека', order.yooKassaReceipt?.registeredAt],
+        ['Номер фискального документа', order.yooKassaReceipt?.fiscalDocumentNumber],
+        ['Номер фискального накопителя', order.yooKassaReceipt?.fiscalStorageNumber],
+        ['Фискальный признак документа', order.yooKassaReceipt?.fiscalAttribute],
         ['Метод оплаты', 'ЮKassa'],
         ['Метод оплаты ИД', 'yookassa'],
         ['Оплачено', 'true'],
@@ -17144,6 +17188,7 @@ function oneCOrderXml(order) {
         )}</Комментарий>`,
         `<Товары>${itemsXml}</Товары>`,
         `<ЗначенияРеквизитов>${requisites}</ЗначенияРеквизитов>`,
+        paymentDocumentXml,
         '</Документ>'
     ].join('');
 }
