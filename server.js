@@ -3435,6 +3435,7 @@ const BITRIX_ORDER_FIELDS = {
     clientComment: 'UF_CRM_RTN_CLIENT_COMMENT',
     paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
     onecExportedAt: 'UF_CRM_RTN_1C_EXPORTED_AT',
+    onecPaymentSyncedAt: 'UF_CRM_RTN_1C_PAYMENT_SYNCED_AT',
     onecReceiptSyncedAt: 'UF_CRM_RTN_1C_RECEIPT_SYNCED_AT',
     onecStatus: 'UF_CRM_RTN_1C_STATUS'
 };
@@ -4591,6 +4592,22 @@ async function syncOrderFieldsToBitrix() {
                     3280
             });
 
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.onecPaymentSyncedAt,
+
+                label:
+                    'Эквайринговая операция ЮKassa выгружена в 1С',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3283
+            });
             await ensureBitrixSimpleField({
                 entity:
                     'deal',
@@ -17211,6 +17228,118 @@ function oneCOrderXml(order) {
     ].join('');
 }
 
+function oneCPaymentXml(order) {
+    const customerContacts =
+        [
+            oneCContactXml(
+                'Телефон мобильный',
+                order.customer?.phone
+            ),
+            oneCContactXml(
+                'Почта',
+                order.customer?.email
+            )
+        ].join('');
+
+    const receiptRequisites = [
+        ['Чек ЮKassa', order.yooKassaReceipt?.id],
+        ['Статус чека ЮKassa', order.yooKassaReceipt?.status],
+        ['Тип чека ЮKassa', order.yooKassaReceipt?.type],
+        ['Дата регистрации чека', order.yooKassaReceipt?.registeredAt],
+        ['Номер фискального документа', order.yooKassaReceipt?.fiscalDocumentNumber],
+        ['Номер фискального накопителя', order.yooKassaReceipt?.fiscalStorageNumber],
+        ['Фискальный признак документа', order.yooKassaReceipt?.fiscalAttribute],
+        ['Метод оплаты', 'ЮKassa'],
+        ['Метод оплаты ИД', 'yookassa'],
+        ['Оплачен', 'true'],
+        ['Проведен', 'true']
+    ]
+        .filter(([, value]) =>
+            String(
+                value == null
+                    ? ''
+                    : value
+            ).trim()
+        )
+        .map(([name, value]) => [
+            '<ЗначениеРеквизита>',
+            '<Наименование>' + oneCXmlEscape(name) + '</Наименование>',
+            '<Значение>' + oneCXmlEscape(value) + '</Значение>',
+            '</ЗначениеРеквизита>'
+        ].join(''))
+        .join('');
+
+    return [
+        '<Документ>',
+        '<Ид>' + oneCXmlEscape(order.paymentId) + '</Ид>',
+        '<Номер>' + oneCXmlEscape(order.paymentId) + '</Номер>',
+        '<Дата>' + oneCXmlEscape(order.paidDate) + '</Дата>',
+        '<Время>' + oneCXmlEscape(order.paidTime || '00:00:00') + '</Время>',
+        '<ХозОперация>Выплата наличных денег</ХозОперация>',
+        '<Контрагенты>',
+        '<Контрагент>',
+        '<Ид>' + oneCXmlEscape(order.customerId) + '</Ид>',
+        '<Наименование>' + oneCXmlEscape(order.customer?.name || 'Покупатель RTN.PRO') + '</Наименование>',
+        '<Роль>Покупатель</Роль>',
+        '<ПолноеНаименование>' + oneCXmlEscape(order.customer?.name || 'Покупатель RTN.PRO') + '</ПолноеНаименование>',
+        customerContacts
+            ? '<Контакты>' + customerContacts + '</Контакты>'
+            : '',
+        '</Контрагент>',
+        '</Контрагенты>',
+        '<Валюта>RUB</Валюта>',
+        '<Курс>1</Курс>',
+        '<Сумма>' + oneCMoney(order.amount) + '</Сумма>',
+        '<Основание>' + oneCXmlEscape(order.orderId) + '</Основание>',
+        '<Роль>Продавец</Роль>',
+        '<Комментарий>' + oneCXmlEscape(
+            [
+                'Оплата ЮKassa RTN.PRO',
+                'payment_id=' + order.paymentId,
+                order.yooKassaReceipt?.id
+                    ? 'receipt_id=' + order.yooKassaReceipt.id
+                    : ''
+            ].filter(Boolean).join('; ')
+        ) + '</Комментарий>',
+        '<ЗначенияРеквизитов>' + receiptRequisites + '</ЗначенияРеквизитов>',
+        '</Документ>'
+    ].join('');
+}
+
+function oneCPaymentsCommerceMl(
+    orders,
+    cmlVersion = '2.07'
+) {
+    const now =
+        new Date()
+            .toISOString()
+            .replace(/\.\d{3}Z$/, '');
+
+    const requestedVersion =
+        String(cmlVersion || '').trim();
+
+    const version =
+        ['2.07', '2.08', '2.10'].includes(
+            requestedVersion
+        )
+            ? requestedVersion
+            : '2.07';
+
+    const namespace =
+        ['2.08', '2.10'].includes(version)
+            ? 'urn:1C.ru:commerceml_210'
+            : 'urn:1C.ru:commerceml_2';
+
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<КоммерческаяИнформация xmlns="' + namespace + '" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ВерсияСхемы="' + version + '" ДатаФормирования="' + now + '">',
+        orders
+            .map(oneCPaymentXml)
+            .join(''),
+        '</КоммерческаяИнформация>'
+    ].join('');
+}
+
 function oneCOrdersCommerceMl(
     orders,
     cmlVersion = '2.07'
@@ -17367,6 +17496,7 @@ async function listBitrixPaidRtnDeals() {
                     BITRIX_ORDER_FIELDS.deliveryCost,
                     BITRIX_ORDER_FIELDS.paymentStatus,
                     BITRIX_ORDER_FIELDS.onecExportedAt,
+                    BITRIX_ORDER_FIELDS.onecPaymentSyncedAt,
                     BITRIX_ORDER_FIELDS.onecReceiptSyncedAt
                 ],
                 start: 0
@@ -17880,6 +18010,13 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 ] || ''
             ).trim();
 
+        const bitrixPaymentSyncedAt =
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.onecPaymentSyncedAt
+                ] || ''
+            ).trim();
+
         const bitrixReceiptSyncedAt =
             String(
                 deal?.[
@@ -17895,14 +18032,14 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             );
 
         if (
-            bitrixReceiptSyncedAt ||
-            existing?.onecReceiptSyncedAt
+            bitrixPaymentSyncedAt ||
+            existing?.onecPaymentSyncedAt
         ) {
             skipped.push({
                 orderId,
                 dealId,
                 reason:
-                    'receipt_already_synced_1c'
+                    'payment_already_synced_1c'
             });
             continue;
         }
@@ -18084,7 +18221,7 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     )
             })),
         xml:
-            oneCOrdersCommerceMl(
+            oneCPaymentsCommerceMl(
                 orders,
                 cmlVersion
             )
@@ -18654,7 +18791,7 @@ app.all(
                             fields: {
                                 [BITRIX_ORDER_FIELDS.onecExportedAt]:
                                     exportedAt,
-                                [BITRIX_ORDER_FIELDS.onecReceiptSyncedAt]:
+                                [BITRIX_ORDER_FIELDS.onecPaymentSyncedAt]:
                                     exportedAt
                             }
                         }
@@ -18675,7 +18812,7 @@ app.all(
                         orderId,
                         onecExportedAt:
                             exportedAt,
-                        onecReceiptSyncedAt:
+                        onecPaymentSyncedAt:
                             exportedAt
                     });
                 }
