@@ -17762,8 +17762,60 @@ async function buildOneCOrderFromBitrixDeal(
 async function buildOneCBitrixPaidOrdersCommerceMl(
     cmlVersion = '2.07'
 ) {
-    const deals =
-        await listBitrixPaidRtnDeals();
+    const [
+        deals,
+        paymentResult,
+        receiptResult
+    ] = await Promise.all([
+        listBitrixPaidRtnDeals(),
+        fetchAllYooKassaPayments(),
+        fetchAllYooKassaReceipts()
+    ]);
+
+    const yooKassaPaymentsByOrderId =
+        new Map();
+
+    for (const payment of paymentResult.payments) {
+        const orderId =
+            String(
+                payment?.metadata?.orderId ||
+                ''
+            ).trim();
+
+        const refunded =
+            Number(
+                payment?.refunded_amount?.value ||
+                0
+            );
+
+        if (
+            orderId &&
+            payment?.status === 'succeeded' &&
+            payment?.paid === true &&
+            refunded <= 0
+        ) {
+            yooKassaPaymentsByOrderId.set(
+                orderId,
+                payment
+            );
+        }
+    }
+
+    const yooKassaReceiptsByPaymentId =
+        new Map();
+
+    for (const receipt of receiptResult.receipts) {
+        if (
+            receipt?.type === 'payment' &&
+            receipt?.status === 'succeeded' &&
+            receipt?.payment_id
+        ) {
+            yooKassaReceiptsByPaymentId.set(
+                String(receipt.payment_id),
+                receipt
+            );
+        }
+    }
 
     const localOrders =
         readOrders();
@@ -17833,6 +17885,107 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     deal,
                     productExternalIdCache
                 );
+
+            const yooKassaPayment =
+                yooKassaPaymentsByOrderId.get(
+                    orderId
+                );
+
+            if (!yooKassaPayment) {
+                throw new Error(
+                    `Не найден успешный платеж ЮKassa для заказа ${orderId}`
+                );
+            }
+
+            const yooKassaPaymentId =
+                String(
+                    yooKassaPayment?.id ||
+                    ''
+                ).trim();
+
+            const yooKassaReceipt =
+                yooKassaReceiptsByPaymentId.get(
+                    yooKassaPaymentId
+                );
+
+            if (!yooKassaReceipt) {
+                throw new Error(
+                    `Не найден успешный фискальный чек ЮKassa для платежа ${yooKassaPaymentId}`
+                );
+            }
+
+            const yooKassaAmount =
+                Math.max(
+                    0,
+                    Number(
+                        yooKassaPayment?.amount?.value ||
+                        0
+                    )
+                );
+
+            if (
+                Math.abs(
+                    Number(order.amount || 0) -
+                    yooKassaAmount
+                ) > 0.01
+            ) {
+                throw new Error(
+                    `Сумма сделки Bitrix не совпадает с ЮKassa: ${order.amount} != ${yooKassaAmount}`
+                );
+            }
+
+            const paid =
+                oneCDateTimeParts(
+                    yooKassaPayment?.captured_at ||
+                    yooKassaPayment?.created_at
+                );
+
+            order.paymentId =
+                yooKassaPaymentId;
+
+            order.paidDate =
+                paid.date;
+
+            order.paidTime =
+                paid.time;
+
+            order.yooKassaReceipt = {
+                id:
+                    String(
+                        yooKassaReceipt?.id ||
+                        ''
+                    ).trim(),
+                status:
+                    String(
+                        yooKassaReceipt?.status ||
+                        ''
+                    ).trim(),
+                type:
+                    String(
+                        yooKassaReceipt?.type ||
+                        ''
+                    ).trim(),
+                registeredAt:
+                    String(
+                        yooKassaReceipt?.registered_at ||
+                        ''
+                    ).trim(),
+                fiscalDocumentNumber:
+                    String(
+                        yooKassaReceipt?.fiscal_document_number ||
+                        ''
+                    ).trim(),
+                fiscalStorageNumber:
+                    String(
+                        yooKassaReceipt?.fiscal_storage_number ||
+                        ''
+                    ).trim(),
+                fiscalAttribute:
+                    String(
+                        yooKassaReceipt?.fiscal_attribute ||
+                        ''
+                    ).trim()
+            };
 
             order.bitrixDealId = dealId;
             orders.push(order);
