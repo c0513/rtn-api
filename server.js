@@ -17060,6 +17060,36 @@ function buildOneCOrderFromPaymentReceipt(payment, receipt) {
     };
 }
 
+function oneCExchangeDateTime(date, time) {
+    const rawDate =
+        String(date || '').trim();
+
+    const rawTime =
+        String(time || '00:00:00').trim() ||
+        '00:00:00';
+
+    const match =
+        rawDate.match(
+            /^(\d{4})-(\d{2})-(\d{2})$/
+        );
+
+    if (!match) {
+        return [rawDate, rawTime]
+            .filter(Boolean)
+            .join(' ');
+    }
+
+    return (
+        match[3] +
+        '.' +
+        match[2] +
+        '.' +
+        match[1] +
+        ' ' +
+        rawTime
+    );
+}
+
 function oneCOrderXml(order) {
     const customerContacts =
         [
@@ -17118,7 +17148,7 @@ function oneCOrderXml(order) {
             .join('');
 
     const requisites = [
-        ['Дата оплаты', order.paidDate],
+        ['Дата оплаты', oneCExchangeDateTime(order.paidDate, order.paidTime)],
         ['Номер платежного документа', order.paymentId],
         ['Чек ЮKassa', order.yooKassaReceipt?.id],
         ['Статус чека ЮKassa', order.yooKassaReceipt?.status],
@@ -17141,7 +17171,7 @@ function oneCOrderXml(order) {
         ['Адрес отгрузки', order.fulfillment?.address],
         ['Промокод', order.promoCode],
         ['RTN orderId', order.orderId],
-        ['Дата заказа на сайте', order.date],
+        ['Дата заказа на сайте', oneCExchangeDateTime(order.date, order.time)],
         ['Номер заказа на сайте', order.publicNumber]
     ]
         .filter(([, value]) =>
@@ -17158,34 +17188,6 @@ function oneCOrderXml(order) {
             '</ЗначениеРеквизита>'
         ].join(''))
         .join('');
-
-    const paymentDocumentXml = [
-        '<ПодчиненныеДокументы>',
-        '<ПодчиненныйДокумент>',
-        `<Ид>${oneCXmlEscape(order.paymentId)}</Ид>`,
-        `<Номер>${oneCXmlEscape(order.paymentId)}</Номер>`,
-        `<Дата>${oneCXmlEscape(order.paidDate)}</Дата>`,
-        '<ХозОперация>Эквайринговая операция</ХозОперация>',
-        '<Валюта>RUB</Валюта>',
-        '<Курс>1</Курс>',
-        `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
-        '<ЗначенияРеквизитов>',
-        '<ЗначениеРеквизита>',
-        '<Наименование>Оплачено</Наименование>',
-        '<Значение>true</Значение>',
-        '</ЗначениеРеквизита>',
-        '<ЗначениеРеквизита>',
-        '<Наименование>Метод оплаты ИД</Наименование>',
-        '<Значение>yookassa</Значение>',
-        '</ЗначениеРеквизита>',
-        '<ЗначениеРеквизита>',
-        '<Наименование>Метод оплаты</Наименование>',
-        '<Значение>ЮKassa</Значение>',
-        '</ЗначениеРеквизита>',
-        '</ЗначенияРеквизитов>',
-        '</ПодчиненныйДокумент>',
-        '</ПодчиненныеДокументы>'
-    ].join('');
 
     return [
         '<Документ>',
@@ -17223,7 +17225,6 @@ function oneCOrderXml(order) {
         )}</Комментарий>`,
         `<Товары>${itemsXml}</Товары>`,
         `<ЗначенияРеквизитов>${requisites}</ЗначенияРеквизитов>`,
-        paymentDocumentXml,
         '</Документ>'
     ].join('');
 }
@@ -17975,6 +17976,11 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
     const orders = [];
     const skipped = [];
     const errors = [];
+    const testPublicNumber =
+        String(
+            process.env.ONEC_PAYMENT_TEST_PUBLIC_NUMBER ||
+            ''
+        ).trim();
 
     for (const deal of deals) {
         const dealId =
@@ -18050,6 +18056,22 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     deal,
                     productExternalIdCache
                 );
+
+            if (
+                testPublicNumber &&
+                String(order.publicNumber || '').trim() !==
+                    testPublicNumber
+            ) {
+                skipped.push({
+                    orderId,
+                    dealId,
+                    publicNumber:
+                        order.publicNumber,
+                    reason:
+                        'payment_test_filter'
+                });
+                continue;
+            }
 
             const yooKassaPayment =
                 yooKassaPaymentsByOrderId.get(
@@ -18177,6 +18199,27 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             order.bitrixDealId = dealId;
             order.receiptBackfill =
                 alreadyExported;
+
+            console.log(
+                '1C online payment candidate:',
+                JSON.stringify({
+                    orderId,
+                    dealId,
+                    publicNumber:
+                        order.publicNumber,
+                    siteDateTime:
+                        oneCExchangeDateTime(
+                            order.date,
+                            order.time
+                        ),
+                    paymentId:
+                        order.paymentId,
+                    receiptId:
+                        order.yooKassaReceipt?.id ||
+                        null
+                })
+            );
+
             orders.push(order);
         } catch (error) {
             errors.push({
@@ -18221,7 +18264,7 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     )
             })),
         xml:
-            oneCPaymentsCommerceMl(
+            oneCOrdersCommerceMl(
                 orders,
                 cmlVersion
             )
