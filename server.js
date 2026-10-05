@@ -17311,7 +17311,7 @@ function oneCPaymentXml(order) {
         '<Дата>' + paymentDate + '</Дата>',
         '<Дата1С>' + paymentDate + '</Дата1С>',
         '<Время>' + oneCXmlEscape(order.paidTime || '00:00:00') + '</Время>',
-        '<ХозОперация>Эквайринг</ХозОперация>',
+        '<ХозОперация>Выплата безналичных денег</ХозОперация>',
         '<Контрагенты>',
         '<Контрагент>',
         '<Ид>' + oneCXmlEscape(order.customerId) + '</Ид>',
@@ -17338,6 +17338,22 @@ function oneCPaymentXml(order) {
             ].filter(Boolean).join('; ')
         ) + '</Комментарий>',
         '<ЗначенияРеквизитов>' + paymentRequisites + '</ЗначенияРеквизитов>',
+        order.yooKassaReceipt?.id
+            ? [
+                '<ИнформацияОЧеках>',
+                '<ИнформацияОЧеке>',
+                '<Ид>' + oneCXmlEscape(order.yooKassaReceipt.id) + '</Ид>',
+                '<ЗначенияСвойств>',
+                '<ЗначениеСвойства><Наименование>Статус</Наименование><Значение>' + oneCXmlEscape(order.yooKassaReceipt.status || '') + '</Значение></ЗначениеСвойства>',
+                '<ЗначениеСвойства><Наименование>Дата регистрации</Наименование><Значение>' + oneCXmlEscape(order.yooKassaReceipt.registeredAt || '') + '</Значение></ЗначениеСвойства>',
+                '<ЗначениеСвойства><Наименование>ФН</Наименование><Значение>' + oneCXmlEscape(order.yooKassaReceipt.fiscalStorageNumber || '') + '</Значение></ЗначениеСвойства>',
+                '<ЗначениеСвойства><Наименование>ФД</Наименование><Значение>' + oneCXmlEscape(order.yooKassaReceipt.fiscalDocumentNumber || '') + '</Значение></ЗначениеСвойства>',
+                '<ЗначениеСвойства><Наименование>ФПД</Наименование><Значение>' + oneCXmlEscape(order.yooKassaReceipt.fiscalAttribute || '') + '</Значение></ЗначениеСвойства>',
+                '</ЗначенияСвойств>',
+                '</ИнформацияОЧеке>',
+                '</ИнформацияОЧеках>'
+            ].join('')
+            : '',
         '</Документ>'
     ].join('');
 }
