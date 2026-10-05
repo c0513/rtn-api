@@ -3436,6 +3436,7 @@ const BITRIX_ORDER_FIELDS = {
     paymentStatus: 'UF_CRM_RTN_PAYMENT_STATUS',
     onecExportedAt: 'UF_CRM_RTN_1C_EXPORTED_AT',
     onecPaymentSyncedAt: 'UF_CRM_RTN_1C_PAYMENT_SYNCED_AT',
+    onecPaymentDocumentSyncedAt: 'UF_CRM_RTN_1C_PAYMENT_DOC_SYNCED_AT',
     onecReceiptSyncedAt: 'UF_CRM_RTN_1C_RECEIPT_SYNCED_AT',
     onecStatus: 'UF_CRM_RTN_1C_STATUS'
 };
@@ -4623,6 +4624,23 @@ async function syncOrderFieldsToBitrix() {
 
                 sort:
                     3285
+            });
+
+            await ensureBitrixSimpleField({
+                entity:
+                    'deal',
+
+                fieldName:
+                    BITRIX_ORDER_FIELDS.onecPaymentDocumentSyncedAt,
+
+                label:
+                    'Эквайринговая операция выгружена в 1С',
+
+                userTypeId:
+                    'string',
+
+                sort:
+                    3287
             });
 
             await ensureBitrixSimpleField({
@@ -17253,7 +17271,9 @@ function oneCPaymentXml(order) {
         ['Метод оплаты', 'ЮKassa'],
         ['Метод оплаты ИД', 'yookassa'],
         ['Оплачен', 'true'],
-        ['Проведен', 'true']
+        ['Заказ оплачен', 'true'],
+        ['Проведен', 'true'],
+        ['Отменен', 'false']
     ]
         .filter(([, value]) =>
             String(
@@ -17274,9 +17294,10 @@ function oneCPaymentXml(order) {
         '<Документ>',
         '<Ид>' + oneCXmlEscape(order.paymentId) + '</Ид>',
         '<Номер>' + oneCXmlEscape(order.paymentId) + '</Номер>',
+        '<ПометкаУдаления>false</ПометкаУдаления>',
         '<Дата>' + oneCXmlEscape(order.paidDate) + '</Дата>',
         '<Время>' + oneCXmlEscape(order.paidTime || '00:00:00') + '</Время>',
-        '<ХозОперация>Выплата наличных денег</ХозОперация>',
+        '<ХозОперация>Выплата безналичных денег</ХозОперация>',
         '<Контрагенты>',
         '<Контрагент>',
         '<Ид>' + oneCXmlEscape(order.customerId) + '</Ид>',
@@ -17498,6 +17519,7 @@ async function listBitrixPaidRtnDeals() {
                     BITRIX_ORDER_FIELDS.paymentStatus,
                     BITRIX_ORDER_FIELDS.onecExportedAt,
                     BITRIX_ORDER_FIELDS.onecPaymentSyncedAt,
+                    BITRIX_ORDER_FIELDS.onecPaymentDocumentSyncedAt,
                     BITRIX_ORDER_FIELDS.onecReceiptSyncedAt
                 ],
                 start: 0
@@ -18023,6 +18045,13 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 ] || ''
             ).trim();
 
+        const bitrixPaymentDocumentSyncedAt =
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.onecPaymentDocumentSyncedAt
+                ] || ''
+            ).trim();
+
         const bitrixReceiptSyncedAt =
             String(
                 deal?.[
@@ -18038,14 +18067,14 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             );
 
         if (
-            bitrixPaymentSyncedAt ||
-            existing?.onecPaymentSyncedAt
+            bitrixPaymentDocumentSyncedAt ||
+            existing?.onecPaymentDocumentSyncedAt
         ) {
             skipped.push({
                 orderId,
                 dealId,
                 reason:
-                    'payment_already_synced_1c'
+                    'payment_document_already_synced_1c'
             });
             continue;
         }
@@ -18264,7 +18293,7 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     )
             })),
         xml:
-            oneCOrdersCommerceMl(
+            oneCPaymentsCommerceMl(
                 orders,
                 cmlVersion
             )
@@ -18835,6 +18864,8 @@ app.all(
                                 [BITRIX_ORDER_FIELDS.onecExportedAt]:
                                     exportedAt,
                                 [BITRIX_ORDER_FIELDS.onecPaymentSyncedAt]:
+                                    exportedAt,
+                                [BITRIX_ORDER_FIELDS.onecPaymentDocumentSyncedAt]:
                                     exportedAt
                             }
                         }
@@ -18856,6 +18887,8 @@ app.all(
                         onecExportedAt:
                             exportedAt,
                         onecPaymentSyncedAt:
+                            exportedAt,
+                        onecPaymentDocumentSyncedAt:
                             exportedAt
                     });
                 }
