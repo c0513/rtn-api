@@ -17260,23 +17260,27 @@ function oneCPaymentXml(order) {
             )
         ].join('');
 
-    const receiptRequisites = [
-        ['Вид операции', 'Эквайринг'],
+    // УТ 11 импортирует онлайн-оплату через тот же CommerceML-диалект,
+    // который используется обменом с интернет-магазином. Важны не только
+    // ХозОперация/Основание, но и служебные поля документа и реквизиты
+    // платежной системы.
+    const paymentRequisites = [
+        ['Проведен', 'true'],
+        ['Отменен', 'false'],
+        ['Оплачен', 'true'],
+        ['Заказ оплачен', 'true'],
         ['Дата оплаты', oneCExchangeDateTime(order.paidDate, order.paidTime)],
         ['Номер платежного документа', order.paymentId],
+        ['Метод оплаты', 'ЮKassa'],
+        ['Метод оплаты ИД', 'yookassa'],
+        ['Сайт', 'RTN.PRO'],
         ['Чек ЮKassa', order.yooKassaReceipt?.id],
         ['Статус чека ЮKassa', order.yooKassaReceipt?.status],
         ['Тип чека ЮKassa', order.yooKassaReceipt?.type],
         ['Дата регистрации чека', order.yooKassaReceipt?.registeredAt],
         ['Номер фискального документа', order.yooKassaReceipt?.fiscalDocumentNumber],
         ['Номер фискального накопителя', order.yooKassaReceipt?.fiscalStorageNumber],
-        ['Фискальный признак документа', order.yooKassaReceipt?.fiscalAttribute],
-        ['Метод оплаты', 'ЮKassa'],
-        ['Метод оплаты ИД', 'yookassa'],
-        ['Оплачен', 'true'],
-        ['Заказ оплачен', 'true'],
-        ['Проведен', 'true'],
-        ['Отменен', 'false']
+        ['Фискальный признак документа', order.yooKassaReceipt?.fiscalAttribute]
     ]
         .filter(([, value]) =>
             String(
@@ -17293,20 +17297,26 @@ function oneCPaymentXml(order) {
         ].join(''))
         .join('');
 
+    const paymentDate =
+        oneCXmlEscape(order.paidDate);
+
     return [
         '<Документ>',
         '<Ид>' + oneCXmlEscape(order.paymentId) + '</Ид>',
-        '<Номер>' + oneCXmlEscape(order.paymentId) + '</Номер>',
+        '<НомерВерсии>1</НомерВерсии>',
         '<ПометкаУдаления>false</ПометкаУдаления>',
-        '<Дата>' + oneCXmlEscape(order.paidDate) + '</Дата>',
+        '<Номер>' + oneCXmlEscape(order.paymentId) + '</Номер>',
+        '<Номер1С></Номер1С>',
+        '<Дата>' + paymentDate + '</Дата>',
+        '<Дата1С>' + paymentDate + '</Дата1С>',
         '<Время>' + oneCXmlEscape(order.paidTime || '00:00:00') + '</Время>',
         '<ХозОперация>Выплата безналичных денег</ХозОперация>',
         '<Контрагенты>',
         '<Контрагент>',
         '<Ид>' + oneCXmlEscape(order.customerId) + '</Ид>',
         '<Наименование>' + oneCXmlEscape(order.customer?.name || 'Покупатель RTN.PRO') + '</Наименование>',
-        '<Роль>Покупатель</Роль>',
         '<ПолноеНаименование>' + oneCXmlEscape(order.customer?.name || 'Покупатель RTN.PRO') + '</ПолноеНаименование>',
+        '<Роль>Покупатель</Роль>',
         customerContacts
             ? '<Контакты>' + customerContacts + '</Контакты>'
             : '',
@@ -17326,7 +17336,7 @@ function oneCPaymentXml(order) {
                     : ''
             ].filter(Boolean).join('; ')
         ) + '</Комментарий>',
-        '<ЗначенияРеквизитов>' + receiptRequisites + '</ЗначенияРеквизитов>',
+        '<ЗначенияРеквизитов>' + paymentRequisites + '</ЗначенияРеквизитов>',
         '</Документ>'
     ].join('');
 }
