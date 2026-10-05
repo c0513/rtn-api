@@ -17261,6 +17261,9 @@ function oneCPaymentXml(order) {
         ].join('');
 
     const receiptRequisites = [
+        ['Вид операции', 'Эквайринг'],
+        ['Дата оплаты', oneCExchangeDateTime(order.paidDate, order.paidTime)],
+        ['Номер платежного документа', order.paymentId],
         ['Чек ЮKassa', order.yooKassaReceipt?.id],
         ['Статус чека ЮKassa', order.yooKassaReceipt?.status],
         ['Тип чека ЮKassa', order.yooKassaReceipt?.type],
