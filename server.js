@@ -18034,6 +18034,15 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             ''
         ).trim();
 
+    const testLimit =
+        Math.max(
+            0,
+            Number(
+                process.env.ONEC_PAYMENT_TEST_LIMIT ||
+                0
+            )
+        );
+
     for (const deal of deals) {
         const dealId =
             Number(
@@ -18127,7 +18136,8 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 bitrixPaymentDocumentSyncedAt ||
                 existing?.onecPaymentDocumentSyncedAt
             ) &&
-            !testPublicNumber
+            !testPublicNumber &&
+            !testLimit
         ) {
             skipped.push({
                 orderId,
@@ -18293,6 +18303,13 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             );
 
             orders.push(order);
+
+            if (
+                testLimit &&
+                orders.length >= testLimit
+            ) {
+                break;
+            }
         } catch (error) {
             errors.push({
                 orderId,
