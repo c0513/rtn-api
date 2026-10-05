@@ -18070,8 +18070,11 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             );
 
         if (
-            bitrixPaymentDocumentSyncedAt ||
-            existing?.onecPaymentDocumentSyncedAt
+            (
+                bitrixPaymentDocumentSyncedAt ||
+                existing?.onecPaymentDocumentSyncedAt
+            ) &&
+            !testPublicNumber
         ) {
             skipped.push({
                 orderId,
