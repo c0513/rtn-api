@@ -18309,10 +18309,18 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     )
             })),
         xml:
-            oneCPaymentsCommerceMl(
-                orders,
-                cmlVersion
-            )
+            String(
+                process.env.ONEC_PAYMENT_IMPORT_MODE ||
+                'payment'
+            ).trim().toLowerCase() === 'order'
+                ? oneCOrdersCommerceMl(
+                    orders,
+                    cmlVersion
+                )
+                : oneCPaymentsCommerceMl(
+                    orders,
+                    cmlVersion
+                )
     };
 }
 
