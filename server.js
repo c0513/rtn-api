@@ -18044,6 +18044,32 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     orderId
             );
 
+        const rawPublicNumber =
+            String(
+                deal?.[
+                    BITRIX_ORDER_FIELDS.orderNumber
+                ] ||
+                getPublicOrderNumber(
+                    orderId
+                )
+            ).trim();
+
+        if (
+            testPublicNumber &&
+            rawPublicNumber !==
+                testPublicNumber
+        ) {
+            skipped.push({
+                orderId,
+                dealId,
+                publicNumber:
+                    rawPublicNumber,
+                reason:
+                    'payment_test_filter'
+            });
+            continue;
+        }
+
         const bitrixExportedAt =
             String(
                 deal?.[
@@ -18101,22 +18127,6 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     deal,
                     productExternalIdCache
                 );
-
-            if (
-                testPublicNumber &&
-                String(order.publicNumber || '').trim() !==
-                    testPublicNumber
-            ) {
-                skipped.push({
-                    orderId,
-                    dealId,
-                    publicNumber:
-                        order.publicNumber,
-                    reason:
-                        'payment_test_filter'
-                });
-                continue;
-            }
 
             const yooKassaPayment =
                 yooKassaPaymentsByOrderId.get(
