@@ -10182,6 +10182,94 @@ function buildPlenoshnayaVisitReplyMarkup(card) {
     };
 }
 
+function getPlenoshnayaVisitTraffic(card = {}) {
+    const extractParam = (url, name) => {
+        const query = (String(url || '').split('?')[1] || '').split('#')[0];
+        const match = new RegExp('(?:^|&)' + name + '=([^&]*)', 'i').exec(query);
+
+        if (!match) {
+            return '';
+        }
+
+        try {
+            return decodeURIComponent(match[1].replace(/\+/g, ' ')).trim();
+        } catch (error) {
+            return match[1].trim();
+        }
+    };
+
+    const param = (name) =>
+        extractParam(card.firstPage || card.page, name) ||
+        extractParam(card.page, name);
+
+    const medium = String(card.utmMedium || param('utm_medium') || '')
+        .trim()
+        .toLowerCase();
+
+    const paidMedium =
+        /^(cpc|ppc|cpm|cpa|cpl|cpv|paid|paid[-_ ]?(search|social|ads?)|display|banner|retargeting|remarketing|target|performance|max|yandex[-_ ]?direct)$/i.test(medium);
+
+    const adClick =
+        Boolean(card.yclid) ||
+        ['yclid', 'gclid', 'gbraid', 'wbraid', 'msclkid'].some(
+            name => Boolean(param(name))
+        );
+
+    const referrer = String(card.firstReferrer || card.referrer || '');
+    const referrerHost = (
+        referrer.match(/^https?:\/\/([^\/?#:]+)/i)?.[1] || ''
+    ).toLowerCase().replace(/^www\./, '');
+
+    const searchReferrer =
+        /(^|\.)(yandex\.[a-z.]+|google\.[a-z.]+|bing\.com|duckduckgo\.com|yahoo\.com|rambler\.ru|search\.mail\.ru)$/.test(referrerHost);
+
+    const referrerKeyword = searchReferrer
+        ? ['text', 'query', 'q', 'p'].map(
+            name => extractParam(referrer, name)
+        ).find(Boolean) || ''
+        : '';
+
+    let type = 'не определён';
+
+    if (paidMedium || adClick) {
+        type = 'платный';
+    } else if (/^(organic|seo|natural|organic[-_ ]search)$/i.test(medium) || searchReferrer) {
+        type = 'органический';
+    } else if (/^(referral|referrer)$/i.test(medium) ||
+        (referrerHost && !/(^|\.)plenoshnaya\.ru$/.test(referrerHost))) {
+        type = 'переход с сайта';
+    } else if (!medium && !card.utmSource && !param('utm_source') && !referrerHost) {
+        type = 'прямой';
+    }
+
+    const keyword = [
+        card.utmTerm,
+        param('utm_term'),
+        card.adPhrase,
+        param('ad_phrase'),
+        card.searchPhrase,
+        param('search_phrase'),
+        referrerKeyword
+    ]
+        .map(value => String(value || '').trim())
+        .find(value =>
+            value &&
+            !/^\{[a-z_][a-z0-9_]*\}$/i.test(value) &&
+            !/^(not set|not provided|none|undefined|null)$/i.test(value)
+        ) || (
+            type === 'органический'
+                ? 'не передан поисковиком'
+                : type === 'платный'
+                    ? 'не указан в метках'
+                    : '—'
+        );
+
+    return {
+        type,
+        keyword: keyword.slice(0, 160)
+    };
+}
+
 function buildPlenoshnayaVisitCardText(card) {
     const shortId =
         shortPlenoshnayaVisitId(
@@ -10199,6 +10287,9 @@ function buildPlenoshnayaVisitCardText(card) {
         getPlenoshnayaManagerSource(
             card
         );
+
+    const traffic =
+        getPlenoshnayaVisitTraffic(card);
 
     const page =
         card.pageTitle ||
@@ -10222,6 +10313,8 @@ function buildPlenoshnayaVisitCardText(card) {
         page,
         '',
         `📣 ${source}`,
+        `🚦 Трафик: ${traffic.type}`,
+        `🔎 Ключ: ${traffic.keyword}`,
         `⏱ ${duration}${card.pageCount ? ` · ${card.pageCount} стр.` : ''}`,
         card.visitCount && Number(card.visitCount) > 1
             ? `🔁 Посещение №${card.visitCount}`
