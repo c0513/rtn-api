@@ -18139,6 +18139,17 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             )
         );
 
+    const oneCImportMode =
+        String(
+            process.env.ONEC_PAYMENT_IMPORT_MODE ||
+            'payment'
+        )
+            .trim()
+            .toLowerCase();
+
+    const exportOrderDocuments =
+        oneCImportMode === 'order';
+
     for (const deal of deals) {
         const dealId =
             Number(
@@ -18228,6 +18239,22 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
             );
 
         if (
+            exportOrderDocuments &&
+            alreadyExported &&
+            !testPublicNumber &&
+            !testLimit
+        ) {
+            skipped.push({
+                orderId,
+                dealId,
+                reason:
+                    'order_already_exported_1c'
+            });
+            continue;
+        }
+
+        if (
+            !exportOrderDocuments &&
             (
                 bitrixPaymentDocumentSyncedAt ||
                 existing?.onecPaymentDocumentSyncedAt
@@ -18449,10 +18476,7 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                     )
             })),
         xml:
-            String(
-                process.env.ONEC_PAYMENT_IMPORT_MODE ||
-                'payment'
-            ).trim().toLowerCase() === 'order'
+            exportOrderDocuments
                 ? oneCOrdersCommerceMl(
                     orders,
                     cmlVersion
