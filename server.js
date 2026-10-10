@@ -16770,6 +16770,29 @@ const ONEC_PRODUCT_MAP = {
     }
 };
 
+const ONEC_BITRIX_PRODUCT_NAME_ALIASES = new Map([
+    [
+        normalizeProductText('БЦАА — АРБУЗ'),
+        'bcaa-wildberries'
+    ],
+    [
+        normalizeProductText('БЦАА - АРБУЗ'),
+        'bcaa-wildberries'
+    ]
+]);
+
+function oneCExternalIdFromBitrixProductName(name) {
+    const normalized =
+        normalizeProductText(name);
+
+    return (
+        ONEC_BITRIX_PRODUCT_NAME_ALIASES.get(
+            normalized
+        ) ||
+        ''
+    );
+}
+
 function oneCXmlEscape(value) {
     return String(value == null ? '' : value)
         .replace(/&/g, '&amp;')
@@ -17901,19 +17924,20 @@ async function buildOneCOrderFromBitrixDeal(
                 0
             );
 
-        if (!productId) {
-            throw new Error(
-                `Bitrix deal ${dealId}: у позиции "${name}" нет PRODUCT_ID`
-            );
-        }
-
         let externalId =
-            productExternalIdCache.get(
-                productId
-            ) ||
-            '';
+            productId
+                ? (
+                    productExternalIdCache.get(
+                        productId
+                    ) ||
+                    ''
+                )
+                : '';
 
-        if (!externalId) {
+        if (
+            productId &&
+            !externalId
+        ) {
             const productResult =
                 await bitrixCall(
                     'catalog.product.get',
@@ -17947,6 +17971,33 @@ async function buildOneCOrderFromBitrixDeal(
                     externalId
                 );
             }
+        }
+
+        if (!externalId) {
+            externalId =
+                oneCExternalIdFromBitrixProductName(
+                    name
+                );
+
+            if (externalId) {
+                console.warn(
+                    '1C product alias used:',
+                    JSON.stringify({
+                        dealId,
+                        productId:
+                            productId ||
+                            null,
+                        name,
+                        externalId
+                    })
+                );
+            }
+        }
+
+        if (!externalId) {
+            throw new Error(
+                `Bitrix deal ${dealId}: у позиции "${name}" нет PRODUCT_ID/XML_ID и не найден алиас 1С`
+            );
         }
 
         const mapped =
