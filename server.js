@@ -19079,6 +19079,44 @@ app.all(
                     `1C sale query: paid candidates=${generated.candidates}, exporting=${generated.orders.length}, skipped=${generated.skipped.length}, invalid=${generated.skipped.filter(item => item?.reason === 'invalid_order').length}, CML ${effectiveCmlVersion}`
                 );
 
+                // Log sanitized CommerceML line diagnostics before handing the batch to 1C.
+                // No buyer details, contact data, payment IDs or fiscal data.
+                for (const order of generated.orders) {
+                    const lineDiagnostics = (Array.isArray(order.lines) ? order.lines : [])
+                        .map((line, index) => ({
+                            index: index + 1,
+                            productId: String(line.id || ''),
+                            catalogId: String(line.catalogId || ''),
+                            type: String(line.type || ''),
+                            quantity: Number(line.quantity),
+                            unitPrice: Number(line.unitPrice),
+                            total: Number(line.total),
+                            namePresent: Boolean(String(line.name || '').trim())
+                        }));
+                    const invalidLines = lineDiagnostics.filter(line =>
+                        !line.productId ||
+                        !line.namePresent ||
+                        !Number.isFinite(line.quantity) ||
+                        line.quantity <= 0 ||
+                        !Number.isFinite(line.unitPrice) ||
+                        line.unitPrice < 0 ||
+                        !Number.isFinite(line.total) ||
+                        line.total < 0
+                    );
+                    console.log('1C sale order lines diagnostic:', JSON.stringify({
+                        publicNumber: order.publicNumber,
+                        lines: lineDiagnostics,
+                        sumOfLines: lineDiagnostics.reduce((sum, line) => sum + (Number.isFinite(line.total) ? line.total : 0), 0),
+                        orderAmount: Number(order.amount),
+                        invalidLineCount: invalidLines.length
+                    }));
+                    if (invalidLines.length) {
+                        throw new Error('1C CommerceML validation failed for order ' +
+                            order.publicNumber + ': invalid lines ' +
+                            invalidLines.map(line => line.index).join(','));
+                    }
+                }
+
                 if (!generated.orders.length) {
                     res
                         .status(200)
