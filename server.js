@@ -18455,9 +18455,32 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                 )
                 .join('; ');
 
-        throw new Error(
-            `1С Bitrix bulk export заблокирован: ${errors.length} заказ(ов) не готовы. ${preview}`
+        console.warn(
+            `1C Bitrix bulk export: skipping ${errors.length} invalid order(s). ${preview}`
         );
+
+        for (const item of errors) {
+            skipped.push({
+                orderId:
+                    item.orderId ||
+                    '',
+                dealId:
+                    Number(
+                        item.dealId ||
+                        0
+                    ),
+                reason:
+                    'invalid_order',
+                error:
+                    item.error
+            });
+        }
+
+        if (!orders.length) {
+            throw new Error(
+                `1С Bitrix bulk export: нет готовых заказов. ${preview}`
+            );
+        }
     }
 
     return {
@@ -18962,7 +18985,7 @@ app.all(
                         : [];
 
                 console.log(
-                    `1C sale query: paid candidates=${generated.candidates}, exporting=${generated.orders.length}, skipped=${generated.skipped.length}, CML ${effectiveCmlVersion}`
+                    `1C sale query: paid candidates=${generated.candidates}, exporting=${generated.orders.length}, skipped=${generated.skipped.length}, invalid=${generated.skipped.filter(item => item?.reason === 'invalid_order').length}, CML ${effectiveCmlVersion}`
                 );
 
                 if (!generated.orders.length) {
