@@ -17896,20 +17896,39 @@ async function buildOneCOrderFromBitrixDeal(
                     )
                     .trim();
 
+            // Configure the actual 1C service GUID before testing delivery import.
+            // Applied only to the explicitly selected test order; no silent fallback
+            // to a random catalog item or modification of the paid amount.
+            const mappedDeliveryId = String(
+                process.env.ONEC_TEST_DELIVERY_ITEM_ID || ''
+            ).trim();
+            const mappedDeliveryCatalogId = String(
+                process.env.ONEC_TEST_DELIVERY_CATALOG_ID || ''
+            ).trim();
+            const currentTestNumber = String(
+                process.env.ONEC_PAYMENT_TEST_PUBLIC_NUMBER || ''
+            ).trim();
+            const useDeliveryMapping =
+                Boolean(mappedDeliveryId && currentTestNumber) &&
+                String(rawPublicNumber || '').trim() === currentTestNumber;
+
             lines.push({
-                id:
-                    'ORDER_DELIVERY',
-                catalogId:
-                    '',
-                name:
-                    name ||
-                    'Доставка заказа',
+                id: useDeliveryMapping ? mappedDeliveryId : 'ORDER_DELIVERY',
+                catalogId: useDeliveryMapping ? mappedDeliveryCatalogId : '',
+                name: name || 'Доставка заказа',
                 quantity,
                 unitPrice,
                 total,
-                type:
-                    'Услуга'
+                type: 'Услуга'
             });
+            if (useDeliveryMapping) {
+                console.log('1C test delivery mapping enabled:', JSON.stringify({
+                    publicNumber: currentTestNumber,
+                    itemId: mappedDeliveryId,
+                    catalogId: mappedDeliveryCatalogId,
+                    amount: total
+                }));
+            }
 
             calculatedTotal +=
                 total;
