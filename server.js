@@ -17258,10 +17258,15 @@ function oneCOrderXml(order) {
         order.lines
             .map(item => [
                 '<Товар>',
-                // cml:Товар base sequence first.
                 `<Ид>${oneCXmlEscape(item.id)}</Ид>`,
+                item.catalogId
+                    ? `<ИдКаталога>${oneCXmlEscape(item.catalogId)}</ИдКаталога>`
+                    : '',
                 `<Наименование>${oneCXmlEscape(item.name)}</Наименование>`,
                 '<БазоваяЕдиница Код="796" НаименованиеПолное="Штука" МеждународноеСокращение="PCE">шт</БазоваяЕдиница>',
+                `<ЦенаЗаЕдиницу>${oneCMoney(item.unitPrice)}</ЦенаЗаЕдиницу>`,
+                `<Количество>${Number(item.quantity).toFixed(3)}</Количество>`,
+                `<Сумма>${oneCMoney(item.total)}</Сумма>`,
                 '<ЗначенияРеквизитов>',
                 '<ЗначениеРеквизита>',
                 '<Наименование>ВидНоменклатуры</Наименование>',
@@ -17272,13 +17277,6 @@ function oneCOrderXml(order) {
                 `<Значение>${oneCXmlEscape(item.type)}</Значение>`,
                 '</ЗначениеРеквизита>',
                 '</ЗначенияРеквизитов>',
-                // Document item extension fields follow the base cml:Товар.
-                item.catalogId
-                    ? `<ИдКаталога>${oneCXmlEscape(item.catalogId)}</ИдКаталога>`
-                    : '',
-                `<ЦенаЗаЕдиницу>${oneCMoney(item.unitPrice)}</ЦенаЗаЕдиницу>`,
-                `<Количество>${Number(item.quantity).toFixed(3)}</Количество>`,
-                `<Сумма>${oneCMoney(item.total)}</Сумма>`,
                 '</Товар>'
             ].join(''))
             .join('');
@@ -17339,14 +17337,12 @@ function oneCOrderXml(order) {
         '<Контрагент>',
         `<Ид>${oneCXmlEscape(order.customerId)}</Ид>`,
         `<Наименование>${oneCXmlEscape(order.customer.name)}</Наименование>`,
-        // Physical-person requisites belong to the base cml:Контрагент.
+        '<Роль>Покупатель</Роль>',
         `<ПолноеНаименование>${oneCXmlEscape(order.customer.name)}</ПолноеНаименование>`,
         addressXml,
         customerContacts
             ? `<Контакты>${customerContacts}</Контакты>`
             : '',
-        // Роль is part of the document-specific extension and must be last.
-        '<Роль>Покупатель</Роль>',
         '</Контрагент>',
         '</Контрагенты>',
         `<Время>${oneCXmlEscape(order.time)}</Время>`,
@@ -18479,6 +18475,46 @@ async function buildOneCBitrixPaidOrdersCommerceMl(
                         null
                 })
             );
+
+            if (
+                testPublicNumber &&
+                rawPublicNumber ===
+                    testPublicNumber
+            ) {
+                console.log(
+                    '1C test order lines:',
+                    JSON.stringify({
+                        orderId,
+                        publicNumber:
+                            order.publicNumber,
+                        amount:
+                            order.amount,
+                        deliveryMethod:
+                            order.deliveryMethod ||
+                            '',
+                        lines:
+                            order.lines.map(
+                                line => ({
+                                    id:
+                                        line.id,
+                                    catalogId:
+                                        line.catalogId ||
+                                        '',
+                                    name:
+                                        line.name,
+                                    type:
+                                        line.type,
+                                    quantity:
+                                        line.quantity,
+                                    unitPrice:
+                                        line.unitPrice,
+                                    total:
+                                        line.total
+                                })
+                            )
+                    })
+                );
+            }
 
             orders.push(order);
 
