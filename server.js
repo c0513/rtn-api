@@ -17910,7 +17910,7 @@ async function buildOneCOrderFromBitrixDeal(
             ).trim();
             const useDeliveryMapping =
                 Boolean(mappedDeliveryId && currentTestNumber) &&
-                String(rawPublicNumber || '').trim() === currentTestNumber;
+                String(deal?.[BITRIX_ORDER_FIELDS.orderNumber] || '').trim() === currentTestNumber;
 
             lines.push({
                 id: useDeliveryMapping ? mappedDeliveryId : 'ORDER_DELIVERY',
