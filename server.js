@@ -17224,7 +17224,21 @@ function oneCExchangeDateTime(date, time) {
     );
 }
 
+// Controlled CommerceML mode: all shop orders use the existing 1C retail partner.
+// Keep this opt-in until the 1C counterpart mapping is verified and a backup exists.
+const ONEC_RETAIL_CUSTOMER_ENABLED =
+    String(process.env.ONEC_RETAIL_CUSTOMER_ENABLED || '').trim().toLowerCase() === 'true';
+const ONEC_RETAIL_CUSTOMER_ID =
+    normalizeEnvValue(process.env.ONEC_RETAIL_CUSTOMER_ID || '');
+const ONEC_RETAIL_CUSTOMER_NAME = 'Розничный покупатель';
+
 function oneCOrderXml(order) {
+    if (ONEC_RETAIL_CUSTOMER_ENABLED && !ONEC_RETAIL_CUSTOMER_ID) {
+        throw new Error('ONEC_RETAIL_CUSTOMER_ID required for retail customer export');
+    }
+    const retailCustomer = ONEC_RETAIL_CUSTOMER_ENABLED;
+    const commerceCustomerId = retailCustomer ? ONEC_RETAIL_CUSTOMER_ID : order.customerId;
+    const commerceCustomerName = retailCustomer ? ONEC_RETAIL_CUSTOMER_NAME : order.customer.name;
     const customerContacts =
         [
             oneCContactXml(
@@ -17238,7 +17252,7 @@ function oneCOrderXml(order) {
         ].join('');
 
     const addressXml =
-        order.customer.address
+        !retailCustomer && order.customer.address
             ? [
                 '<Адрес>',
                 `<Представление>${oneCXmlEscape(order.customer.address)}</Представление>`,
@@ -17306,6 +17320,11 @@ function oneCOrderXml(order) {
         ['Промокод', order.promoCode],
         ['RTN orderId', order.orderId],
         ['Дата заказа на сайте', oneCExchangeDateTime(order.date, order.time)],
+        ...(retailCustomer ? [
+            ['ФИО получателя', order.customer.name],
+            ['Телефон получателя', order.customer.phone],
+            ['Email получателя', order.customer.email]
+        ] : []),
         ['Номер заказа на сайте', order.publicNumber]
     ]
         .filter(([, value]) =>
@@ -17335,12 +17354,12 @@ function oneCOrderXml(order) {
         `<Сумма>${oneCMoney(order.amount)}</Сумма>`,
         '<Контрагенты>',
         '<Контрагент>',
-        `<Ид>${oneCXmlEscape(order.customerId)}</Ид>`,
-        `<Наименование>${oneCXmlEscape(order.customer.name)}</Наименование>`,
+        `<Ид>${oneCXmlEscape(commerceCustomerId)}</Ид>`,
+        `<Наименование>${oneCXmlEscape(commerceCustomerName)}</Наименование>`,
         '<Роль>Покупатель</Роль>',
-        `<ПолноеНаименование>${oneCXmlEscape(order.customer.name)}</ПолноеНаименование>`,
+        `<ПолноеНаименование>${oneCXmlEscape(commerceCustomerName)}</ПолноеНаименование>`,
         addressXml,
-        customerContacts
+        !retailCustomer && customerContacts
             ? `<Контакты>${customerContacts}</Контакты>`
             : '',
         '</Контрагент>',
@@ -17354,7 +17373,18 @@ function oneCOrderXml(order) {
                     : '',
                 order.deliveryMethod
                     ? `Доставка: ${order.deliveryMethod}`
-                    : ''
+                    : '',
+                ...(retailCustomer ? [
+                    `Получатель: ${order.customer.name || ''}`,
+                    `Телефон: ${order.customer.phone || ''}`,
+                    `Email: ${order.customer.email || ''}`,
+                    `Адрес: ${order.customer.address || ''}`,
+                    `Город: ${order.customer.city || ''}`,
+                    `Сумма: ${oneCMoney(order.amount)} RUB`,
+                    `Оплата: ${order.paymentId || ''}`,
+                    `Статус оплаты: оплачено`,
+                    `Заказ на сайте: ${order.publicNumber || ''}`
+                ] : [])
             ].filter(Boolean).join('. ')
         )}</Комментарий>`,
         `<Товары>${itemsXml}</Товары>`,
