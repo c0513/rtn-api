@@ -13163,6 +13163,92 @@ app.post('/api/plenoshnaya/identify', async (req, res) => {
     });
 });
 
+
+function buildPlenoshnayaContactClickText(data = {}) {
+    const labels = {
+        phone_click: '📞 ПЛЁНОШНАЯ · ЗВОНОК',
+        whatsapp_click: '🟢 ПЛЁНОШНАЯ · WHATSAPP',
+        telegram_click: '🔵 ПЛЁНОШНАЯ · TELEGRAM'
+    };
+
+    const clean = (value, max = 160) =>
+        cleanPlenoshnayaLeadValue(value, max);
+
+    const traffic = getPlenoshnayaVisitTraffic({
+        page: data.page,
+        firstPage: data.firstPage,
+        referrer: data.referrer,
+        firstReferrer: data.firstReferrer,
+        utmSource: data.utmSource,
+        utmMedium: data.utmMedium,
+        utmTerm: data.utmTerm,
+        adPhrase: data.adPhrase,
+        searchPhrase: data.searchPhrase,
+        yclid: data.yclid
+    });
+
+    const parts = String(data.calculatorSelection || '')
+        .split(/\s*\|\s*/)
+        .map(value => value.trim());
+
+    const selected = label => {
+        const part = parts.find(value =>
+            value.toLowerCase().startsWith(label.toLowerCase() + ':')
+        );
+        return part ? clean(part.slice(part.indexOf(':') + 1), 85) : '';
+    };
+
+    const car = selected('Авто');
+    const service = selected('Услуги');
+    const price = selected('Цена');
+    const calculation = [car, service, price].filter(Boolean).join(' · ');
+
+    const linkedPhone = (
+        String(data.linkText || '').match(/tel:\+?[\d()\s-]{7,}/i) || []
+    )[0];
+    const phone = clean(
+        data.phone || (linkedPhone || '').replace(/^tel:/i, '').trim(),
+        40
+    );
+
+    const secondsText = String(data.sessionSeconds || '').trim();
+    const seconds = /^\d+$/.test(secondsText)
+        ? Math.min(Number(secondsText), 86400)
+        : null;
+    const duration = seconds === null
+        ? ''
+        : Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+
+    const location = clean(data.ipInfo?.city, 70);
+    const device = clean(data.device, 60);
+    const context = [location, device].filter(Boolean).join(' · ');
+    const visit = /^\d+$/.test(String(data.visitCount || ''))
+        ? 'визит №' + data.visitCount
+        : '';
+    const session = [
+        duration ? duration + ' на сайте' : '',
+        visit
+    ].filter(Boolean).join(' · ');
+
+    return [
+        labels[data.eventType] || 'ПЛЁНОШНАЯ · КЛИК',
+        phone && data.eventType === 'phone_click'
+            ? '☎️ ' + phone
+            : null,
+        data.page ? '🔗 ' + clean(data.page, 240)
+            : (data.pageTitle ? '📄 ' + clean(data.pageTitle, 100) : null),
+        calculation ? '🧮 ' + calculation : null,
+        '🚦 Трафик: ' + traffic.type,
+        traffic.keyword && traffic.keyword !== '—' &&
+        !/^(не передан поисковиком|не указан в метках)$/i.test(traffic.keyword)
+            ? '🔎 Запрос: ' + clean(traffic.keyword, 100)
+            : null,
+        context ? '📍 ' + context : null,
+        session ? '⏱ ' + session : null,
+        data.knownLead ? '✅ Ранее оставлял заявку' : null
+    ].filter(Boolean).join('\n').slice(0, 850);
+}
+
 // ============================================================
 // ПЛЁНОШНАЯ — СОБЫТИЯ С САЙТА
 // ============================================================
@@ -13720,213 +13806,28 @@ app.post(
             });
         }
 
-        const titles = {
-            phone_click:
-                '📞 ПЛЁНОШНАЯ — КЛИК ПО ТЕЛЕФОНУ',
-            whatsapp_click:
-                '🟢 ПЛЁНОШНАЯ — КЛИК WHATSAPP',
-            telegram_click:
-                '🔵 ПЛЁНОШНАЯ — КЛИК TELEGRAM',
-            calculator_action:
-                '🧮 ПЛЁНОШНАЯ — ДЕЙСТВИЕ В КАЛЬКУЛЯТОРЕ',
-            consent_accept:
-                '🍪 ПЛЁНОШНАЯ — COOKIE: ПРИНЯТО',
-            consent_necessary:
-                '🍪 ПЛЁНОШНАЯ — ТОЛЬКО НЕОБХОДИМЫЕ',
-            contact_share:
-                '👤 ПЛЁНОШНАЯ — ПОЛЬЗОВАТЕЛЬ ПОДЕЛИЛСЯ КОНТАКТОМ'
-        };
-
-        const text = [
-            titles[eventType] || 'ПЛЁНОШНАЯ — СОБЫТИЕ',
-            '',
-            eventType === 'phone_click' && phone
-                ? `Номер: ${phone}`
-                : null,
-            eventType === 'contact_share' && name
-                ? `Имя: ${name}`
-                : null,
-            eventType === 'contact_share' && phone
-                ? `Телефон: ${phone}`
-                : null,
-            eventType === 'contact_share' && email
-                ? `Email: ${email}`
-                : null,
-            `Место: ${placement}`,
-            linkText
-                ? `Текст ссылки: ${linkText}`
-                : null,
-            pageTitle
-                ? `Страница: ${pageTitle}`
-                : null,
-            page
-                ? `🔗 ${page}`
-                : null,
-            referrer
-                ? `↩️ Referrer: ${referrer}`
-                : null,
-            source
-                ? `📣 Источник: ${source}`
-                : null,
-            utmCampaign
-                ? `🎯 Кампания: ${utmCampaign}`
-                : null,
-            utmContent
-                ? `🧩 UTM content: ${utmContent}`
-                : null,
-            utmTerm
-                ? `🔎 UTM term: ${utmTerm}`
-                : null,
-            searchPhrase
-                ? `🔍 Поисковая фраза: ${searchPhrase}`
-                : null,
-            adPhrase
-                ? `📢 Рекламная фраза: ${adPhrase}`
-                : null,
-            yclid
-                ? `🟡 yclid: ${yclid}`
-                : null,
-            visitorId
-                ? `👣 Visitor ID: ${visitorId}`
-                : null,
-            sessionId
-                ? `🧭 Session ID: ${sessionId}`
-                : null,
-            visitCount
-                ? `🔁 Визит: ${visitCount}`
-                : null,
+        const text = buildPlenoshnayaContactClickText({
+            eventType,
+            phone,
+            linkText,
+            page,
+            pageTitle,
+            calculatorSelection,
+            utmSource,
+            utmMedium,
+            utmTerm,
+            searchPhrase,
+            adPhrase,
+            yclid,
+            referrer,
+            firstReferrer,
+            firstPage,
+            ipInfo,
+            device,
+            sessionSeconds,
+            visitCount,
             knownLead
-                ? '✅ Ранее оставлял заявку'
-                : null,
-            device
-                ? `📱 Устройство: ${device}`
-                : null,
-            browser
-                ? `🌐 Браузер: ${browser}`
-                : null,
-            language
-                ? `🗣 Язык: ${language}`
-                : null,
-            timezone
-                ? `🕒 Часовой пояс: ${timezone}`
-                : null,
-            screen
-                ? `🖥 Экран: ${screen}`
-                : null,
-            viewport
-                ? `📐 Viewport: ${viewport}`
-                : null,
-            devicePixelRatio
-                ? `🔎 Pixel ratio: ${devicePixelRatio}`
-                : null,
-            touchPoints
-                ? `👆 Touch points: ${touchPoints}`
-                : null,
-            colorDepth
-                ? `🎨 Color depth: ${colorDepth}`
-                : null,
-            orientation
-                ? `↔️ Ориентация: ${orientation}`
-                : null,
-            darkMode
-                ? `🌗 Тема: ${darkMode}`
-                : null,
-            reducedMotion
-                ? `🎞 Reduced motion: ${reducedMotion}`
-                : null,
-            cookiesEnabled
-                ? `🍪 Cookies enabled: ${cookiesEnabled}`
-                : null,
-            dnt
-                ? `🛡 DNT: ${dnt}`
-                : null,
-            gpc
-                ? `🔐 GPC: ${gpc}`
-                : null,
-            sessionSeconds
-                ? `⏱ В сессии: ${sessionSeconds} сек.`
-                : null,
-            pageCount
-                ? `📚 Страниц в сессии: ${pageCount}`
-                : null,
-            firstPage
-                ? `🚪 Входная страница: ${firstPage}`
-                : null,
-            firstReferrer
-                ? `↩️ Первый referrer: ${firstReferrer}`
-                : null,
-            pageHistory
-                ? `🧭 Маршрут: ${pageHistory}`
-                : null,
-            calculatorSelection
-                ? `🧮 Калькулятор: ${calculatorSelection}`
-                : null,
-            ipInfo && (
-                ipInfo.city ||
-                ipInfo.region ||
-                ipInfo.country
-            )
-                ? `📍 Сеть: ${[
-                    ipInfo.city,
-                    ipInfo.region,
-                    ipInfo.country
-                ].filter(Boolean).join(', ')}`
-                : null,
-            ipInfo && (
-                ipInfo.asn ||
-                ipInfo.org
-            )
-                ? `🏢 ASN/провайдер: ${[
-                    ipInfo.asn,
-                    ipInfo.org
-                ].filter(Boolean).join(' · ')}`
-                : null,
-            ipInfo && ipInfo.timezone
-                ? `🌐 Часовой пояс сети: ${ipInfo.timezone}`
-                : null,
-            deviceModel
-                ? `📲 Модель: ${deviceModel}`
-                : null,
-            platformVersion
-                ? `⚙️ ОС: ${platformVersion}`
-                : null,
-            browserVersions
-                ? `🧩 Версии браузера: ${browserVersions}`
-                : null,
-            cpu
-                ? `🧠 CPU/ядра: ${cpu}`
-                : null,
-            memory
-                ? `💾 Память: ${memory}`
-                : null,
-            connection
-                ? `📶 Соединение: ${connection}`
-                : null,
-            visitorIp
-                ? `🌐 IP: ${visitorIp}`
-                : null,
-            countryHeader
-                ? `🌍 Страна по сети: ${countryHeader}`
-                : null,
-            clientPlatform
-                ? `🖥 Client platform: ${clientPlatform}`
-                : null,
-            clientHints
-                ? `🧭 Client hints: ${clientHints}`
-                : null,
-            acceptLanguage
-                ? `🗣 Accept-Language: ${acceptLanguage}`
-                : null,
-            userAgent
-                ? `🔧 User-Agent: ${userAgent}`
-                : null,
-            eventId
-                ? `🆔 Event ID: ${eventId}`
-                : null
-        ]
-            .filter(Boolean)
-            .join('\n')
-            .slice(0, 3900);
+        });
 
         try {
             const telegramResponse =
