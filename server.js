@@ -9790,6 +9790,9 @@ function cleanupPlenoshnayaVisitCards() {
                     card.inactivityTimer
                 );
             }
+            if (card?.editTimer) {
+                clearTimeout(card.editTimer);
+            }
 
             plenoshnayaVisitCards.delete(key);
         }
@@ -10540,6 +10543,49 @@ async function editPlenoshnayaVisitTelegramCard(card) {
     }
 }
 
+// Coalesce rapid page events to avoid Telegram's per-chat edit rate limits.
+const PLENOSHNAYA_VISIT_EDIT_MIN_INTERVAL_MS = 6000;
+const PLENOSHNAYA_VISIT_EDIT_CHAT_GAP_MS = 1800;
+let plenoshnayaNextVisitEditAt = 0;
+
+function queuePlenoshnayaVisitTelegramEdit(card, minDelayMs = 0) {
+    if (!card?.messageId || card.editTimer) {
+        return;
+    }
+
+    const now = Date.now();
+    const scheduledAt = Math.max(
+        now + 750,
+        now + Math.max(0, Number(minDelayMs) || 0),
+        Number(card.lastTelegramEditAt || 0) + PLENOSHNAYA_VISIT_EDIT_MIN_INTERVAL_MS,
+        plenoshnayaNextVisitEditAt
+    );
+
+    plenoshnayaNextVisitEditAt =
+        scheduledAt + PLENOSHNAYA_VISIT_EDIT_CHAT_GAP_MS;
+
+    card.editTimer = setTimeout(async () => {
+        card.editTimer = null;
+
+        if (!card.messageId) {
+            return;
+        }
+
+        card.lastTelegramEditAt = Date.now();
+        const success = await editPlenoshnayaVisitTelegramCard(card);
+
+        if (success) {
+            card.editRetryCount = 0;
+        } else if (Number(card.editRetryCount || 0) < 3) {
+            card.editRetryCount = Number(card.editRetryCount || 0) + 1;
+            queuePlenoshnayaVisitTelegramEdit(
+                card,
+                Math.min(30000, 5000 * 2 ** (card.editRetryCount - 1))
+            );
+        }
+    }, Math.max(0, scheduledAt - now));
+}
+
 function schedulePlenoshnayaVisitAutoEnd(
     key,
     card
@@ -10612,7 +10658,7 @@ function schedulePlenoshnayaVisitAutoEnd(
                     current
                 );
 
-                await editPlenoshnayaVisitTelegramCard(
+                queuePlenoshnayaVisitTelegramEdit(
                     current
                 );
             },
@@ -11079,142 +11125,38 @@ async function upsertPlenoshnayaVisitCard(
         }
     }
 
-    const text =
-        buildPlenoshnayaVisitCardText(
-            card
-        );
-
     if (card.messageId) {
-        try {
-            await callPlenoshnayaTelegram(
-                'editMessageText',
-                {
-                    chat_id:
-                        PLENOSHNAYA_TG_CHAT_ID,
-                    message_id:
-                        card.messageId,
-                    text,
-                    disable_web_page_preview:
-                        true,
-                    reply_markup:
-                        buildPlenoshnayaVisitReplyMarkup(
-                            card
-                        )
-                }
-            );
+        queuePlenoshnayaVisitTelegramEdit(card);
+        plenoshnayaVisitCards.set(key, card);
 
-            plenoshnayaVisitCards.set(
-                key,
-                card
-            );
-
-            return {
-                updated: true,
-                created: false,
-                messageId:
-                    card.messageId
-            };
-
-        } catch (error) {
-            const description =
-                String(
-                    error.response?.data?.description ||
-                    error.message ||
-                    ''
-                );
-
-            if (
-                /message is not modified/i
-                    .test(description)
-            ) {
-                plenoshnayaVisitCards.set(
-                    key,
-                    card
-                );
-
-                return {
-                    updated: true,
-                    created: false,
-                    messageId:
-                        card.messageId,
-                    unchanged: true
-                };
-            }
-
-            console.warn(
-                'Plenoshnaya visit card edit failed, creating a new card:',
-                description
-            );
-
-            card.messageId = null;
-        }
+        return {
+            updated: true,
+            created: false,
+            messageId: card.messageId
+        };
     }
 
-    // Если другой стартовый event уже создаёт Telegram-карточку
-    // этого же визита, ждём его вместо второго sendMessage.
-    if (
-        !card.messageId &&
-        card.creatingPromise
-    ) {
+    // Concurrent first events share one send; edits are batched afterwards.
+    if (!card.messageId && card.creatingPromise) {
         try {
             await card.creatingPromise;
         } catch (error) {
-            // Первый create мог упасть — ниже попробуем создать карточку снова.
+            // Do not start multiple new sends for the same failed first message.
+            return {
+                updated: false,
+                created: false,
+                reason: 'telegram_creation_failed'
+            };
         }
 
         if (card.messageId) {
-            const latestText =
-                buildPlenoshnayaVisitCardText(
-                    card
-                );
-
-            try {
-                await callPlenoshnayaTelegram(
-                    'editMessageText',
-                    {
-                        chat_id:
-                            PLENOSHNAYA_TG_CHAT_ID,
-                        message_id:
-                            card.messageId,
-                        text:
-                            latestText,
-                        disable_web_page_preview:
-                            true,
-                        reply_markup:
-                            buildPlenoshnayaVisitReplyMarkup(
-                                card
-                            )
-                    }
-                );
-            } catch (error) {
-                const description =
-                    String(
-                        error.response?.data?.description ||
-                        error.message ||
-                        ''
-                    );
-
-                if (
-                    !/message is not modified/i
-                        .test(description)
-                ) {
-                    console.warn(
-                        'Plenoshnaya visit card post-create edit skipped:',
-                        description
-                    );
-                }
-            }
-
-            plenoshnayaVisitCards.set(
-                key,
-                card
-            );
+            queuePlenoshnayaVisitTelegramEdit(card);
+            plenoshnayaVisitCards.set(key, card);
 
             return {
                 updated: true,
                 created: false,
-                messageId:
-                    card.messageId
+                messageId: card.messageId
             };
         }
     }
@@ -11255,6 +11197,9 @@ async function upsertPlenoshnayaVisitCard(
         card.messageId =
             result?.message_id ||
             null;
+        if (card.messageId) {
+            card.lastTelegramEditAt = Date.now();
+        }
     } finally {
         card.creatingPromise =
             null;
