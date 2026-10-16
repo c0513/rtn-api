@@ -9089,7 +9089,7 @@ app.post('/api/partners/apply', async (req, res) => {
     const phone = clean('phone', 40);
     const email = clean('email', 254);
     if (!['ambassador', 'seller'].includes(type) || name.length < 3 ||
-        !/^\+?[\d\s()-]{10,22}$/.test(phone) ||
+        !(phone.replace(/\D/g, '').length >= 10 && phone.replace(/\D/g, '').length <= 15) ||
         !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return res.status(400).json({ error: 'Проверьте обязательные поля' });
     }
@@ -9111,13 +9111,23 @@ app.post('/api/partners/apply', async (req, res) => {
             if (!organization || !/^(\d{10}|\d{12})$/.test(inn)) {
                 return res.status(400).json({ error: 'Укажите ИП/ООО и корректный ИНН' });
             }
-            if (!isBitrixConfigured() || !Number.isInteger(BITRIX_WHOLESALE_CATEGORY_ID) ||
-                BITRIX_WHOLESALE_CATEGORY_ID < 0) {
-                return res.status(503).json({ error: 'Воронка ОПТ пока не настроена' });
+            if (!isBitrixConfigured()) {
+                return res.status(503).json({ error: 'Bitrix24 не подключён' });
+            }
+            let wholesaleCategoryId = BITRIX_WHOLESALE_CATEGORY_ID;
+            if (!Number.isInteger(wholesaleCategoryId) || wholesaleCategoryId < 0) {
+                const result = await bitrixCall('crm.dealcategory.list', {});
+                const categories = Array.isArray(result) ? result :
+                    Array.isArray(result?.result) ? result.result : [];
+                const wholesale = categories.find(item => String(item.NAME || '').trim().toUpperCase() === 'ОПТ');
+                if (!wholesale) {
+                    return res.status(503).json({ error: 'Воронка ОПТ не найдена в Bitrix24' });
+                }
+                wholesaleCategoryId = Number(wholesale.ID);
             }
             await bitrixCall('crm.deal.add', { fields: {
                 TITLE: 'RTN ОПТ — ' + organization,
-                CATEGORY_ID: BITRIX_WHOLESALE_CATEGORY_ID,
+                CATEGORY_ID: wholesaleCategoryId,
                 COMMENTS: ['Заявка продавца с rtn.pro/partners', 'ФИО: ' + name,
                     'Организация: ' + organization, 'ИНН: ' + inn, 'Телефон: ' + phone,
                     'Email: ' + email].join('\n'),
