@@ -9078,6 +9078,59 @@ function buildTelegramItemsSummary(items) {
     return lines.join('\n');
 }
 
+// RTN partnership applications
+const PARTNER_AMBASSADOR_CHAT_ID = normalizeEnvValue(process.env.PARTNER_AMBASSADOR_CHAT_ID || TELEGRAM_CHAT_ID);
+const BITRIX_WHOLESALE_CATEGORY_ID = Number(process.env.BITRIX_WHOLESALE_CATEGORY_ID ?? -1);
+app.post('/api/partners/apply', async (req, res) => {
+    const body = req.body || {};
+    const clean = (key, max = 250) => String(body[key] || '').trim().slice(0, max);
+    const type = clean('type', 30);
+    const name = clean('name');
+    const phone = clean('phone', 40);
+    const email = clean('email', 254);
+    if (!['ambassador', 'seller'].includes(type) || name.length < 3 ||
+        !/^\+?[\d\s()-]{10,22}$/.test(phone) ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Проверьте обязательные поля' });
+    }
+    try {
+        if (type === 'ambassador') {
+            const socials = clean('socials', 1000);
+            if (!socials) return res.status(400).json({ error: 'Укажите социальные сети' });
+            if (!TELEGRAM_BOT_TOKEN || !PARTNER_AMBASSADOR_CHAT_ID) {
+                return res.status(503).json({ error: 'Канал приёма заявок пока не настроен' });
+            }
+            await axios.post('https://api.telegram.org/bot' + TELEGRAM_BOT_TOKEN + '/sendMessage', {
+                chat_id: PARTNER_AMBASSADOR_CHAT_ID,
+                text: ['🤝 RTN — кандидат в амбассадоры', 'ФИО: ' + name, 'Телефон: ' + phone,
+                    'Email: ' + email, 'Соцсети: ' + socials].join('\n').slice(0, 3900)
+            }, { timeout: 10000 });
+        } else {
+            const organization = clean('organization');
+            const inn = clean('inn', 12);
+            if (!organization || !/^(\d{10}|\d{12})$/.test(inn)) {
+                return res.status(400).json({ error: 'Укажите ИП/ООО и корректный ИНН' });
+            }
+            if (!isBitrixConfigured() || !Number.isInteger(BITRIX_WHOLESALE_CATEGORY_ID) ||
+                BITRIX_WHOLESALE_CATEGORY_ID < 0) {
+                return res.status(503).json({ error: 'Воронка ОПТ пока не настроена' });
+            }
+            await bitrixCall('crm.deal.add', { fields: {
+                TITLE: 'RTN ОПТ — ' + organization,
+                CATEGORY_ID: BITRIX_WHOLESALE_CATEGORY_ID,
+                COMMENTS: ['Заявка продавца с rtn.pro/partners', 'ФИО: ' + name,
+                    'Организация: ' + organization, 'ИНН: ' + inn, 'Телефон: ' + phone,
+                    'Email: ' + email].join('\n'),
+                SOURCE_ID: 'WEB', SOURCE_DESCRIPTION: 'rtn.pro/partners', OPENED: 'Y'
+            } });
+        }
+        return res.json({ ok: true });
+    } catch (error) {
+        console.error('Partner application delivery:', error.response?.data || error.message);
+        return res.status(502).json({ error: 'Не удалось передать заявку. Попробуйте позже.' });
+    }
+});
+
 async function sendTelegramText(text) {
     if (
         !TELEGRAM_BOT_TOKEN ||
