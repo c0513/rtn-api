@@ -3479,7 +3479,9 @@ const RTN_KNOWN_PROMO_CODES = [
     'LION',
     'PANTERA',
     'VEPR',
-    'SJ10'
+    'SJ10',
+    'TRUVOR828',
+    'PANDA'
 ];
 
 const RTN_STATIC_PROMO_DISCOUNTS = {
@@ -3492,7 +3494,9 @@ const RTN_STATIC_PROMO_DISCOUNTS = {
     LION: 0.10,
     PANTERA: 0.10,
     VEPR: 0.10,
-    SJ10: 0.10
+    SJ10: 0.10,
+    TRUVOR828: 0.10,
+    PANDA: 0.10
 };
 
 const RTN_GOAL_BUNDLE_IDS =
