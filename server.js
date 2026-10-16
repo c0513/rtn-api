@@ -9081,6 +9081,74 @@ function buildTelegramItemsSummary(items) {
 // RTN partnership applications
 const PARTNER_AMBASSADOR_CHAT_ID = normalizeEnvValue(process.env.PARTNER_AMBASSADOR_CHAT_ID || TELEGRAM_CHAT_ID);
 const BITRIX_WHOLESALE_CATEGORY_ID = Number(process.env.BITRIX_WHOLESALE_CATEGORY_ID ?? -1);
+
+function checkRussianInn(value) {
+ const v=String(value||'').replace(/\D/g,'');
+ const digit=(weights)=>weights.reduce((sum,weight,index)=>sum+weight*Number(v[index]),0)%11%10;
+ if(v.length===10)return digit([2,4,10,3,5,9,4,6,8])===Number(v[9]);
+ if(v.length===12)return digit([7,2,4,10,3,5,9,4,6,8])===Number(v[10])&&digit([3,7,2,4,10,3,5,9,4,6,8])===Number(v[11]);
+ return false;
+}
+async function findPartnerByInn(inn) {
+ const token=normalizeEnvValue(process.env.DADATA_TOKEN || '');
+ if(!token) return { configured:false, found:false };
+ const {data}=await axios.post('https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party',{query:inn,count:1},{
+  headers:{Authorization:'Token '+token,'Content-Type':'application/json'},timeout:9000
+ });
+ const item=data?.suggestions?.[0];if(!item)return {configured:true,found:false};
+ return {configured:true,found:true,company:{
+  name:String(item.data?.name?.short_with_opf||item.value||'').slice(0,250),
+  fullName:String(item.data?.name?.full_with_opf||item.value||'').slice(0,300),
+  inn:String(item.data?.inn||inn),kpp:String(item.data?.kpp||''),
+  ogrn:String(item.data?.ogrn||''),address:String(item.data?.address?.unrestricted_value||'').slice(0,400),
+  status:String(item.data?.state?.status||''),
+  type:String(item.data?.type||'')
+ }};
+}
+app.get('/api/partners/company/:inn',async(req,res)=>{
+ const inn=String(req.params.inn||'').replace(/\D/g,'');
+ if(!checkRussianInn(inn))return res.status(400).json({error:'Некорректный ИНН'});
+ try {const result=await findPartnerByInn(inn);if(!result.configured)return res.status(503).json({error:'Автозаполнение пока не настроено'});
+ return res.json(result);}
+ catch(e){console.error('Partner INN lookup:',e.message);return res.status(502).json({error:'Сервис проверки ИНН временно недоступен'});}
+});
+async function createSellerCrmEntities({name,phone,email,organization,inn,companyData,categoryId}) {
+ // Reuse by legal identifier instead of creating duplicate companies.
+ const existingReq=await bitrixCall('crm.requisite.list',{filter:{RQ_INN:inn},select:['ID','ENTITY_TYPE_ID','ENTITY_ID','RQ_INN']});
+ let req=(Array.isArray(existingReq)?existingReq:[]).find(x=>Number(x.ENTITY_TYPE_ID)===4);
+ let companyId=req?Number(req.ENTITY_ID):0;
+ if(!companyId){
+  companyId=Number(await bitrixCall('crm.company.add',{fields:{
+   TITLE:companyData?.name||organization,PHONE:[{VALUE:phone,VALUE_TYPE:'WORK'}],
+   EMAIL:[{VALUE:email,VALUE_TYPE:'WORK'}],COMPANY_TYPE:'CUSTOMER'
+  }}));
+  const presets=await bitrixCall('crm.requisite.preset.list',{filter:{},select:['ID','NAME']});
+  const preset=(Array.isArray(presets)?presets:[]).find(x=>/организац|юр|company|ип|предпринимат/i.test(String(x.NAME||'')))||(Array.isArray(presets)?presets:[])[0];
+  if(!preset)throw Error('Не найден пресет реквизитов Bitrix24');
+  await bitrixCall('crm.requisite.add',{fields:{
+   ENTITY_TYPE_ID:4,ENTITY_ID:companyId,PRESET_ID:Number(preset.ID),NAME:'Реквизиты по ИНН '+inn,
+   RQ_INN:inn,RQ_KPP:companyData?.kpp||'',RQ_OGRN:companyData?.ogrn||'',
+   RQ_COMPANY_NAME:companyData?.name||organization,
+   RQ_COMPANY_FULL_NAME:companyData?.fullName||organization,ACTIVE:'Y'
+  }});
+ }
+ const names=name.trim().split(/\s+/);
+ const contactId=Number(await bitrixCall('crm.contact.add',{fields:{
+  NAME:names[1]||names[0],LAST_NAME:names.length>1?names[0]:'',
+  SECOND_NAME:names.slice(2).join(' '),
+  PHONE:[{VALUE:phone,VALUE_TYPE:'WORK'}],EMAIL:[{VALUE:email,VALUE_TYPE:'WORK'}],
+  COMPANY_ID:companyId
+ }}));
+ const dealId=Number(await bitrixCall('crm.deal.add',{fields:{
+  TITLE:'RTN ОПТ — '+(companyData?.name||organization),CATEGORY_ID:categoryId,
+  COMPANY_ID:companyId,CONTACT_ID:contactId,
+  COMMENTS:['Заявка продавца rtn.pro/partners','ФИО: '+name,'ИНН: '+inn,
+   'Организация: '+organization,'Телефон: '+phone,'Email: '+email].join('\n'),
+  SOURCE_ID:'WEB',SOURCE_DESCRIPTION:'rtn.pro/partners',OPENED:'Y'
+ }}));
+ return {dealId,companyId,contactId};
+}
+
 app.post('/api/partners/apply', async (req, res) => {
     const body = req.body || {};
     const clean = (key, max = 250) => String(body[key] || '').trim().slice(0, max);
@@ -9125,14 +9193,17 @@ app.post('/api/partners/apply', async (req, res) => {
                 }
                 wholesaleCategoryId = Number(wholesale.ID);
             }
-            await bitrixCall('crm.deal.add', { fields: {
-                TITLE: 'RTN ОПТ — ' + organization,
-                CATEGORY_ID: wholesaleCategoryId,
-                COMMENTS: ['Заявка продавца с rtn.pro/partners', 'ФИО: ' + name,
-                    'Организация: ' + organization, 'ИНН: ' + inn, 'Телефон: ' + phone,
-                    'Email: ' + email].join('\n'),
-                SOURCE_ID: 'WEB', SOURCE_DESCRIPTION: 'rtn.pro/partners', OPENED: 'Y'
-            } });
+            const checked=checkRussianInn(inn);
+            if(!checked)return res.status(400).json({error:'Некорректный ИНН'});
+            const found=await findPartnerByInn(inn);
+            if(found.found&&found.company.status&&found.company.status!=='ACTIVE'){
+                return res.status(400).json({error:'Компания имеет неактивный статус по данным реестра'});
+            }
+            const created=await createSellerCrmEntities({
+                name,phone,email,organization,inn,
+                companyData:found.company||null,categoryId:wholesaleCategoryId
+            });
+            return res.json({ok:true,dealId:created.dealId});
         }
         return res.json({ ok: true });
     } catch (error) {
