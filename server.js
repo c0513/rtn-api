@@ -17210,6 +17210,26 @@ function oneCExchangeDateTime(date, time) {
 
 // Controlled CommerceML mode: all shop orders use the existing 1C retail partner.
 // Keep this opt-in until the 1C counterpart mapping is verified and a backup exists.
+let rtnOrdersExchange;
+function getRtnOrdersExchange() {
+    if (!rtnOrdersExchange) rtnOrdersExchange = require('./rtn-onec-runtime').createRuntime({
+        getPool: require('./db').getPool,
+        bitrixCall,
+        orderFile: ORDER_DATA_FILE,
+        config: {
+            productMap: ONEC_PRODUCT_MAP,
+            catalogId: ONEC_CATALOG_ID,
+            // Production mapping must be verified against the 1C catalog.
+            deliveryId: String(process.env.ONEC_DELIVERY_ITEM_ID || '').trim(),
+            deliveryCatalogId: String(process.env.ONEC_DELIVERY_CATALOG_ID || ONEC_CATALOG_ID).trim(),
+            retailEnabled: ONEC_RETAIL_CUSTOMER_ENABLED,
+            retailId: ONEC_RETAIL_CUSTOMER_ID,
+            fulfillment: { store: RTN_FULFILLMENT_STORE, city: RTN_FULFILLMENT_CITY, address: RTN_FULFILLMENT_ADDRESS }
+        }
+    });
+    return rtnOrdersExchange;
+}
+
 const ONEC_RETAIL_CUSTOMER_ENABLED =
     String(process.env.ONEC_RETAIL_CUSTOMER_ENABLED || '').trim().toLowerCase() === 'true';
 const ONEC_RETAIL_CUSTOMER_ID =
@@ -19073,214 +19093,25 @@ app.all(
 
         if (mode === 'query') {
             if (!ONEC_ORDER_EXPORT_ENABLED) {
-                res
-                    .status(200)
-                    .type(
-                        'application/xml; charset=utf-8'
-                    );
-
-                return res.send(
-                    oneCEmptyCommerceMl(
-                        effectiveCmlVersion
-                    )
-                );
+                return res.status(200).type('application/xml; charset=utf-8').send(oneCEmptyCommerceMl(effectiveCmlVersion));
             }
-
             try {
-                const generated =
-                    await buildOneCBitrixPaidOrdersCommerceMl(
-                        effectiveCmlVersion
-                    );
-
-                const orderIds =
-                    generated.orders.map(
-                        order =>
-                            order.orderId
-                    );
-
-                session.lastSaleOrderIds =
-                    orderIds;
-
-                session.lastSaleExports =
-                    Array.isArray(
-                        generated.exports
-                    )
-                        ? generated.exports
-                        : [];
-
-                console.log(
-                    `1C sale query: paid candidates=${generated.candidates}, exporting=${generated.orders.length}, skipped=${generated.skipped.length}, invalid=${generated.skipped.filter(item => item?.reason === 'invalid_order').length}, CML ${effectiveCmlVersion}`
-                );
-
-                // Log sanitized CommerceML line diagnostics before handing the batch to 1C.
-                // No buyer details, contact data, payment IDs or fiscal data.
-                for (const order of generated.orders) {
-                    const lineDiagnostics = (Array.isArray(order.lines) ? order.lines : [])
-                        .map((line, index) => ({
-                            index: index + 1,
-                            productId: String(line.id || ''),
-                            catalogId: String(line.catalogId || ''),
-                            type: String(line.type || ''),
-                            quantity: Number(line.quantity),
-                            unitPrice: Number(line.unitPrice),
-                            total: Number(line.total),
-                            namePresent: Boolean(String(line.name || '').trim())
-                        }));
-                    const invalidLines = lineDiagnostics.filter(line =>
-                        !line.productId ||
-                        !line.namePresent ||
-                        !Number.isFinite(line.quantity) ||
-                        line.quantity <= 0 ||
-                        !Number.isFinite(line.unitPrice) ||
-                        line.unitPrice < 0 ||
-                        !Number.isFinite(line.total) ||
-                        line.total < 0
-                    );
-                    console.log('1C sale order lines diagnostic:', JSON.stringify({
-                        publicNumber: order.publicNumber,
-                        lines: lineDiagnostics,
-                        sumOfLines: lineDiagnostics.reduce((sum, line) => sum + (Number.isFinite(line.total) ? line.total : 0), 0),
-                        orderAmount: Number(order.amount),
-                        invalidLineCount: invalidLines.length
-                    }));
-                    if (invalidLines.length) {
-                        throw new Error('1C CommerceML validation failed for order ' +
-                            order.publicNumber + ': invalid lines ' +
-                            invalidLines.map(line => line.index).join(','));
-                    }
-                }
-
-                if (!generated.orders.length) {
-                    res
-                        .status(200)
-                        .type(
-                            'application/xml; charset=utf-8'
-                        );
-
-                    return res.send(
-                        oneCEmptyCommerceMl(
-                            effectiveCmlVersion
-                        )
-                    );
-                }
-
-                res.set(
-                    'Cache-Control',
-                    'no-store'
-                );
-
-                return res
-                    .status(200)
-                    .type(
-                        'application/xml; charset=utf-8'
-                    )
-                    .send(
-                        generated.xml
-                    );
-
+                const batch = await getRtnOrdersExchange().query(session, effectiveCmlVersion);
+                console.log('1C order query:', JSON.stringify({ count: batch.orderIds.length, pending: Boolean(batch.id) }));
+                return res.status(200).set('Cache-Control', 'no-store').type('application/xml; charset=utf-8').send(batch.xml);
             } catch (error) {
-                console.error(
-                    '1C sale bulk query error:',
-                    error.response?.data ||
-                    error.message
-                );
-
-                return oneCText(
-                    res,
-                    500,
-                    `failure\n${error.message || 'Не удалось сформировать оплаченные заказы для 1С'}`
-                );
+                console.error('1C order query failed:', error.message);
+                return oneCText(res, 500, 'failure\nНе удалось подготовить заказы. Проверьте отчет сверки и журнал обмена.');
             }
         }
-
         if (mode === 'success') {
-            const deliveredOrderIds =
-                Array.isArray(
-                    session.lastSaleOrderIds
-                )
-                    ? session.lastSaleOrderIds
-                    : session.lastSaleOrderId
-                        ? [session.lastSaleOrderId]
-                        : [];
-
-            const deliveredExports =
-                Array.isArray(
-                    session.lastSaleExports
-                )
-                    ? session.lastSaleExports
-                    : [];
-
-            if (deliveredOrderIds.length) {
-                const exportedAt =
-                    new Date().toISOString();
-
-                for (
-                    const exported
-                    of deliveredExports
-                ) {
-                    const dealId =
-                        Number(
-                            exported?.dealId ||
-                            0
-                        );
-
-                    if (!dealId) {
-                        continue;
-                    }
-
-                    await bitrixCall(
-                        'crm.deal.update',
-                        {
-                            id:
-                                dealId,
-                            fields: {
-                                [BITRIX_ORDER_FIELDS.onecExportedAt]:
-                                    exportedAt,
-                                [BITRIX_ORDER_FIELDS.onecPaymentSyncedAt]:
-                                    exportedAt,
-                                [BITRIX_ORDER_FIELDS.onecPaymentDocumentSyncedAt]:
-                                    exportedAt
-                            }
-                        }
-                    );
-
-                    await sleep(120);
-                }
-
-                for (
-                    const orderId
-                    of deliveredOrderIds
-                ) {
-                    onecSaleDeliveredOrders.add(
-                        orderId
-                    );
-
-                    upsertLocalOrder({
-                        orderId,
-                        onecExportedAt:
-                            exportedAt,
-                        onecPaymentSyncedAt:
-                            exportedAt,
-                        onecPaymentDocumentSyncedAt:
-                            exportedAt
-                    });
-                }
-
-                console.log(
-                    `1C sale success: persisted ${deliveredOrderIds.length} exported order(s), Bitrix markers=${deliveredExports.length}`
-                );
-
-                delete session.lastSaleExports;
-                delete session.lastSaleOrderIds;
-                delete session.lastSaleOrderId;
-                onecSaleExportArmed = false;
+            try {
+                await getRtnOrdersExchange().success(session);
+                return oneCText(res, 200, 'success');
+            } catch (error) {
+                console.error('1C order acknowledgement failed:', error.message);
+                return oneCText(res, 500, 'failure\nПодтверждение заказов не сохранено; повторите обмен.');
             }
-
-            return oneCText(
-                res,
-                200,
-                'success'
-            );
         }
 
         if (mode === 'file') {
@@ -19742,6 +19573,16 @@ app.post(
 );
 
 
+app.get('/api/admin/1c/orders-report', requireBlogAdmin, async (req, res) => {
+    try {
+        const store = require('./rtn-onec-store').mysqlStore(require('./db').getPool);
+        return res.set('Cache-Control', 'no-store').json(await store.readReport());
+    } catch (error) {
+        console.error('1C order report unavailable:', error.message);
+        return res.status(503).json({error:'Отчет обмена недоступен; проверьте инициализацию состояния.'});
+    }
+});
+
 app.post(
     '/api/admin/1c/arm-test-order',
     requireBlogAdmin,
@@ -19825,7 +19666,7 @@ app.get(
                 onecSaleExportArmed,
 
             exportMode:
-                'all_paid_missing_1c',
+                'all_orders_reconciled_no_payments',
 
             deliveredThisProcess:
                 Array.from(
@@ -20904,3 +20745,4 @@ app.listen(PORT, () => {
         }, 1500);
     }
 });
+
