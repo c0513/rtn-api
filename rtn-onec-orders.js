@@ -137,8 +137,13 @@ function createExchange({store, collect, config={}}) {
             }
             const batch = await store.transaction(async state => {
                 requireValue(state.version === 1 && state.reconciliation?.approved === true,'reconciliation_required');
-                if (state.pending) return state.pending;
-                requireValue(pairs.every(pair => !Object.hasOwn(state.delivered||{},pair.orderId)),'manual_batch_already_delivered');
+                if (state.pending) {
+                    requireValue(state.pending.orderIds.length===2 && pairs.every(p=>state.pending.orderIds.includes(p.orderId)),'another_exchange_pending');
+                    return state.pending;
+                }
+                const completed = pairs.every(pair => Object.hasOwn(state.delivered||{},pair.orderId));
+                if (completed) return {id:null,xml:commerceMl([],version,config),orderIds:[]};
+                requireValue(pairs.every(pair => !Object.hasOwn(state.delivered||{},pair.orderId)),'manual_batch_partial_delivery');
                 requireValue(pairs.every(pair => !Object.hasOwn(state.publicNumbers||{},pair.publicNumber)),'manual_batch_public_number_used');
                 state.pending = {id:crypto.randomUUID(),xml:payload.xml,orderIds:pairs.map(p=>p.orderId),orderRefs:pairs,createdAt:new Date().toISOString()};
                 return state.pending;
