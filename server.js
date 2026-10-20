@@ -17210,6 +17210,8 @@ function getRtnOrdersExchange() {
         bitrixCall,
         orderFile: ORDER_DATA_FILE,
         config: {
+            fetchVerifiedPayments: async () => (await fetchAllYooKassaPayments()).payments,
+            newPaidAfter: String(process.env.ONEC_NEW_PAID_AFTER || '').trim(),
             productMap: ONEC_PRODUCT_MAP,
             catalogId: ONEC_CATALOG_ID,
             // Production mapping must be verified against the 1C catalog.
