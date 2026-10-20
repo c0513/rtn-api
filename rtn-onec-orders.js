@@ -121,6 +121,31 @@ function commerceMl(orders, version='2.07', config={}) {
 // A batch survives a restart and is replayed byte-for-byte until success.
 function createExchange({store, collect, config={}}) {
     return {
+        // One-time manually approved batch. Reuses the same durable acknowledgement
+        // and never overrides an existing pending or delivered order.
+        async queryApprovedManual(session, version, payload) {
+            requireValue(payload && typeof payload.xml === 'string', 'manual_batch_missing');
+            requireValue(Array.isArray(payload.orders) && payload.orders.length === 2, 'manual_batch_count_invalid');
+            const pairs = [
+                {orderId:'1791193530114-f5z3mx',publicNumber:'051020261245'},
+                {orderId:'1792297958450-l30tlp',publicNumber:'181020260732'}
+            ];
+            requireValue(pairs.every((pair, i) => pair.orderId === payload.orders[i]?.orderId && pair.publicNumber === payload.orders[i]?.publicNumber),'manual_batch_identity_invalid');
+            requireValue(payload.xml.includes('ВерсияСхемы="'+version+'"'),'manual_batch_version_invalid');
+            for (const pair of pairs) {
+                requireValue(payload.xml.includes('<Ид>'+pair.orderId+'</Ид>') && payload.xml.includes('<Номер>'+pair.publicNumber+'</Номер>'),'manual_batch_xml_identity_invalid');
+            }
+            const batch = await store.transaction(async state => {
+                requireValue(state.version === 1 && state.reconciliation?.approved === true,'reconciliation_required');
+                if (state.pending) return state.pending;
+                requireValue(pairs.every(pair => !Object.hasOwn(state.delivered||{},pair.orderId)),'manual_batch_already_delivered');
+                requireValue(pairs.every(pair => !Object.hasOwn(state.publicNumbers||{},pair.publicNumber)),'manual_batch_public_number_used');
+                state.pending = {id:crypto.randomUUID(),xml:payload.xml,orderIds:pairs.map(p=>p.orderId),orderRefs:pairs,createdAt:new Date().toISOString()};
+                return state.pending;
+            });
+            session.rtnOrderBatch = batch.id;
+            return batch;
+        },
         async query(session,version) {
             const result=await store.transaction(async state=>{
                 requireValue(state.version===1 && state.reconciliation?.approved===true,'reconciliation_required');
