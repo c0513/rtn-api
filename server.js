@@ -9246,6 +9246,21 @@ async function sendTelegramText(text) {
     );
 }
 
+// 1C exchange alerts use the existing RTN Telegram chat.
+async function notifyOneCExchange(message, silent) {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: TELEGRAM_CHAT_ID,
+            text: String(message).slice(0, 3000),
+            disable_notification: Boolean(silent),
+            disable_web_page_preview: true
+        }, { timeout: 10000 });
+    } catch (error) {
+        console.error('1C Telegram notification failed:', error.message);
+    }
+}
+
 async function sendOrderAttemptToTelegram({
     amount,
     items,
@@ -19104,18 +19119,23 @@ app.all(
                     })
                     : await getRtnOrdersExchange().query(session, effectiveCmlVersion);
                 console.log('1C order query:', JSON.stringify({ count: batch.orderIds.length, pending: Boolean(batch.id) }));
+                session.rtnLastOrderCount = batch.orderIds.length;
                 return res.status(200).set('Cache-Control', 'no-store').type('application/xml; charset=utf-8').send(batch.xml);
             } catch (error) {
                 console.error('1C order query failed:', error.message);
+                await notifyOneCExchange('🚨 RTN.PRO → 1С: ошибка получения заказов. Причина: ' + error.message, false);
                 return oneCText(res, 500, 'failure\nНе удалось подготовить заказы. Проверьте отчет сверки и журнал обмена.');
             }
         }
         if (mode === 'success') {
             try {
                 await getRtnOrdersExchange().success(session);
+                await notifyOneCExchange('✅ RTN.PRO ↔ 1С: обмен заказами завершён. Передано с сайта: ' + Number(session.rtnLastOrderCount || 0) + '. Подтверждение 1С получено.', true);
+                delete session.rtnLastOrderCount;
                 return oneCText(res, 200, 'success');
             } catch (error) {
                 console.error('1C order acknowledgement failed:', error.message);
+                await notifyOneCExchange('🚨 RTN.PRO → 1С: подтверждение обмена не сохранено. Причина: ' + error.message, false);
                 return oneCText(res, 500, 'failure\nПодтверждение заказов не сохранено; повторите обмен.');
             }
         }
