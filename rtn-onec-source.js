@@ -25,11 +25,16 @@ function createCollector({bitrixCall,readLocalOrders,config}) {
         need(Array.isArray(enumFields),'invalid_promo_fields');
         const promoCodes={...config.promoCodes};
         for(const field of enumFields)for(const value of field.LIST||[])promoCodes[str(value.ID)]=str(value.VALUE);
-        const local=readLocalOrders();
-        need(Array.isArray(local),'invalid_local_order_store');
+        const allLocal=readLocalOrders();
+        need(Array.isArray(allLocal),'invalid_local_order_store');
+        const cutoff=Date.parse(config.newPaidAfter||'');
+        const isNew=order=>!Number.isFinite(cutoff)||Date.parse(order.createdAt||'')>cutoff;
+        const local=allLocal.filter(isNew);
         const deals=[];let lastId=0;
         for(;;){
-            const page=await bitrixCall('crm.deal.list',{order:{ID:'ASC'},filter:{ORIGINATOR_ID:'RTN.PRO','>ID':lastId},select:['*','UF_*'],start:0});
+            const filter={ORIGINATOR_ID:'RTN.PRO','>ID':lastId};
+            if(Number.isFinite(cutoff))filter['>DATE_CREATE']=new Date(cutoff).toISOString();
+            const page=await bitrixCall('crm.deal.list',{order:{ID:'ASC'},filter,select:['*','UF_*'],start:0});
             need(Array.isArray(page),'invalid_bitrix_page');
             if(!page.length)break;
             const next=Math.max(...page.map(d=>Number(d.ID)));
