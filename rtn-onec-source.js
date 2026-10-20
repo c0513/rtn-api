@@ -1,6 +1,15 @@
 'use strict';
 const {cents,guid,validate,fromLocal}=require('./rtn-onec-orders');
 const str=x=>String(x??'').trim();
+// Resolve an unlinked Bitrix product only when its full name uniquely matches
+// a confirmed 1C product. Never substitute a different flavour or SKU.
+const normalizeProductName=x=>str(x).normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/\s+/g,' ');
+function verifiedProductByName(name, productMap) {
+    const target=normalizeProductName(name);
+    if(!target)return null;
+    const matches=Object.values(productMap||{}).filter(item=>normalizeProductName(item.name)===target && guid(item.id));
+    return matches.length===1?matches[0]:null;
+}
 const need=(ok,message)=>{if(!ok)throw new Error(message);};
 
 // Only read methods: unlike the old paid exporter, this does not create/update
@@ -59,11 +68,18 @@ function createCollector({bitrixCall,readLocalOrders,config}) {
                         deliveryMethod=name.replace(/^ДОСТАВКА\s*[—-]\s*/i,'');shipping+=total;
                         lines.push({id:config.deliveryId,catalogId:config.deliveryCatalogId||config.catalogId,name,quantity,total,discount,type:'Услуга'});continue;
                     }
-                    const productId=str(row.PRODUCT_ID);need(productId&&productId!=='0','missing_product_reference');
-                    if(!products.has(productId))products.set(productId,await bitrixCall('catalog.product.get',{id:productId}));
-                    const data=products.get(productId);const product=data.product||data.item||data;
-                    const externalId=str(product.xmlId||product.XML_ID).replace(/^RTN:/i,'');
-                    const mapped=config.productMap[externalId];need(mapped&&guid(mapped.id),'unknown_product_guid');
+                    const productId=str(row.PRODUCT_ID);
+                    let mapped;
+                    if(!productId||productId==='0'){
+                        mapped=verifiedProductByName(name,config.productMap);
+                        need(mapped,'missing_product_reference');
+                    }else{
+                        if(!products.has(productId))products.set(productId,await bitrixCall('catalog.product.get',{id:productId}));
+                        const data=products.get(productId);const product=data.product||data.item||data;
+                        const externalId=str(product.xmlId||product.XML_ID).replace(/^RTN:/i,'');
+                        mapped=config.productMap[externalId];
+                        need(mapped&&guid(mapped.id),'unknown_product_guid');
+                    }
                     lines.push({id:mapped.id,catalogId:config.catalogId,name:mapped.name,quantity,total,discount,type:'Товар'});
                 }
                 // The charged delivery row is part of OPPORTUNITY; this custom field
