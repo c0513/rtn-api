@@ -7,6 +7,11 @@ const normalizeProductName=x=>str(x).normalize('NFKC').toLocaleLowerCase('ru-RU'
 function verifiedProductByName(name, productMap) {
     const target=normalizeProductName(name);
     if(!target)return null;
+    // Confirmed by store owner: legacy Bitrix label 'БЦАА — АРБУЗ' is a typo for BCAA Лесные ягоды.
+    if(target==='бцаа — арбуз'||target==='бцаа - арбуз'){
+        const berries=productMap?.['bcaa-wildberries'];
+        return berries&&guid(berries.id)?berries:null;
+    }
     const matches=Object.values(productMap||{}).filter(item=>normalizeProductName(item.name)===target && guid(item.id));
     return matches.length===1?matches[0]:null;
 }
