@@ -17211,7 +17211,7 @@ function getRtnOrdersExchange() {
         orderFile: ORDER_DATA_FILE,
         config: {
             fetchVerifiedPayments: async () => (await fetchAllYooKassaPayments()).payments,
-            newPaidAfter: String(process.env.ONEC_NEW_PAID_AFTER || '').trim(),
+            newPaidAfter: String(process.env.ONEC_NEW_PAID_AFTER || '2026-10-20T09:35:00Z').trim(),
             productMap: ONEC_PRODUCT_MAP,
             catalogId: ONEC_CATALOG_ID,
             // Production mapping must be verified against the 1C catalog.
