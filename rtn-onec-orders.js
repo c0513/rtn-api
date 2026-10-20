@@ -152,6 +152,18 @@ function createExchange({store, collect, config={}}) {
             return batch;
         },
         async query(session,version) {
+            // Always verify against the payment provider; fail closed on provider errors.
+            const payments = await config.fetchVerifiedPayments();
+            requireValue(Array.isArray(payments),'paid_payment_verification_unavailable');
+            const paidByOrder = new Map();
+            for (const payment of payments) {
+                if(payment.status!=='succeeded'||payment.paid!==true)continue;
+                if(Number(payment.refunded_amount?.value||0)>0)continue;
+                const id=text(payment.metadata?.orderId);
+                if(!id||payment.amount?.currency!=='RUB')continue;
+                const value=cents(payment.amount.value);
+                const amounts=paidByOrder.get(id)||new Set();amounts.add(value);paidByOrder.set(id,amounts);
+            }
             const result=await store.transaction(async state=>{
                 requireValue(state.version===1 && state.reconciliation?.approved===true,'reconciliation_required');
                 if(state.pending)return state.pending;
@@ -167,8 +179,10 @@ function createExchange({store, collect, config={}}) {
                     if(prior&&prior!==id){skipped.push({orderId:id,reason:'public_number_identity_conflict'});continue;}
                     if(Object.hasOwn(state.delivered,id)||decision?.status==='existing'){skipped.push({orderId:id,reason:'already_present'});continue;}
                     const reviewed=decision?.status==='missing' && decision.fingerprint===fingerprint(order);
-                    const newOrder=!decision && state.reconciliation.allowNewAfter && Date.parse(order.createdAt)>Date.parse(state.reconciliation.allowNewAfter);
+                    const cutoff = config.newPaidAfter && Date.parse(config.newPaidAfter);
+                    const newOrder=!decision && ((state.reconciliation.allowNewAfter && Date.parse(order.createdAt)>Date.parse(state.reconciliation.allowNewAfter)) || (Number.isFinite(cutoff) && Date.parse(order.createdAt)>cutoff));
                     if(!reviewed&&!newOrder){skipped.push({orderId:id,reason:'manual_reconciliation_required'});continue;}
+                    if(!paidByOrder.get(id)?.has(order.amount)){skipped.push({orderId:id,reason:'no_verified_succeeded_yookassa_payment_for_exact_amount'});continue;}
                     try{documentXml(order,config);ready.push(order);}catch(e){skipped.push({orderId:id,reason:e.message});}
                 }
                 state.lastReport={at:new Date().toISOString(),candidates:orders.length,exported:ready.length,skipped};
