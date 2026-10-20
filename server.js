@@ -19566,6 +19566,50 @@ app.post(
 );
 
 
+// Read-only diagnostics for the two manually reviewed RTN orders. No state changes.
+app.get('/api/admin/1c/blocked-orders-diagnostic', requireBlogAdmin, async (req, res) => {
+    const ids = ['1791193530114-f5z3mx', '1792297958450-l30tlp'];
+    try {
+        const { createCollector } = require('./rtn-onec-source');
+        const { fingerprint, documentXml } = require('./rtn-onec-orders');
+        const collect = createCollector({
+            bitrixCall,
+            readLocalOrders() {
+                if (!fs.existsSync(ORDER_DATA_FILE)) return [];
+                const parsed = JSON.parse(fs.readFileSync(ORDER_DATA_FILE, 'utf8'));
+                if (!Array.isArray(parsed)) throw new Error('invalid_local_order_store');
+                return parsed;
+            },
+            config: {
+                productMap: ONEC_PRODUCT_MAP,
+                catalogId: ONEC_CATALOG_ID,
+                deliveryId: String(process.env.ONEC_DELIVERY_ITEM_ID || '').trim(),
+                deliveryCatalogId: String(process.env.ONEC_DELIVERY_CATALOG_ID || ONEC_CATALOG_ID).trim(),
+                retailEnabled: ONEC_RETAIL_CUSTOMER_ENABLED,
+                retailId: ONEC_RETAIL_CUSTOMER_ID,
+                fulfillment: { store: RTN_FULFILLMENT_STORE, city: RTN_FULFILLMENT_CITY, address: RTN_FULFILLMENT_ADDRESS }
+            }
+        });
+        const {orders,skipped} = await collect();
+        const results = ids.map(orderId => {
+            const order = orders.find(item => item.orderId === orderId);
+            const reasons = skipped.filter(item => item.orderId === orderId).map(item => item.reason);
+            if (!order) return {orderId, eligible:false, reasons};
+            let xmlValid = true, xmlError = null;
+            try {documentXml(order, {
+                retailEnabled: ONEC_RETAIL_CUSTOMER_ENABLED,
+                retailId: ONEC_RETAIL_CUSTOMER_ID
+            });} catch (err) { xmlValid=false; xmlError=err.message; }
+            return {orderId, eligible:xmlValid, fingerprint:fingerprint(order), publicNumber:order.publicNumber,
+                totalKopecks:order.amount, productNames:order.lines.map(line => line.name), xmlError, reasons};
+        });
+        return res.set('Cache-Control', 'no-store').json({readOnly:true, results});
+    } catch (err) {
+        console.error('1C blocked order diagnostic failed:',err.message);
+        return res.status(503).json({error:'Order diagnostic unavailable'});
+    }
+});
+
 app.get('/api/admin/1c/orders-report', requireBlogAdmin, async (req, res) => {
     try {
         const store = require('./rtn-onec-store').mysqlStore(require('./db').getPool);
