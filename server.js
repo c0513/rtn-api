@@ -16754,16 +16754,9 @@ const ONEC_PRODUCT_MAP = {
     }
 };
 
-const ONEC_BITRIX_PRODUCT_NAME_ALIASES = new Map([
-    [
-        normalizeProductText('БЦАА — АРБУЗ'),
-        'bcaa-wildberries'
-    ],
-    [
-        normalizeProductText('БЦАА - АРБУЗ'),
-        'bcaa-wildberries'
-    ]
-]);
+// No substitute for BCAA watermelon is verified in the 1C catalogue.
+// Keep unmapped flavours blocked instead of exporting a different SKU.
+const ONEC_BITRIX_PRODUCT_NAME_ALIASES = new Map();
 
 function oneCExternalIdFromBitrixProductName(name) {
     const normalized =
