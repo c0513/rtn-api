@@ -19089,7 +19089,18 @@ app.all(
                 return res.status(200).type('application/xml; charset=utf-8').send(oneCEmptyCommerceMl(effectiveCmlVersion));
             }
             try {
-                const batch = await getRtnOrdersExchange().query(session, effectiveCmlVersion);
+                const manualOn = String(process.env.ONEC_TWO_ORDER_BATCH_ENABLED || '').toLowerCase() === 'true';
+                const manualXmlEncoded = String(process.env.ONEC_TWO_ORDER_BATCH_XML_BASE64 || '').trim();
+                const manualXml = manualOn && manualXmlEncoded ? Buffer.from(manualXmlEncoded, 'base64').toString('utf8') : '';
+                const batch = manualOn
+                    ? await getRtnOrdersExchange().queryApprovedManual(session, effectiveCmlVersion, {
+                        xml: manualXml,
+                        orders: [
+                            {orderId:'1791193530114-f5z3mx',publicNumber:'051020261245'},
+                            {orderId:'1792297958450-l30tlp',publicNumber:'181020260732'}
+                        ]
+                    })
+                    : await getRtnOrdersExchange().query(session, effectiveCmlVersion);
                 console.log('1C order query:', JSON.stringify({ count: batch.orderIds.length, pending: Boolean(batch.id) }));
                 return res.status(200).set('Cache-Control', 'no-store').type('application/xml; charset=utf-8').send(batch.xml);
             } catch (error) {
