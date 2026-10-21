@@ -687,7 +687,9 @@ async function fetchAllYooKassaPayments() {
             params.cursor = cursor;
         }
 
-        const response = await axios.get(
+        let response;
+        try {
+            response = await axios.get(
             'https://api.yookassa.ru/v3/payments',
             {
                 auth: {
@@ -700,7 +702,13 @@ async function fetchAllYooKassaPayments() {
                 params,
                 timeout: 20000
             }
-        );
+            );
+        } catch (error) {
+            if (error.response?.status === 401) {
+                throw new Error('YooKassa API: 401 — ключ авторизации отклонён; проверьте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в Render');
+            }
+            throw error;
+        }
 
         const items = Array.isArray(response.data?.items)
             ? response.data.items
