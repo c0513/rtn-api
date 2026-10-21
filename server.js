@@ -19125,7 +19125,12 @@ app.all(
                 const manualOn = String(process.env.ONEC_TWO_ORDER_BATCH_ENABLED || '').toLowerCase() === 'true';
                 const manualXmlEncoded = String(process.env.ONEC_TWO_ORDER_BATCH_XML_BASE64 || '').trim();
                 const manualXml = manualOn && manualXmlEncoded ? Buffer.from(manualXmlEncoded, 'base64').toString('utf8') : '';
-                const batch = manualOn
+                const silinaEncoded = String(process.env.ONEC_SILINA_BATCH_XML_BASE64 || '').trim();
+                const silinaOn = String(process.env.ONEC_SILINA_BATCH_ENABLED || '').toLowerCase() === 'true';
+                const silinaXml = silinaOn && silinaEncoded ? Buffer.from(silinaEncoded, 'base64').toString('utf8') : '';
+                const batch = silinaOn
+                    ? await getRtnOrdersExchange().queryLegacyPaid(session, effectiveCmlVersion, {xml:silinaXml})
+                    : manualOn
                     ? await getRtnOrdersExchange().queryApprovedManual(session, effectiveCmlVersion, {
                         xml: manualXml,
                         orders: [
