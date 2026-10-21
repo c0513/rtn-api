@@ -7512,7 +7512,8 @@ app.post('/api/yookassa/webhook', async (req, res) => {
 
         // Persist the payment proof for 1C only after an API-verified succeeded payment.
         try {
-            await getRtnOrdersExchange().recordVerifiedPayment(payment);
+            const verifiedCheckout = readOrders().find(order => String(order.orderId || '') === String(payment?.metadata?.orderId || '') && Array.isArray(order.items) && order.items.length);
+            await getRtnOrdersExchange().recordVerifiedPayment(payment, verifiedCheckout);
         } catch (proofError) {
             console.error('1C verified payment proof storage error:', proofError.message);
             await notifyOneCExchange('🚨 RTN.PRO → 1С: оплаченный заказ ' + String(payment?.metadata?.orderId || '') + ' не поставлен в очередь 1С. Причина: ' + proofError.message, false);
