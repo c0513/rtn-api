@@ -151,7 +151,7 @@ function createExchange({store, collect, config={}}) {
             session.rtnOrderBatch = batch.id;
             return batch;
         },
-        async recordVerifiedPayment(payment) {
+        async recordVerifiedPayment(payment, checkout) {
             requireValue(payment?.status==='succeeded' && payment?.paid===true,'payment_not_succeeded');
             requireValue(payment?.amount?.currency==='RUB','payment_currency_invalid');
             const id=text(payment.metadata?.orderId);
@@ -159,12 +159,17 @@ function createExchange({store, collect, config={}}) {
             requireValue(id && pid,'payment_identity_missing');
             const amount=cents(payment.amount.value);
             requireValue(amount>0,'payment_amount_invalid');
+            requireValue(checkout && checkout.orderId===id,'verified_checkout_snapshot_missing');
+            const order=fromLocal(checkout,config);
+            requireValue(order.amount===amount,'verified_checkout_amount_mismatch');
             return store.transaction(async state=>{
                 requireValue(state.version===1,'onec_state_not_initialized');
                 state.verifiedSitePayments ||= {};
                 const previous=state.verifiedSitePayments[id];
                 requireValue(!previous || (previous.paymentId===pid && previous.amount===amount),'verified_payment_conflict');
                 state.verifiedSitePayments[id]={paymentId:pid,amount,verifiedAt:new Date().toISOString()};
+                state.verifiedOrders ||= {};
+                state.verifiedOrders[id]=order;
                 return true;
             });
         },
@@ -172,7 +177,9 @@ function createExchange({store, collect, config={}}) {
             const result=await store.transaction(async state=>{
                 requireValue(state.version===1 && state.reconciliation?.approved===true,'reconciliation_required');
                 if(state.pending)return state.pending;
-                const {orders,skipped=[]}=await collect();
+                // Source is the site's durable paid-order ledger, never Bitrix24.
+                const orders=Object.values(state.verifiedOrders||{});
+                const skipped=[];
                 const ready=[];const seen=new Set();const duplicate=new Set();
                 for(const order of orders){if(seen.has(order.orderId))duplicate.add(order.orderId);seen.add(order.orderId);}
                 const publicIds=new Map();
