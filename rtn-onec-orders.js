@@ -151,6 +151,27 @@ function createExchange({store, collect, config={}}) {
             session.rtnOrderBatch = batch.id;
             return batch;
         },
+        async queryLegacyPaid(session, version, payload) {
+            const orderId='1792571141222-z0lumd';
+            const publicNumber='211020261125';
+            requireValue(typeof payload?.xml==='string' && payload.xml.includes('ВерсияСхемы="'+version+'"'),'legacy_xml_version_invalid');
+            requireValue(payload.xml.includes('<Ид>'+orderId+'</Ид>') && payload.xml.includes('<Номер>'+publicNumber+'</Номер>'),'legacy_xml_identity_invalid');
+            requireValue(payload.xml.includes('<Сумма>3601.80</Сумма>'),'legacy_total_invalid');
+            const batch=await store.transaction(async state=>{
+                requireValue(state.version===1 && state.reconciliation?.approved===true,'reconciliation_required');
+                if(state.pending){
+                    requireValue(state.pending.orderIds.length===1 && state.pending.orderIds[0]===orderId,'another_exchange_pending');
+                    return state.pending;
+                }
+                if(Object.hasOwn(state.delivered||{},orderId))return {id:null,xml:commerceMl([],version,config),orderIds:[]};
+                const prior=state.publicNumbers?.[publicNumber];
+                requireValue(!prior || prior===orderId,'legacy_public_number_conflict');
+                state.pending={id:crypto.randomUUID(),xml:payload.xml,orderIds:[orderId],orderRefs:[{orderId,publicNumber}],createdAt:new Date().toISOString()};
+                return state.pending;
+            });
+            session.rtnOrderBatch=batch.id;
+            return batch;
+        },
         async recordVerifiedPayment(payment, checkout) {
             requireValue(payment?.status==='succeeded' && payment?.paid===true,'payment_not_succeeded');
             requireValue(payment?.amount?.currency==='RUB','payment_currency_invalid');
