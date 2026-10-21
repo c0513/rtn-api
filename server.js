@@ -7510,6 +7510,14 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             paidAt: payment?.captured_at || new Date().toISOString()
         });
 
+        // Persist the payment proof for 1C only after an API-verified succeeded payment.
+        try {
+            await getRtnOrdersExchange().recordVerifiedPayment(payment);
+        } catch (proofError) {
+            console.error('1C verified payment proof storage error:', proofError.message);
+            await notifyOneCExchange('🚨 RTN.PRO → 1С: оплаченный заказ ' + String(payment?.metadata?.orderId || '') + ' не поставлен в очередь 1С. Причина: ' + proofError.message, false);
+        }
+
         await touchPaidUserLoyalty(payment);
 
         // SafeRoute подтверждаем только после повторной проверки payment.succeeded
@@ -17233,7 +17241,6 @@ function getRtnOrdersExchange() {
         bitrixCall,
         orderFile: ORDER_DATA_FILE,
         config: {
-            fetchVerifiedPayments: async () => (await fetchAllYooKassaPayments()).payments,
             newPaidAfter: String(process.env.ONEC_NEW_PAID_AFTER || '2026-10-20T09:35:00Z').trim(),
             productMap: ONEC_PRODUCT_MAP,
             catalogId: ONEC_CATALOG_ID,
