@@ -20662,6 +20662,10 @@ app.listen(PORT, () => {
     console.log(
         `RTN API запущен на порту ${PORT}`
     );
+    // Initialize the shared promo table early, before the first customer checkout.
+    getPromo('ZAVARKA10')
+        .then(promo => console.log('RTN promo registry ready:', promo?.active === true && promo.discountPercent === 10 ? 'ZAVARKA10 10%' : 'unexpected state'))
+        .catch(error => console.error('RTN promo registry init error:', error.message));
 
 
     if (
