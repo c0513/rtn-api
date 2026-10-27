@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
+const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { createWarehouseRouter, syncWarehouseStocks } = require('./rtn-warehouse');
 const { createBitrixWarehouseAppRouter } = require('./rtn-bitrix-warehouse-app');
 const {
@@ -2709,6 +2710,41 @@ async function requireBlogAdmin(req, res, next) {
     }
 }
 
+app.get('/api/promos/:code', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const promo = await getPromo(req.params.code);
+        if (!promo?.active) return res.status(404).json({ error: 'Промокод не найден или отключён' });
+        return res.json({ ok: true, code: promo.code, discountPercent: promo.discountPercent, protocol: promo.code });
+    } catch (error) {
+        console.error('Promo lookup failed:', error.message);
+        return res.status(503).json({ error: 'Проверка промокода временно недоступна' });
+    }
+});
+app.get('/api/admin/promos', requireBlogAdmin, async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try { return res.json({ promos: await listPromos() }); }
+    catch (error) { console.error('Promo list failed:', error.message); return res.status(503).json({ error: 'Не удалось получить промокоды' }); }
+});
+app.put('/api/admin/promos/:code', requireBlogAdmin, async (req, res) => {
+    try {
+        const promo = await savePromo(req.params.code, req.body?.percent, req.body?.active !== false);
+        return res.json({ ok: true, promo });
+    } catch (error) {
+        console.error('Promo update failed:', error.message);
+        return res.status(error.status || 503).json({ error: error.status ? error.message : 'Не удалось сохранить промокод' });
+    }
+});
+app.delete('/api/admin/promos/:code', requireBlogAdmin, async (req, res) => {
+    try {
+        const promo = await disablePromo(req.params.code);
+        return res.json({ ok: true, promo });
+    } catch (error) {
+        console.error('Promo disable failed:', error.message);
+        return res.status(error.status || 503).json({ error: error.status ? error.message : 'Не удалось отключить промокод' });
+    }
+});
+
 function normalizeBlogArticle(input, existing = {}) {
     const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
     const slug = clean(input.slug).toLowerCase();
@@ -3478,34 +3514,10 @@ const RTN_PROMO_AMBASSADORS = {
 };
 
 const RTN_KNOWN_PROMO_CODES = [
-    'RTN2026',
-    'RHINO',
-    'BIGGY',
-    'BATR',
-    'DOC',
-    'TOPLIVO10',
-    'LION',
-    'PANTERA',
-    'VEPR',
-    'SJ10',
-    'TRUVOR828',
-    'PANDA'
+    'RTN2026', 'RHINO', 'BIGGY', 'BATR', 'DOC',
+    'TOPLIVO10', 'LION', 'PANTERA', 'VEPR', 'SJ10',
+    'TRUVOR828', 'PANDA', 'MOON10', 'OVS', 'ZAVARKA10'
 ];
-
-const RTN_STATIC_PROMO_DISCOUNTS = {
-    RTN2026: 0.05,
-    RHINO: 0.10,
-    BIGGY: 0.10,
-    BATR: 0.10,
-    DOC: 0.10,
-    TOPLIVO10: 0.10,
-    LION: 0.10,
-    PANTERA: 0.10,
-    VEPR: 0.10,
-    SJ10: 0.10,
-    TRUVOR828: 0.10,
-    PANDA: 0.10
-};
 
 const RTN_GOAL_BUNDLE_IDS =
     new Set([
@@ -3518,6 +3530,7 @@ function calculateAuthoritativeCheckoutPricing({
     delivery,
     promoCode,
     referralDiscountRate = 0,
+    promoDiscountRate = 0,
     rcDiscount = 0
 }) {
     const goodsSubtotal =
@@ -3541,13 +3554,7 @@ function calculateAuthoritativeCheckoutPricing({
             promoCode
         );
 
-    const staticPromoRate =
-        Number(
-            RTN_STATIC_PROMO_DISCOUNTS[
-                normalizedPromo
-            ] ||
-            0
-        );
+    const staticPromoRate = Number(promoDiscountRate || 0);
 
     const bundleRate =
         (Array.isArray(items) ? items : [])
@@ -14993,12 +15000,13 @@ app.post('/api/create-payment', async (req, res) => {
         }
 
         const referralPromo = normalizePromoCode(promoCode);
+        const promoRecord = referralPromo ? await getPromo(referralPromo) : null;
+        if (promoRecord && !promoRecord.active) {
+            return res.status(400).json({ code: 'PROMO_DISABLED', error: 'Промокод отключён' });
+        }
         let referralTerms = null;
 
-        if (
-            referralPromo &&
-            !RTN_KNOWN_PROMO_CODES.includes(referralPromo)
-        ) {
+        if (referralPromo && !promoRecord) {
             const referrer =
                 await resolveReferralCode(
                     referralPromo
@@ -15135,6 +15143,7 @@ app.post('/api/create-payment', async (req, res) => {
                 delivery,
                 promoCode:
                     referralPromo,
+                promoDiscountRate: Number(promoRecord?.discountPercent || 0) / 100,
                 referralDiscountRate:
                     Number(
                         referralTerms
@@ -15170,7 +15179,8 @@ app.post('/api/create-payment', async (req, res) => {
                     delivery,
                     promoCode:
                         referralPromo,
-                    referralDiscountRate:
+                    promoDiscountRate: Number(promoRecord?.discountPercent || 0) / 100,
+                referralDiscountRate:
                         Number(
                             referralTerms
                                 ?.discountPercent ||
