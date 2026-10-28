@@ -11,7 +11,8 @@ const { createBitrixWarehouseAppRouter } = require('./rtn-bitrix-warehouse-app')
 const {
     awardReferralCoinsForPayment,
     resolveReferralCode,
-    getReferralCheckoutTerms
+    getReferralCheckoutTerms,
+    getAccountBitrixProfile
 } = require('./rtn-bitrix-account');
 const {
     touchUserPurchaseActivity
@@ -2721,12 +2722,31 @@ app.get('/api/promos/:code', async (req, res) => {
         return res.status(503).json({ error: 'Проверка промокода временно недоступна' });
     }
 });
-app.get('/api/admin/promos', requireBlogAdmin, async (_req, res) => {
+// Promo administration requires an authenticated BOSS account, checked against
+// authoritative Bitrix24 membership on every request. Admin blog tokens are not accepted.
+async function requireBossForPromos(req, res, next) {
+    try {
+        const user = await getAuthenticatedUser(req);
+        if (!user) return res.status(401).json({ error: 'Требуется вход в личный кабинет' });
+        const profile = await getAccountBitrixProfile(user);
+        const statuses = (Array.isArray(profile?.memberStatuses) ? profile.memberStatuses : [])
+            .map(value => String(value || '').toUpperCase());
+        if (!statuses.includes('BOSS')) {
+            return res.status(403).json({ error: 'Управление промокодами доступно только BOSS' });
+        }
+        return next();
+    } catch (error) {
+        console.error('BOSS promo authorization unavailable:', error.message);
+        return res.status(503).json({ error: 'Не удалось проверить права BOSS. Повторите позже' });
+    }
+}
+
+app.get('/api/admin/promos', requireBossForPromos, async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try { return res.json({ promos: await listPromos() }); }
     catch (error) { console.error('Promo list failed:', error.message); return res.status(503).json({ error: 'Не удалось получить промокоды' }); }
 });
-app.put('/api/admin/promos/:code', requireBlogAdmin, async (req, res) => {
+app.put('/api/admin/promos/:code', requireBossForPromos, async (req, res) => {
     try {
         const promo = await savePromo(req.params.code, req.body?.percent, req.body?.active !== false);
         return res.json({ ok: true, promo });
@@ -2735,7 +2755,7 @@ app.put('/api/admin/promos/:code', requireBlogAdmin, async (req, res) => {
         return res.status(error.status || 503).json({ error: error.status ? error.message : 'Не удалось сохранить промокод' });
     }
 });
-app.delete('/api/admin/promos/:code', requireBlogAdmin, async (req, res) => {
+app.delete('/api/admin/promos/:code', requireBossForPromos, async (req, res) => {
     try {
         const promo = await disablePromo(req.params.code);
         return res.json({ ok: true, promo });
