@@ -70,7 +70,7 @@
   var source = param(params, 'utm_source').toLowerCase();
   var medium = param(params, 'utm_medium').toLowerCase();
   var yclid = digitId(param(params, 'yclid'));
-  var isYandexAd = !!yclid || (source === 'yandex' && /^(cpc|ppc|paid|cpm)$/.test(medium));
+  var isYandexAd = !!yclid || ((source === 'yandex' || source === 'ya') && /^(cpc|ppc|paid|cpm|search|display)$/.test(medium));
 
   if (isYandexAd) {
     var groupAd = param(params, 'utm_content').split('_');
