@@ -40,7 +40,9 @@ function cleanItems(items) {
     const flavor=String(item?.flavor||'').slice(0,100);
     const quantity=Math.max(1,Math.min(100,Math.floor(Number(item?.quantity)||1)));
     const price=Math.max(0,Math.min(1000000,Number(item?.priceNum)||0));
-    return {id,name,flavor,quantity,price};
+    const candidate=String(item?.imageUrl||item?.image||'').slice(0,280);
+    const image=/^\/images\/[\w\d\- ./()%]+\.(?:png|jpe?g|webp)$/i.test(candidate) ? candidate : '';
+    return {id,name,flavor,quantity,price,image};
   }).filter(item => item.id && item.name && item.price > 0);
 }
 function mailReady() {
@@ -75,24 +77,59 @@ async function markCheckoutByEmail(email) {
   );
 }
 function buildMail({email,items,total,token}) {
-  const cartUrl=SITE_URL+'/?utm_source=email&utm_medium=abandoned_cart&utm_campaign=cart_reminder';
+  const cartUrl=SITE_URL+'/?promo=RTN2026&utm_source=email&utm_medium=abandoned_cart&utm_campaign=cart_reminder';
   const unsubUrl='https://rhino-api-yrfq.onrender.com/api/marketing/unsubscribe?token='+encodeURIComponent(token);
-  const rows=items.map(i=>'<tr><td style="padding:9px;border-bottom:1px solid #333">'+esc(i.name)+(i.flavor?' · '+esc(i.flavor):'')+'</td>'+
-    '<td style="padding:9px;border-bottom:1px solid #333">'+i.quantity+'</td>'+
-    '<td style="padding:9px;border-bottom:1px solid #333">'+(i.price*i.quantity).toLocaleString('ru-RU')+' ₽</td></tr>').join('');
-  const html='<!doctype html><html lang="ru"><head><meta charset="utf-8"></head>'+
-    '<body style="margin:0;background:#101114;color:#fff;font-family:Arial,sans-serif;padding:30px 15px">'+
-    '<div style="max-width:560px;margin:auto"><h1 style="font-size:24px">RHINO TECH NUTRITION</h1>'+
-    '<h2>Товары остались в корзине</h2><p>Вы добавили товары в корзину, но не завершили оформление. Если они всё ещё нужны — возвращайтесь.</p>'+
-    '<table style="border-collapse:collapse;width:100%;font-size:13px">'+rows+'</table>'+
-    '<p style="font-size:19px"><b>Сумма товаров: '+Number(total).toLocaleString('ru-RU')+' ₽</b></p>'+
-    '<p><a href="'+cartUrl+'" style="display:inline-block;background:#19b9e0;padding:14px 22px;color:#041015;font-weight:bold;text-decoration:none">Вернуться к покупкам</a></p>'+
-    '<p style="color:#a7abb6;font-size:12px">RTN.PRO · Вы получили письмо, потому что подписались на рекламные сообщения RTN.PRO.</p>'+
-    '<p><a style="color:#a7abb6;font-size:12px" href="'+unsubUrl+'">Отписаться от рассылки</a></p></div></body></html>';
+  const money=value=>Number(value||0).toLocaleString('ru-RU')+' ₽';
+  const productRows=items.map(i=>{
+    const relative=String(i.image||'');
+    const photo=/^\/images\/[\w\d\- ./()%]+\.(?:png|jpe?g|webp)$/i.test(relative)
+      ? SITE_URL+encodeURI(relative) : '';
+    return '<tr><td style="padding:15px 8px;border-bottom:1px solid #242a35;width:74px">'+
+      (photo?'<img src="'+esc(photo)+'" width="64" height="75" alt="'+esc(i.name)+'" style="display:block;object-fit:contain;max-width:64px;border:0">':'')+
+      '</td><td style="padding:15px 6px;border-bottom:1px solid #242a35;color:#fff">'+
+      '<b style="font-size:14px">'+esc(i.name)+'</b><div style="font-size:12px;color:#8995a5;margin-top:5px">'+esc(i.flavor||'')+' · '+Number(i.quantity||1)+' шт.</div></td>'+
+      '<td align="right" style="white-space:nowrap;padding:15px 8px;border-bottom:1px solid #242a35;font-size:13px;color:#67e8f9">'+money(Number(i.price||0)*Number(i.quantity||1))+'</td></tr>';
+  }).join('');
+  const html='<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>'+
+  '<body style="margin:0;padding:0;background-color:#050505;color:#fff;font-family:Arial,Helvetica,sans-serif">'+
+  '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#050505;padding:28px 12px"><tr><td align="center">'+
+  '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:580px;background:#090b0f;border:1px solid #242a35;border-radius:12px">'+
+  '<tr><td style="padding:28px 30px;border-bottom:1px solid #202735"><div style="font-size:22px;font-weight:900;letter-spacing:2px;color:#fff">RTN<span style="color:#00e5ff">.PRO</span></div>'+
+  '<div style="font-size:10px;letter-spacing:3px;color:#64748b;margin-top:7px">RHINO TECH NUTRITION</div></td></tr>'+
+  '<tr><td style="padding:28px 30px 12px"><div style="font-size:11px;letter-spacing:3px;color:#00dff2;margin-bottom:12px">ЗАРЯД НЕ ЗАКОНЧЕН</div>'+
+  '<h1 style="font-size:30px;line-height:1.14;margin:0 0 15px;font-weight:900">ТВОЯ МОЩЬ<br><span style="color:#00e5ff">ВСЁ ЕЩЁ В КОРЗИНЕ.</span></h1>'+
+  '<p style="color:#c2c7d0;font-size:15px;line-height:1.7;margin:0">Ты добавил товары в корзину, но так и не осмелился оформить заказ. Пора перейти от планов к действию.</p></td></tr>'+
+  '<tr><td style="padding:12px 23px 18px"><table role="presentation" cellspacing="0" cellpadding="0" width="100%">'+productRows+'</table></td></tr>'+
+  '<tr><td style="padding:0 30px 22px"><div style="padding:20px 16px;text-align:center;border:1px dashed #00e5ff;background:#071c22">'+
+  '<div style="font-size:11px;letter-spacing:2px;color:#7aabba">ТВОЙ КОД НА УВЕРЕННОСТЬ</div>'+
+  '<div style="font-size:28px;letter-spacing:3px;font-weight:900;margin-top:9px;color:#fff">RTN2026</div>'+
+  '<div style="margin-top:9px;color:#67e8f9;font-size:16px;font-weight:700">−5% НА ЗАКАЗ</div>'+
+  '</div><p style="text-align:right;color:#b4bdc9;font-size:14px;margin:18px 0 0">Товары: <b style="color:#fff">'+money(total)+'</b></p>'+
+  '<a href="'+esc(cartUrl)+'" style="display:block;margin:22px 0 0;padding:16px 12px;background:#00e5ff;color:#00171c;text-align:center;text-decoration:none;font-size:14px;font-weight:900;letter-spacing:1px">ВЕРНУТЬСЯ ЗА СВОЕЙ МОЩЬЮ</a>'+
+  '<p style="margin:11px 0 0;color:#8995a5;font-size:12px;line-height:1.5">Введи RTN2026 при оформлении. Скидка применится по действующим условиям промокода.</p></td></tr>'+
+  '<tr><td style="padding:20px 30px 28px;border-top:1px solid #202735;color:#778290;font-size:11px;line-height:1.6">'+
+  'RTN.PRO · Это рекламное письмо отправлено с твоего согласия. '+
+  '<a href="'+esc(unsubUrl)+'" style="color:#94a3b8;text-decoration:underline">Отписаться от рассылки</a></td></tr>'+
+  '</table></td></tr></table></body></html>';
   const plain=items.map(i=>'- '+i.name+' '+i.flavor+' ×'+i.quantity).join('\n');
-  return {to:email,subject:'Вы оставили товары в корзине RTN.PRO',text:'Товары ждут вас в RTN.PRO:\n'+plain+'\n\nКорзина: '+cartUrl+'\n\nОтписаться: '+unsubUrl,html,
+  return {to:email,subject:'RTN.PRO — твоя мощь всё ещё в корзине',
+    text:'ТВОЯ МОЩЬ ВСЁ ЕЩЁ В КОРЗИНЕ.\nТы добавил товары в корзину, но так и не осмелился оформить заказ.\n\n'+plain+
+      '\n\nПромокод RTN2026 — скидка 5%.\nВернуться: '+cartUrl+'\n\nОтписаться: '+unsubUrl,
+    html,
     headers:{'List-Unsubscribe':'<'+unsubUrl+'>','List-Unsubscribe-Post':'List-Unsubscribe=One-Click'}};
 }
+async function setMarketingConsentByUserId(userId,source='email_otp_registration') {
+  const id=Number(userId||0);
+  if(!Number.isSafeInteger(id)||id<1)throw Error('Invalid user ID');
+  await ensureTables();
+  await getPool().execute(
+    "INSERT INTO rtn_marketing_consents (user_id,agreed_at,revoked_at,source,consent_version,consent_text) "+
+    "VALUES (?,NOW(),NULL,?,'v2',?) "+
+    "ON DUPLICATE KEY UPDATE agreed_at=NOW(),revoked_at=NULL,source=VALUES(source),consent_version=VALUES(consent_version),consent_text=VALUES(consent_text)",
+    [id,source,CONSENT_TEXT]
+  );
+}
+
 let working=false;
 async function runReminderBatch() {
   if (working || !ENABLED || !mailReady()) return {skipped:true,reason:!ENABLED?'disabled':'smtp_not_configured'};
@@ -223,6 +260,14 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
       return htmlMessage(res,'Вы отписались','Рекламные письма RTN.PRO больше не будут отправляться.');
     }catch(e){console.error('Unsubscribe failed:',e.message);return res.status(503).send('Unsubscribe temporarily unavailable');}
   });
+  // Preview does not send anything or expose real customer data.
+  app.get('/api/admin/marketing/preview',requireAdmin,(_req,res)=>{
+    const sample=buildMail({email:'example@rtn.pro',
+      items:[{id:'whey-pro',name:'WHEY PRO',flavor:'Солёная карамель',
+        image:'/images/Whey/salted caramel.png',price:2990,quantity:1}],total:2990,
+      token:'preview'});
+    res.set('Cache-Control','no-store').type('html').send(sample.html);
+  });
   app.get('/api/admin/abandoned-carts',requireAdmin,async(_req,res)=>{
     try {await ensureTables();const [rows]=await getPool().query(
       "SELECT c.user_id,u.email,c.items_json,c.total,c.updated_at,c.reminder_state,c.last_reminder_at, "+
@@ -245,4 +290,4 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   setInterval(()=>{runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},10*60*1000).unref();
   console.log('RTN abandoned cart marketing:', ENABLED && mailReady() ? 'enabled (ushna.ru HTTPS relay)' : 'disabled (requires consent + mail relay + enabled env)');
 }
-module.exports={installCartMarketingRoutes,markCheckoutByEmail,ensureTables,runReminderBatch};
+module.exports={installCartMarketingRoutes,markCheckoutByEmail,setMarketingConsentByUserId,ensureTables,runReminderBatch};
