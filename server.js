@@ -13351,7 +13351,7 @@ function getPlenoshnayaDirectAttribution(data = {}) {
     const source = validHistory ? supplied : null;
     const currentDirect =
         ['yandex', 'ya'].includes(String(data.utmSource || '').toLowerCase()) &&
-        /^(cpc|ppc|paid|cpm)$/i.test(String(data.utmMedium || '')) ||
+        /^(cpc|ppc|paid|cpm|search|display)$/i.test(String(data.utmMedium || '')) ||
         Boolean(data.yclid);
     if (!source && !currentDirect) return null;
 
