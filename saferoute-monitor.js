@@ -89,10 +89,19 @@ async function runCheck({apiProvider,token,shopId,notify,force=false}) {
     const threshold = detail?.kind==='payment' ? 1 : 2;
     const shouldAlert = !ok && failures >= threshold && (previousAlert !== next || repeat);
     const shouldRecover = ok && previousAlert && previousAlert!=='ok';
+    let alertDelivered = false;
+    let recoveryDelivered = false;
+    const safeNotify = async message => {
+      try { await notify(message); return true; }
+      catch (error) {
+        console.error('SafeRoute Telegram delivery failed:', compactMessage(error?.message));
+        return false;
+      }
+    };
     if (shouldAlert) {
       const diagnosis = next==='payment' ? 'Проблема оплаты/блокировки (по ответу API)' :
         next==='access' ? 'Отказ в доступе к API — возможна блокировка или проблема токена' : 'API не отвечает корректно';
-      await notify(['🚨 RTN.PRO — SAFEROUTE','',
+      alertDelivered = await safeNotify(['🚨 RTN.PRO — SAFEROUTE','',
         diagnosis,
         'HTTP: '+(detail.status||'нет ответа'),
         'Причина: '+detail.raw,
@@ -101,14 +110,14 @@ async function runCheck({apiProvider,token,shopId,notify,force=false}) {
         '',
         'Проверьте счёт, токен и личный кабинет SafeRoute.'].join('\n'));
     } else if (shouldRecover) {
-      await notify(['✅ RTN.PRO — SAFEROUTE ВОССТАНОВЛЕН','API снова отвечает по токену.','Проверка: '+now].join('\n'));
+      recoveryDelivered = await safeNotify(['✅ RTN.PRO — SAFEROUTE ВОССТАНОВЛЕН','API снова отвечает по токену.','Проверка: '+now].join('\n'));
     }
     await db.execute(
       "UPDATE rtn_saferoute_monitor SET status=?, failure_count=?, last_error=?, last_checked=NOW(), "+
       "last_good=CASE WHEN ?='ok' THEN NOW() ELSE last_good END, "+
       "alert_status=CASE WHEN ? THEN ? WHEN ? THEN '' ELSE alert_status END, "+
       "last_alert=CASE WHEN ? OR ? THEN NOW() ELSE last_alert END WHERE monitor_key='shop'",
-      [next,failures,ok?'':detail.raw.slice(0,240),next,shouldAlert,next,shouldRecover,shouldAlert,shouldRecover]
+      [next,failures,ok?'':detail.raw.slice(0,240),next,alertDelivered,next,recoveryDelivered,alertDelivered,recoveryDelivered]
     );
     stateCache={status:next,checkedAt:now,failureCount:failures,lastError:ok?null:detail.raw};
     if(ok && (force || Date.now()-lastBillsAt >= BILL_CHECK_MS)){
@@ -129,9 +138,13 @@ async function runCheck({apiProvider,token,shopId,notify,force=false}) {
       const next=d.kind;
       const alertStatus=String(row?.alert_status||'');
       if(failures>= (next==='payment'?1:2) && alertStatus!==next){
-        await setup.notify('🚨 RTN.PRO — SAFEROUTE\n'+(next==='payment'?'Возможная блокировка оплаты':'Проблема доступа/связи')+
-        '\nHTTP: '+(d.status||'нет ответа')+'\nПричина: '+d.raw+'\nПроверьте SafeRoute.');
-        await db.execute("UPDATE rtn_saferoute_monitor SET alert_status=?,last_alert=NOW() WHERE monitor_key='shop'",[next]);
+        try {
+          await setup.notify('🚨 RTN.PRO — SAFEROUTE\n'+(next==='payment'?'Возможная блокировка оплаты':'Проблема доступа/связи')+
+          '\nHTTP: '+(d.status||'нет ответа')+'\nПричина: '+d.raw+'\nПроверьте SafeRoute.');
+          await db.execute("UPDATE rtn_saferoute_monitor SET alert_status=?,last_alert=NOW() WHERE monitor_key='shop'",[next]);
+        } catch (notifyError) {
+          console.error('SafeRoute Telegram delivery failed:',compactMessage(notifyError?.message));
+        }
       }
       await db.execute("UPDATE rtn_saferoute_monitor SET status=?,failure_count=?,last_error=?,last_checked=NOW() WHERE monitor_key='shop'",
         [next,failures,d.raw.slice(0,240)]);
