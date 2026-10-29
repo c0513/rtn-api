@@ -7,6 +7,7 @@ const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
+const { getReplenishmentPlan } = require('./replenishment-policy');
 const { install: installReplenishmentMarketing, recordPaidPurchase } = require('./replenishment-marketing');
 const { startMonitor: startSafeRouteMonitor, getStatus: getSafeRouteMonitorStatus } = require('./saferoute-monitor');
 const { installSiteSupport } = require('./site-support');
@@ -7915,6 +7916,16 @@ app.get('/api/articles/:slug', (req, res) => {
 
 app.get('/api/admin/articles', requireBlogAdmin, (req, res) => {
     res.json(readBlogArticles().sort((a, b) => String(b.dateModified).localeCompare(String(a.dateModified))));
+});
+
+app.get('/api/admin/marketing/replenishment', requireBlogAdmin, (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const rows = getReplenishmentPlan(readOrders());
+    return res.json({
+        ok:true, sendingEnabled:false, source:'confirmed-local-payments',
+        note:'Даты — оценки по порциям и четырём тренировкам в неделю. Отправка пока выключена.',
+        rows
+    });
 });
 
 app.get('/api/admin/orders', requireBlogAdmin, async (req, res) => {
