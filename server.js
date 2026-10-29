@@ -13467,6 +13467,14 @@ function buildPlenoshnayaContactClickText(data = {}) {
     ].filter(Boolean).join('\n').slice(0, 850);
 }
 
+app.get('/api/plenoshnaya/source.js', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=300');
+    res.type('application/javascript');
+    res.sendFile(
+        require('path').join(__dirname, 'public', 'plenoshnaya-attribution.js')
+    );
+});
+
 // ============================================================
 // ПЛЁНОШНАЯ — СОБЫТИЯ С САЙТА
 // ============================================================
