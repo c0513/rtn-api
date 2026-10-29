@@ -16,7 +16,8 @@ const {
     resolveReferralCode,
     getReferralCheckoutTerms,
     getAccountBitrixProfile,
-    getAccountMemberStatuses
+    getAccountMemberStatuses,
+    getAccountBossAccess
 } = require('./rtn-bitrix-account');
 const {
     touchUserPurchaseActivity
@@ -2720,25 +2721,58 @@ app.get('/api/promos/:code', async (req, res) => {
 });
 // Promo administration requires an authenticated BOSS account, checked against
 // authoritative Bitrix24 membership on every request. Admin blog tokens are not accepted.
+// Only roles previously verified against Bitrix can be cached.
+// A short success cache prevents duplicate CRM calls on the same request;
+// a bounded grace period avoids locking out verified BOSS users during a
+// transient CRM timeout. Explicit non-BOSS responses revoke the cached grant.
+const rtnBossCache = new Map();
+const RTN_BOSS_CACHE_FRESH_MS = 2 * 60 * 1000;
+const RTN_BOSS_CACHE_GRACE_MS = 10 * 60 * 1000;
 async function requireBossForPromos(req, res, next) {
-    // Already verified by /api/admin middleware on this same request.
-    // Avoid checking Bitrix twice for each admin endpoint.
-    if (req.rtnVerifiedBoss === true) return next();
+    if (req.rtnBossAuthorized) return next();
     try {
         const user = await getAuthenticatedUser(req);
         if (!user) return res.status(401).json({ error: 'Требуется вход в личный кабинет' });
         if (!user.email_verified_at) {
             return res.status(403).json({ error: 'Подтвердите email в личном кабинете RTN.PRO' });
         }
-        const statuses = await getAccountMemberStatuses(user);
-        if (!statuses.includes('BOSS')) {
-            return res.status(403).json({ error: 'Доступ к админским данным только для BOSS' });
+        // RTN_ADMIN_EMAIL has historically been the explicitly configured
+        // site administrator. A valid, email-verified user session is required.
+        if (String(user.email || '').trim().toLowerCase() === RTN_ADMIN_EMAIL) {
+            req.rtnBossAuthorized = true;
+            return next();
         }
-        req.rtnVerifiedBoss = true;
-        return next();
+
+        const cacheKey = String(user.id) + ':' + String(user.bitrix_contact_id || '');
+        const now = Date.now();
+        const cached = rtnBossCache.get(cacheKey);
+        if (cached?.authorized && now - cached.verifiedAt < RTN_BOSS_CACHE_FRESH_MS) {
+            req.rtnBossAuthorized = true;
+            return next();
+        }
+
+        try {
+            const isBoss = await getAccountBossAccess(user);
+            if (!isBoss) {
+                rtnBossCache.delete(cacheKey);
+                return res.status(403).json({ error: 'Доступ к админским данным только для BOSS' });
+            }
+            // Prevent unbounded growth in a long-lived process.
+            if (rtnBossCache.size > 2000) rtnBossCache.clear();
+            rtnBossCache.set(cacheKey, { authorized: true, verifiedAt: Date.now() });
+            req.rtnBossAuthorized = true;
+            return next();
+        } catch (bitrixError) {
+            if (cached?.authorized && now - cached.verifiedAt < RTN_BOSS_CACHE_GRACE_MS) {
+                console.warn('BOSS authorization using recent verified role due to Bitrix outage:', bitrixError.message);
+                req.rtnBossAuthorized = true;
+                return next();
+            }
+            throw bitrixError;
+        }
     } catch (error) {
-        console.error('BOSS promo authorization unavailable:', error.message);
-        return res.status(503).json({ error: 'Не удалось проверить права BOSS. Повторите позже' });
+        console.error('BOSS admin authorization unavailable:', error.message);
+        return res.status(503).json({ error: 'Bitrix24 временно не отвечает при проверке роли BOSS. Повторите позже' });
     }
 }
 
