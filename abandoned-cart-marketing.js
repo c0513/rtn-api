@@ -110,6 +110,8 @@ async function runReminderBatch() {
   try {
     await ensureTables();
     const db=getPool();
+    // Keep only 30 days of cart snapshots. Consent audit rows are kept separately.
+    await db.query("DELETE FROM rtn_abandoned_carts WHERE updated_at < DATE_SUB(NOW(),INTERVAL 30 DAY)");
     const [rows]=await db.query(
       "SELECT c.user_id,c.items_json,c.total,c.cart_hash,u.email,mc.optout_hash " +
       "FROM rtn_abandoned_carts c JOIN users u ON u.id=c.user_id " +
@@ -183,12 +185,18 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   app.post('/api/marketing/consent',login,async(req,res)=>{
     try {if(typeof req.body?.subscribe!=='boolean')return res.status(400).json({error:'Требуется subscribe: true или false'});
       await ensureTables();const userId=req.marketingUser.id; const subscribe=req.body.subscribe;
-      if(subscribe) await getPool().execute(
-        "INSERT INTO rtn_marketing_consents (user_id,agreed_at,revoked_at,source,consent_version,consent_text) "+
-        "VALUES (?,NOW(),NULL,'cart','v1',?) ON DUPLICATE KEY UPDATE agreed_at=NOW(),revoked_at=NULL,source='cart',consent_version='v1',consent_text=VALUES(consent_text)",
-        [userId,CONSENT_TEXT]
-      );
-      else {await getPool().execute(
+      if(subscribe) {
+        await getPool().execute(
+          "INSERT INTO rtn_marketing_consents (user_id,agreed_at,revoked_at,source,consent_version,consent_text) "+
+          "VALUES (?,NOW(),NULL,'cart','v1',?) ON DUPLICATE KEY UPDATE agreed_at=NOW(),revoked_at=NULL,source='cart',consent_version='v1',consent_text=VALUES(consent_text)",
+          [userId,CONSENT_TEXT]
+        );
+        // New opt-in starts a fresh waiting period for a previously suppressed cart.
+        await getPool().execute(
+          "UPDATE rtn_abandoned_carts SET reminder_state='pending',updated_at=NOW() WHERE user_id=? AND reminder_state='suppressed' AND total>0",
+          [userId]
+        );
+      } else {await getPool().execute(
         "INSERT INTO rtn_marketing_consents(user_id,agreed_at,revoked_at,source,consent_text) "+
         "VALUES (?,NULL,NOW(),'cart',?) ON DUPLICATE KEY UPDATE revoked_at=NOW()",
         [userId,CONSENT_TEXT]
@@ -230,7 +238,15 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
         ...row,items:JSON.parse(row.items_json||'[]'),items_json:undefined}))});
     }catch(e){console.error('Admin marketing cart error:',e.message);res.status(503).json({error:'Не удалось получить корзины'});}
   });
-  setTimeout(()=>{runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},30000).unref();
+  // Periodic data minimization must also run while sending is disabled.
+  async function pruneOldCarts() {
+    try {
+      await ensureTables();
+      await getPool().query("DELETE FROM rtn_abandoned_carts WHERE updated_at < DATE_SUB(NOW(),INTERVAL 30 DAY)");
+    } catch (error) { console.error('RTN cart retention error:',error.message); }
+  }
+  setTimeout(()=>{pruneOldCarts();runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},30000).unref();
+  setInterval(()=>{pruneOldCarts();},24*60*60*1000).unref();
   setInterval(()=>{runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},10*60*1000).unref();
   console.log('RTN abandoned cart marketing:', ENABLED && mailReady() ? 'enabled' : 'disabled (requires consent + SMTP + enabled env)');
 }
