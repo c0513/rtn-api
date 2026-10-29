@@ -4,6 +4,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { getPool: getBossGrantDb } = require('./db');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
@@ -2731,6 +2732,43 @@ app.get('/api/promos/:code', async (req, res) => {
 const rtnBossCache = new Map();
 const RTN_BOSS_CACHE_FRESH_MS = 2 * 60 * 1000;
 const RTN_BOSS_CACHE_GRACE_MS = 10 * 60 * 1000;
+// Only CRM-verified BOSS grants survive transient Bitrix outage, never more than 24h.
+let bossGrantSchemaPromise = null;
+async function ensureBossGrantSchema() {
+    if (!bossGrantSchemaPromise) {
+        bossGrantSchemaPromise = getBossGrantDb().query(
+            'CREATE TABLE IF NOT EXISTS rtn_verified_boss_grants (' +
+            'user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, ' +
+            'email VARCHAR(254) NOT NULL, last_verified_at DATETIME NOT NULL, ' +
+            'INDEX idx_boss_grant_verified (last_verified_at)' +
+            ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        ).catch(e => {bossGrantSchemaPromise=null; throw e;});
+    }
+    await bossGrantSchemaPromise;
+}
+async function persistVerifiedBossGrant(user) {
+    await ensureBossGrantSchema();
+    await getBossGrantDb().execute(
+        'INSERT INTO rtn_verified_boss_grants(user_id,email,last_verified_at) ' +
+        'VALUES(?,?,NOW()) ON DUPLICATE KEY UPDATE email=VALUES(email),last_verified_at=NOW()',
+        [user.id,String(user.email||'').toLowerCase()]
+    );
+}
+async function revokeVerifiedBossGrant(user) {
+    await ensureBossGrantSchema();
+    await getBossGrantDb().execute(
+        'DELETE FROM rtn_verified_boss_grants WHERE user_id=?',[user.id]
+    );
+}
+async function loadVerifiedBossGrant(user) {
+    await ensureBossGrantSchema();
+    const [rows]=await getBossGrantDb().execute(
+        'SELECT user_id FROM rtn_verified_boss_grants WHERE user_id=? AND email=? ' +
+        'AND last_verified_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) LIMIT 1',
+        [user.id,String(user.email||'').toLowerCase()]
+    );
+    return rows.length > 0;
+}
 async function requireBossForPromos(req, res, next) {
     if (req.rtnBossAuthorized) return next();
     try {
@@ -2760,8 +2798,11 @@ async function requireBossForPromos(req, res, next) {
             const isBoss = await getAccountBossAccess(user);
             if (!isBoss) {
                 rtnBossCache.delete(cacheKey);
+                revokeVerifiedBossGrant(user).catch(e => console.error('BOSS grant revoke:',e.message));
                 return res.status(403).json({ error: 'Доступ к админским данным только для BOSS' });
             }
+            // A successful CRM role verification is required to create a stored grant.
+            persistVerifiedBossGrant(user).catch(e => console.error('BOSS grant save:',e.message));
             // Prevent unbounded growth in a long-lived process.
             if (rtnBossCache.size > 2000) rtnBossCache.clear();
             rtnBossCache.set(cacheKey, { authorized: true, verifiedAt: Date.now() });
@@ -2772,6 +2813,17 @@ async function requireBossForPromos(req, res, next) {
                 console.warn('BOSS authorization using recent verified role due to Bitrix outage:', bitrixError.message);
                 req.rtnBossAuthorized = true;
                 return next();
+            }
+            // Verified CRM role from a previous process survives Render restart.
+            // Unknown and explicitly revoked users cannot pass this path.
+            try {
+                if (await loadVerifiedBossGrant(user)) {
+                    req.rtnBossAuthorized = true;
+                    console.warn('BOSS authorization using stored CRM-verified grant during Bitrix outage');
+                    return next();
+                }
+            } catch (grantError) {
+                console.error('BOSS verified grant lookup error:', grantError.message);
             }
             throw bitrixError;
         }
