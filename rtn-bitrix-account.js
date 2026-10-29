@@ -944,6 +944,16 @@ function splitProductName(value) {
 }
 
 
+// Dedicated, read-only permission lookup. Avoid profile-side effects (e.g. creating
+// personal promo codes) when authorizing sensitive admin endpoints.
+async function getAccountMemberStatuses(user) {
+    const contactId = await ensureAccountBitrixContact(user);
+    if (!contactId) return [];
+    const contact = await bitrixCall('crm.contact.get', { id: Number(contactId) });
+    if (!contact) return [];
+    return getContactMemberStatuses(contact);
+}
+
 async function getAccountBitrixProfile(user) {
     const contactId = await ensureAccountBitrixContact(user);
 
@@ -2538,6 +2548,7 @@ module.exports = {
     createAccountContact,
     syncAccountContactFields,
     ensureAccountBitrixContact,
+    getAccountMemberStatuses,
     getAccountBitrixProfile,
     updateAccountBitrixProfile,
     getAccountOrders,
