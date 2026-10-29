@@ -2743,7 +2743,9 @@ async function requireBossForPromos(req, res, next) {
             return next();
         }
 
-        const cacheKey = String(user.id) + ':' + String(user.bitrix_contact_id || '');
+        // Reuse the same authoritative CRM role that powers the account profile.
+        // If the contact link is missing, resolve it by the verified email.
+        const cacheKey = String(user.id) + ':' + String(user.bitrix_contact_id || '') + ':' + String(user.email || '').toLowerCase();
         const now = Date.now();
         const cached = rtnBossCache.get(cacheKey);
         if (cached?.authorized && now - cached.verifiedAt < RTN_BOSS_CACHE_FRESH_MS) {
