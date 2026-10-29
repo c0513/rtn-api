@@ -96,6 +96,17 @@ function photoFor(item) {
      name.includes('КРЕАТИН')?'/images/Creatine/orange.png':'');
   return image ? SITE_URL+image : '';
 }
+async function setMarketingConsentByUserId(userId, source='registration_email_otp') {
+  const id=Number(userId);
+  if(!Number.isSafeInteger(id)||id<=0)throw Error('Invalid marketing consent user ID');
+  await ensureTables();
+  await getPool().execute(
+    "INSERT INTO rtn_marketing_consents (user_id,agreed_at,revoked_at,source,consent_version,consent_text) VALUES (?,NOW(),NULL,?,'v1',?) "+
+    "ON DUPLICATE KEY UPDATE agreed_at=NOW(),revoked_at=NULL,source=VALUES(source),consent_version='v1',consent_text=VALUES(consent_text)",
+    [id,String(source).slice(0,64),CONSENT_TEXT]
+  );
+  return {ok:true};
+}
 function buildMail({email,items,total,token,test=false}) {
   const cartUrl=SITE_URL+'/?utm_source=email&utm_medium=abandoned_cart&utm_campaign=cart_reminder';
   const unsubUrl='https://rhino-api-yrfq.onrender.com/api/marketing/unsubscribe?token='+encodeURIComponent(token);
