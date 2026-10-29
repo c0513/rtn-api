@@ -143,6 +143,11 @@ async function runReminderBatch() {
         if(!permission?.agreed_at || permission.revoked_at){await db.execute(
           "UPDATE rtn_abandoned_carts SET reminder_state='suppressed' WHERE user_id=? AND cart_hash=?",
           [row.user_id,row.cart_hash]);continue;}
+        const [[freshCart]]=await db.execute(
+          "SELECT reminder_state,converted_at FROM rtn_abandoned_carts WHERE user_id=? AND cart_hash=?",
+          [row.user_id,row.cart_hash]
+        );
+        if (freshCart?.reminder_state !== 'sending' || freshCart.converted_at) continue;
         // Random unsubscribe credential is kept hashed at rest. Generate only once.
         let token=crypto.randomBytes(32).toString('hex');
         if(permission.optout_hash){
