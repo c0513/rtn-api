@@ -363,7 +363,7 @@ function publicUser(row) {
         status: row.status,
         rhinoCoins: Number(row.rhino_coin_balance || 0),
         createdAt: row.created_at,
-        isAdmin: normalizeEmail(row.email) === RTN_ADMIN_EMAIL,
+        isAdmin: Boolean(row.email_verified_at && row.email && RTN_ADMIN_EMAIL && normalizeEmail(row.email) === RTN_ADMIN_EMAIL),
         referralCode: referralCodeFromPublicId(row.public_id)
     };
 }
