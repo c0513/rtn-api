@@ -507,7 +507,7 @@ async function ensureFavoritePickupPointField() {
     return favoritePickupFieldReadyPromise;
 }
 
-async function getContactMemberStatuses(contact = {}) {
+async function getContactMemberStatuses(contact = {}, { strict = false } = {}) {
     const raw = contact[RTN_MEMBER_STATUS_FIELD];
     const ids = Array.isArray(raw)
         ? raw.map(String)
@@ -523,7 +523,7 @@ async function getContactMemberStatuses(contact = {}) {
         try {
             const fields = await bitrixCall('crm.contact.userfield.list', {
                 filter: { FIELD_NAME: RTN_MEMBER_STATUS_FIELD }
-            });
+            }, {timeoutMs:12000});
             const field = Array.isArray(fields) ? fields[0] : null;
             const options = new Map();
 
@@ -539,6 +539,7 @@ async function getContactMemberStatuses(contact = {}) {
             };
         } catch (error) {
             console.error('RTN member status lookup error:', error.message);
+            if (strict && !memberStatusCache.options.size && !ids.some(value => /^(?:BOSS|AMBASSADOR|BRONZE|SILVER|GOLD)$/i.test(value))) throw error;
         }
     }
 
@@ -1013,6 +1014,25 @@ async function getAccountBitrixProfile(user) {
         isAmbassador,
         isBoss
     };
+}
+
+// Read-only CRM permission check. Do not create contacts or promo codes while authorizing admin APIs.
+async function getAccountBossAccess(user) {
+    if (!user || user.status !== 'active') return false;
+    let contactId = Number(user.bitrix_contact_id || 0);
+    if (!contactId) {
+        contactId = await findContactId({ email: user.email, phone: user.phone });
+    }
+    if (!contactId) return false;
+
+    const contact = await bitrixCall(
+        'crm.contact.get',
+        { id: Number(contactId) },
+        { timeoutMs: 12000 }
+    );
+    if (!contact) return false;
+    const statuses = await getContactMemberStatuses(contact, { strict: true });
+    return statuses.some(status => String(status || '').trim().toUpperCase() === 'BOSS');
 }
 
 async function updateAccountBitrixProfile(user, profile = {}) {
@@ -2550,6 +2570,7 @@ module.exports = {
     ensureAccountBitrixContact,
     getAccountMemberStatuses,
     getAccountBitrixProfile,
+    getAccountBossAccess,
     updateAccountBitrixProfile,
     getAccountOrders,
     getAccountOrderReference,
