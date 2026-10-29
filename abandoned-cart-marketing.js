@@ -269,13 +269,24 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
       return htmlMessage(res,'Вы отписались','Рекламные письма RTN.PRO больше не будут отправляться.');
     }catch(e){console.error('Unsubscribe failed:',e.message);return res.status(503).send('Unsubscribe temporarily unavailable');}
   });
-  // Preview does not send anything or expose real customer data.
-  app.get('/api/admin/marketing/preview',requireAdmin,(_req,res)=>{
-    const sample=buildMail({email:'example@rtn.pro',
-      items:[{id:'whey-pro',name:'WHEY PRO',flavor:'Солёная карамель',
-        image:'/images/Whey/salted caramel.png',price:2990,quantity:1}],total:2990,
-      token:'preview'});
-    res.set('Cache-Control','no-store').type('html').send(sample.html);
+  // Email preview also uses a selected real cart, never a demo SKU.
+  app.get('/api/admin/marketing/preview',requireAdmin,async(req,res)=>{
+    try {
+      const userId=Number(req.query?.cartUserId);
+      if(!Number.isSafeInteger(userId)||userId<=0)return res.status(400).json({error:'Выберите корзину для предпросмотра'});
+      await ensureTables();
+      const [[cart]]=await getPool().execute(
+        'SELECT items_json,total FROM rtn_abandoned_carts WHERE user_id=? LIMIT 1',[userId]);
+      if(!cart)return res.status(404).json({error:'Корзина не найдена'});
+      const items=cleanItemsForMail(cart.items_json);
+      if(!items.length)return res.status(409).json({error:'В выбранной корзине нет товаров'});
+      const total=items.reduce((sum,item)=>sum+item.price*item.quantity,0);
+      const preview=buildMail({email:'',items,total,token:'preview',test:true});
+      return res.set('Cache-Control','no-store').type('html').send(preview.html);
+    }catch(error){
+      console.error('RTN cart mail preview error:',error.message);
+      return res.status(503).json({error:'Не удалось показать письмо с реальной корзиной'});
+    }
   });
   app.post('/api/admin/marketing/test-email', requireAdmin, async(req,res)=>{
     const recipient=String(req.body?.email||'').trim().toLowerCase();
