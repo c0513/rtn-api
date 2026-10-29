@@ -383,6 +383,18 @@ async function publicUserWithRole(row, existingProfile = null) {
         return { ...result, isAdmin: isBoss || verifiedAdmin, isBoss };
     } catch (error) {
         console.error('RTN BOSS UI role lookup error:', error.message);
+        // Display the BOSS workspace during a transient Bitrix outage only if
+        // the same account was independently verified by CRM within 24 hours.
+        try {
+            const [grants] = await getPool().execute(
+                'SELECT user_id FROM rtn_verified_boss_grants WHERE user_id=? AND email=? ' +
+                'AND last_verified_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) LIMIT 1',
+                [row.id,normalizeEmail(row.email)]
+            );
+            if (grants.length) return {...result,isAdmin:true,isBoss:true};
+        } catch (grantError) {
+            console.error('RTN cached BOSS UI lookup unavailable:', grantError.message);
+        }
         return result;
     }
 }
