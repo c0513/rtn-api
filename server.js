@@ -15,7 +15,8 @@ const {
     awardReferralCoinsForPayment,
     resolveReferralCode,
     getReferralCheckoutTerms,
-    getAccountBitrixProfile
+    getAccountBitrixProfile,
+    getAccountMemberStatuses
 } = require('./rtn-bitrix-account');
 const {
     touchUserPurchaseActivity
@@ -55,20 +56,28 @@ app.use(
     createBitrixWarehouseAppRouter()
 );
 
-// Админка блога может работать по той же HttpOnly-сессии,
-// но доступ получает только RTN_ADMIN_EMAIL.
-app.use(
-    '/api/admin',
-    cors({
-        origin: true,
-        credentials: true
-    })
-);
+// Private routes must only accept credentialed browser requests from RTN.PRO.
+// The public CORS middleware below must NOT override these response headers.
+const privateOrigins = new Set(['https://rtn.pro', 'https://www.rtn.pro']);
+const privateCors = cors({
+    origin(origin, callback) {
+        callback(null, !origin || privateOrigins.has(origin));
+    },
+    credentials: true
+});
+app.use('/api/admin', privateCors);
+app.use('/api/marketing', privateCors);
+const publicCors = cors();
+app.use((req, res, next) => {
+    if (req.path === '/api/admin' || req.path.startsWith('/api/admin/') ||
+        req.path === '/api/marketing' || req.path.startsWith('/api/marketing/')) {
+        return next();
+    }
+    return publicCors(req, res, next);
+});
 
-app.use(cors());
-
-// Emergency access control: ALL sensitive /api/admin endpoints require
-// a currently authenticated, verified BOSS role from Bitrix24.
+// ALL sensitive /api/admin endpoints require an authenticated, email-verified
+// BOSS role from Bitrix24. The browser only controls presentation, not access.
 // This server check is authoritative; frontend link visibility is not security.
 // NOTE: requireBossForPromos is a hoisted function declaration below.
 app.use('/api/admin', requireBossForPromos);
@@ -2715,11 +2724,12 @@ async function requireBossForPromos(req, res, next) {
     try {
         const user = await getAuthenticatedUser(req);
         if (!user) return res.status(401).json({ error: 'Требуется вход в личный кабинет' });
-        const profile = await getAccountBitrixProfile(user);
-        const statuses = (Array.isArray(profile?.memberStatuses) ? profile.memberStatuses : [])
-            .map(value => String(value || '').toUpperCase());
+        if (!user.email_verified_at) {
+            return res.status(403).json({ error: 'Подтвердите email в личном кабинете RTN.PRO' });
+        }
+        const statuses = await getAccountMemberStatuses(user);
         if (!statuses.includes('BOSS')) {
-            return res.status(403).json({ error: 'Управление промокодами доступно только BOSS' });
+            return res.status(403).json({ error: 'Доступ к админским данным только для BOSS' });
         }
         return next();
     } catch (error) {
