@@ -2688,41 +2688,11 @@ async function runPaidCdekBackfill() {
     );
 }
 
+// Legacy administrator entry points now use the same real-time BOSS
+// authorization as the rest of /api/admin. A shared admin token or an
+// email match alone must never grant access to customer information.
 async function requireBlogAdmin(req, res, next) {
-    try {
-        const supplied = String(req.get('authorization') || '')
-            .replace(/^Bearer\s+/i, '')
-            .trim();
-
-        if (BLOG_ADMIN_TOKEN && supplied) {
-            const expected = Buffer.from(BLOG_ADMIN_TOKEN);
-            const actual = Buffer.from(supplied);
-
-            if (
-                actual.length === expected.length &&
-                crypto.timingSafeEqual(actual, expected)
-            ) {
-                return next();
-            }
-        }
-
-        const user = await getAuthenticatedUser(req);
-        const email = String(user?.email || '').trim().toLowerCase();
-
-        if (user && email === RTN_ADMIN_EMAIL) {
-            return next();
-        }
-
-        return res.status(401).json({
-            error: 'Требуется вход администратора'
-        });
-    } catch (error) {
-        console.error('RTN blog admin auth error:', error.message);
-
-        return res.status(500).json({
-            error: 'Не удалось проверить доступ администратора'
-        });
-    }
+    return requireBossForPromos(req, res, next);
 }
 
 // Sensitive customer carts are available only to verified BOSS accounts.
