@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
+const { getMarketingMailStatus, sendMarketingEmail } = require('./rtn-mail');
 const express = require('express');
 const { getPool } = require('./db');
 
@@ -43,18 +43,8 @@ function cleanItems(items) {
     return {id,name,flavor,quantity,price};
   }).filter(item => item.id && item.name && item.price > 0);
 }
-function smtpConfig() {
-  return {
-    host: String(process.env.RTN_MARKETING_SMTP_HOST||'').trim(),
-    port: Number(process.env.RTN_MARKETING_SMTP_PORT||465),
-    user: String(process.env.RTN_MARKETING_SMTP_USER||'').trim(),
-    pass: String(process.env.RTN_MARKETING_SMTP_PASSWORD||''),
-    from: String(process.env.RTN_MARKETING_FROM||'').trim()
-  };
-}
-function mailReady(){
-  const c=smtpConfig();
-  return Boolean(c.host && c.port && c.user && c.pass && c.from);
+function mailReady() {
+  return getMarketingMailStatus().configured;
 }
 async function saveCart(user, rawItems) {
   await ensureTables();
@@ -122,9 +112,8 @@ async function runReminderBatch() {
       "AND mc.agreed_at IS NOT NULL AND mc.revoked_at IS NULL " +
       "ORDER BY c.updated_at ASC LIMIT 10"
     );
-    const c=smtpConfig();
-    const transport=nodemailer.createTransport({host:c.host,port:c.port,secure:c.port===465,
-      auth:{user:c.user,pass:c.pass},connectionTimeout:10000,greetingTimeout:10000,socketTimeout:15000});
+    // Send through the same protected HTTPS-to-SMTP relay already used
+    // for login codes; do not open SMTP ports from the Render web service.
     let sent=0,failed=0;
     for(const row of rows) {
       const [claim]=await db.execute(
@@ -156,7 +145,8 @@ async function runReminderBatch() {
         await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',
           [sha(token),row.user_id]);
         const items=JSON.parse(row.items_json);
-        await transport.sendMail({...buildMail({email:row.email,items,total:row.total,token}),from:c.from});
+        const content=buildMail({email:row.email,items,total:row.total,token});
+        await sendMarketingEmail(content);
         await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='sent' WHERE user_id=? AND cart_hash=?",
           [row.user_id,row.cart_hash]);
         sent++;
@@ -253,6 +243,6 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   setTimeout(()=>{pruneOldCarts();runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},30000).unref();
   setInterval(()=>{pruneOldCarts();},24*60*60*1000).unref();
   setInterval(()=>{runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},10*60*1000).unref();
-  console.log('RTN abandoned cart marketing:', ENABLED && mailReady() ? 'enabled' : 'disabled (requires consent + SMTP + enabled env)');
+  console.log('RTN abandoned cart marketing:', ENABLED && mailReady() ? 'enabled (ushna.ru HTTPS relay)' : 'disabled (requires consent + mail relay + enabled env)');
 }
 module.exports={installCartMarketingRoutes,markCheckoutByEmail,ensureTables,runReminderBatch};
