@@ -2561,6 +2561,35 @@ async function getBossSales(user, requestedPromo = '') {
 
 
 
+// Prevent the BOSS dashboard from multiplying Bitrix24 requests when mounted.
+const bossSalesResults=new Map();
+const bossSalesInflight=new Map();
+async function getBossSalesCached(user,requestedPromo='') {
+    const email=String(user?.email||'').trim().toLowerCase();
+    const key=String(user?.id||'')+':'+email+':'+String(requestedPromo||'').toUpperCase();
+    const now=Date.now();
+    const prior=bossSalesResults.get(key);
+    if(prior&&now-prior.at<5*60*1000)return prior.value;
+    if(bossSalesInflight.has(key))return bossSalesInflight.get(key);
+    const running=getBossSales(user,requestedPromo).then(value=>{
+        // Only a successful CRM check can populate this report cache.
+        if(value?.isBoss){
+            if(bossSalesResults.size>400)bossSalesResults.clear();
+            bossSalesResults.set(key,{value,at:Date.now()});
+        }
+        return value;
+    }).catch(error=>{
+        // A report cached after a successful CRM call can be shown for 30m
+        // when rate limits or timeouts prevent refreshing. Never cache denial.
+        if(prior?.value?.isBoss&&Date.now()-prior.at<30*60*1000){
+            console.warn('BOSS sales showing previously verified report while Bitrix unavailable:',error.message);
+            return {...prior.value,stale:true};
+        }
+        throw error;
+    }).finally(()=>bossSalesInflight.delete(key));
+    bossSalesInflight.set(key,running);
+    return running;
+}
 module.exports = {
     bitrixCall,
     findContactId,
@@ -2581,5 +2610,5 @@ module.exports = {
     awardReferralCoinsForPayment,
     getReferralFriends,
     getAmbassadorSales,
-    getBossSales
+    getBossSales: getBossSalesCached
 };
