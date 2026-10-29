@@ -7,6 +7,8 @@ const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
+const { startMonitor: startSafeRouteMonitor, getStatus: getSafeRouteMonitorStatus } = require('./saferoute-monitor');
+const { installSiteSupport } = require('./site-support');
 const { createWarehouseRouter, syncWarehouseStocks } = require('./rtn-warehouse');
 const { createBitrixWarehouseAppRouter } = require('./rtn-bitrix-warehouse-app');
 const {
@@ -2744,6 +2746,12 @@ async function requireBossForPromos(req, res, next) {
         return res.status(503).json({ error: 'Не удалось проверить права BOSS. Повторите позже' });
     }
 }
+
+app.get('/api/admin/saferoute/monitor', requireBossForPromos, async (_req, res) => {
+    res.set('Cache-Control','no-store');
+    try { return res.json({ok:true,monitor:await getSafeRouteMonitorStatus()}); }
+    catch(error) {console.error('SafeRoute monitor status error:',error.message);return res.status(503).json({error:'Мониторинг недоступен'});}
+});
 
 app.get('/api/admin/promos', requireBossForPromos, async (_req, res) => {
     res.set('Cache-Control', 'no-store');
@@ -9293,6 +9301,12 @@ async function sendTelegramText(text) {
         }
     );
 }
+
+// Public customer support: only an explicit handoff posts to our private operations Telegram chat.
+installSiteSupport(app,{
+    sendMessage: sendTelegramText,
+    chatConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
+});
 
 // 1C exchange alerts use the existing RTN Telegram chat.
 async function notifyOneCExchange(message, silent) {
@@ -20694,6 +20708,16 @@ app.listen(PORT, () => {
     console.log(
         `RTN API запущен на порту ${PORT}`
     );
+    // Read-only SafeRoute health monitor; sends state-change alerts to the SAME
+    // Telegram chat used by 1C and RTN order notifications.
+    startSafeRouteMonitor({
+        apiProvider: getSafeRouteApi,
+        token: SAFEROUTE_TOKEN,
+        shopId: SAFEROUTE_SHOP_ID,
+        botReady: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+        notify: sendTelegramText
+    });
+
     // Initialize the shared promo table early, before the first customer checkout.
     getPromo('ZAVARKA10')
         .then(promo => console.log('RTN promo registry ready:', promo?.active === true && promo.discountPercent === 10 ? 'ZAVARKA10 10%' : 'unexpected state'))
