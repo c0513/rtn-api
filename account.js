@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { getPool, pingDatabase } = require('./db');
 const { getMailStatus, verifyMailConnection, sendVerificationCodeEmail } = require('./rtn-mail');
+const { setMarketingConsentByUserId } = require('./abandoned-cart-marketing');
 const {
     getAccountOrders,
     ensureAccountBitrixContact,
@@ -956,6 +957,18 @@ function createAccountRouter() {
             );
 
             await connection.commit();
+
+            // Only an explicit opt-in, after successful email OTP verification.
+            // A marketing subsystem outage must not interfere with sign-in.
+            if (req.body?.marketingSubscribe === true) {
+                try {
+                    await setMarketingConsentByUserId(
+                        user.id, createdNewUser ? 'registration_email_otp' : 'login_email_otp'
+                    );
+                } catch (marketingError) {
+                    console.error('RTN marketing registration opt-in failed:', marketingError.message);
+                }
+            }
 
             setSessionCookie(res, token);
 
