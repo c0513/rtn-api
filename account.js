@@ -7,6 +7,7 @@ const {
     getAccountOrders,
     ensureAccountBitrixContact,
     getAccountBitrixProfile,
+    getAccountMemberStatuses,
     updateAccountBitrixProfile,
     getAccountOrderReference,
     referralCodeFromPublicId,
@@ -363,9 +364,26 @@ function publicUser(row) {
         status: row.status,
         rhinoCoins: Number(row.rhino_coin_balance || 0),
         createdAt: row.created_at,
-        isAdmin: Boolean(row.email_verified_at && row.email && RTN_ADMIN_EMAIL && normalizeEmail(row.email) === RTN_ADMIN_EMAIL),
+        // UI access must follow verified BOSS role, not an email whitelist.
+        isAdmin: false,
+        isBoss: false,
         referralCode: referralCodeFromPublicId(row.public_id)
     };
+}
+
+async function publicUserWithRole(row, existingProfile = null) {
+    const result = publicUser(row);
+    if (!row?.email_verified_at) return result;
+    try {
+        const statuses = existingProfile
+            ? (Array.isArray(existingProfile.memberStatuses) ? existingProfile.memberStatuses : [])
+            : await getAccountMemberStatuses(row);
+        const isBoss = statuses.some(value => String(value || '').trim().toUpperCase() === 'BOSS');
+        return { ...result, isAdmin: isBoss, isBoss };
+    } catch (error) {
+        console.error('RTN BOSS UI role lookup error:', error.message);
+        return result;
+    }
 }
 
 async function createSession(connection, userId, req) {
@@ -964,7 +982,7 @@ function createAccountRouter() {
             return res.json({
                 ok: true,
                 sessionToken: token,
-                user: publicUser(publicRows[0])
+                user: await publicUserWithRole(publicRows[0])
             });
         } catch (error) {
             if (connection) {
@@ -1184,7 +1202,7 @@ function createAccountRouter() {
             return res.json({
                 ok: true,
                 sessionToken: token,
-                user: publicUser(user)
+                user: await publicUserWithRole(user)
             });
         } catch (error) {
             console.error('RTN account login error:', error.message);
@@ -1423,7 +1441,7 @@ function createAccountRouter() {
 
             return res.json({
                 ok: true,
-                user: publicUser(user),
+                user: await publicUserWithRole(user, bitrixProfile),
                 profile
             });
         } catch (error) {
@@ -1527,7 +1545,7 @@ function createAccountRouter() {
 
             return res.json({
                 ok: true,
-                user: publicUser(updatedUser),
+                user: await publicUserWithRole(updatedUser),
                 profile: normalizedProfile
             });
         } catch (error) {
@@ -1632,7 +1650,7 @@ function createAccountRouter() {
 
             return res.json({
                 ok: true,
-                user: publicUser(user)
+                user: await publicUserWithRole(user)
             });
         } catch (error) {
             console.error('RTN account me error:', error.message);
