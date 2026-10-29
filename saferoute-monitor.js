@@ -11,7 +11,7 @@ function compactMessage(value) {
   return String(value || '').replace(/[\r\n\t]+/g, ' ').slice(0, 190);
 }
 async function ensureTable() {
-  await getPool().query(\`CREATE TABLE IF NOT EXISTS rtn_saferoute_monitor (
+  await getPool().query(`CREATE TABLE IF NOT EXISTS rtn_saferoute_monitor (
     monitor_key VARCHAR(40) NOT NULL PRIMARY KEY,
     status VARCHAR(24) NOT NULL DEFAULT 'unknown',
     failure_count INT UNSIGNED NOT NULL DEFAULT 0,
@@ -21,7 +21,7 @@ async function ensureTable() {
     last_good DATETIME NULL,
     last_alert DATETIME NULL,
     last_bill_alert VARCHAR(128) NOT NULL DEFAULT ''
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\`);
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await getPool().execute("INSERT IGNORE INTO rtn_saferoute_monitor (monitor_key) VALUES ('shop')");
 }
 function decodeFailure(result, error) {
