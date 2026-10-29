@@ -23,7 +23,7 @@ function getMailStatus() {
     };
 }
 
-async function relayRequest(body, timeoutMs = 15000) {
+async function relayRequest(body, timeoutMs = 15000, endpointUrl = null) {
     const config = getRelayConfig();
 
     if (!config.configured) {
@@ -36,7 +36,7 @@ async function relayRequest(body, timeoutMs = 15000) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        const response = await fetch(config.url, {
+        const response = await fetch(endpointUrl || config.url, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${config.apiKey}`,
@@ -148,8 +148,84 @@ async function sendVerificationCodeEmail({
     };
 }
 
+// The existing authenticated ushna.ru relay supports both verification
+// codes and transactional / opt-in marketing emails. We derive the new
+// endpoint from the configured relay URL, so credentials stay on the mail
+// server and never have to be copied into Render.
+function getMarketingMailerUrl() {
+    const { url, configured } = getRelayConfig();
+    if (!configured) return '';
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'https:' ||
+            !/\/send-verification-code\/?$/.test(parsed.pathname)) {
+            return '';
+        }
+        parsed.pathname = parsed.pathname.replace(
+            /\/send-verification-code\/?$/,
+            '/send-email'
+        );
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+}
+
+function getMarketingMailStatus() {
+    return {
+        configured: Boolean(getMarketingMailerUrl()),
+        transport: 'https-relay'
+    };
+}
+
+async function sendMarketingEmail({ to, subject, text, html }) {
+    const endpoint = getMarketingMailerUrl();
+    if (!endpoint) {
+        const error = new Error('Marketing mail relay is not configured');
+        error.code = 'RTN_MARKETING_RELAY_NOT_CONFIGURED';
+        throw error;
+    }
+
+    const address = clean(to).toLowerCase();
+    const title = clean(subject);
+    const htmlBody = String(html || '');
+    const plain = String(text || '');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) ||
+        title.length < 3 || title.length > 160 ||
+        !htmlBody || htmlBody.length > 85000 ||
+        plain.length > 15000) {
+        const error = new Error('Invalid marketing email payload');
+        error.code = 'RTN_MARKETING_INVALID_EMAIL';
+        throw error;
+    }
+
+    const result = await relayRequest({
+        to: address, subject: title, text: plain, html: htmlBody
+    }, 15000, endpoint);
+
+    if (!result.ok) {
+        const error = new Error(
+            result.data?.error ||
+            result.data?.message ||
+            'Marketing mail relay returned HTTP ' + result.status
+        );
+        error.code = 'RTN_MARKETING_RELAY_HTTP_' + result.status;
+        throw error;
+    }
+
+    return {
+        messageId: result.data?.messageId || null,
+        accepted: Array.isArray(result.data?.accepted)
+            ? result.data.accepted : [address],
+        rejected: Array.isArray(result.data?.rejected)
+            ? result.data.rejected : []
+    };
+}
+
 module.exports = {
     getMailStatus,
+    getMarketingMailStatus,
     verifyMailConnection,
-    sendVerificationCodeEmail
+    sendVerificationCodeEmail,
+    sendMarketingEmail
 };
