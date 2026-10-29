@@ -77,23 +77,23 @@ async function markCheckoutByEmail(email) {
   );
 }
 const RTN_PRODUCT_PHOTOS = {
-  'whey-caramel':'/images/Whey/salted%20caramel.png',
-  'whey-lemon':'/images/Whey/lemon%20mousse.png',
-  'whey-raspberry':'/images/Whey/white%20chocolate.png',
-  'mass-choco':'/images/Gainer/chocolate.png',
-  'mass-lemon':'/images/Gainer/lemon%20mousse.png',
-  'mass-caramel':'/images/Gainer/salted%20caramel.png',
-  'bcaa-wildberries':'/images/BCAA/wildberries.png',
-  'creatine-orange':'/images/Creatine/orange.png'
+  'whey-caramel':'/images/Whey/salted%20caramel_whey.jpg',
+  'whey-lemon':'/images/Whey/lemon%20mousse_whey.jpg',
+  'whey-raspberry':'/images/Whey/chocolate%20raspberry_whey.jpg',
+  'mass-choco':'/images/Gainer/chocolate_gainer.jpg',
+  'mass-lemon':'/images/Gainer/lemon%20mousse_gainer.jpg',
+  'mass-caramel':'/images/Gainer/salted%20caramel_gainer.jpg',
+  'bcaa-wildberries':'/images/BCAA/wildberries_BCAA_65x275.jpg',
+  'creatine-orange':'/images/Creatine/orange_creatine_65x275.jpg'
 };
 function photoFor(item) {
   const id=String(item?.id||'').toLowerCase();
   const name=String(item?.name||'').toUpperCase();
   const image=RTN_PRODUCT_PHOTOS[id] ||
-    (name.includes('WHEY')?'/images/Whey/salted%20caramel.png':
-     name.includes('MASS GAINER')?'/images/Gainer/chocolate.png':
-     name.includes('BCAA')?'/images/BCAA/wildberries.png':
-     name.includes('КРЕАТИН')?'/images/Creatine/orange.png':'');
+    (name.includes('WHEY')?'/images/Whey/salted%20caramel_whey.jpg':
+     name.includes('MASS GAINER')?'/images/Gainer/chocolate_gainer.jpg':
+     name.includes('BCAA')?'/images/BCAA/wildberries_BCAA_65x275.jpg':
+     name.includes('КРЕАТИН')?'/images/Creatine/orange_creatine_65x275.jpg':'');
   return image ? SITE_URL+image : '';
 }
 async function setMarketingConsentByUserId(userId, source='registration_email_otp') {
