@@ -7,7 +7,7 @@ const {
     getAccountOrders,
     ensureAccountBitrixContact,
     getAccountBitrixProfile,
-    getAccountMemberStatuses,
+    getAccountBossAccess,
     updateAccountBitrixProfile,
     getAccountOrderReference,
     referralCodeFromPublicId,
@@ -375,11 +375,11 @@ async function publicUserWithRole(row, existingProfile = null) {
     const result = publicUser(row);
     if (!row?.email_verified_at) return result;
     try {
-        const statuses = existingProfile
-            ? (Array.isArray(existingProfile.memberStatuses) ? existingProfile.memberStatuses : [])
-            : await getAccountMemberStatuses(row);
-        const isBoss = statuses.some(value => String(value || '').trim().toUpperCase() === 'BOSS');
-        return { ...result, isAdmin: isBoss, isBoss };
+        const isBoss = existingProfile
+            ? (Array.isArray(existingProfile.memberStatuses) ? existingProfile.memberStatuses : []).some(value => String(value || '').trim().toUpperCase() === 'BOSS')
+            : await getAccountBossAccess(row);
+        const verifiedAdmin = Boolean(row.email_verified_at && RTN_ADMIN_EMAIL && normalizeEmail(row.email) === RTN_ADMIN_EMAIL);
+        return { ...result, isAdmin: isBoss || verifiedAdmin, isBoss };
     } catch (error) {
         console.error('RTN BOSS UI role lookup error:', error.message);
         return result;
