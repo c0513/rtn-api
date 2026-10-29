@@ -7,6 +7,7 @@ const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
+const { install: installReplenishmentMarketing, recordPaidPurchase } = require('./replenishment-marketing');
 const { startMonitor: startSafeRouteMonitor, getStatus: getSafeRouteMonitorStatus } = require('./saferoute-monitor');
 const { installSiteSupport } = require('./site-support');
 const { createWarehouseRouter, syncWarehouseStocks } = require('./rtn-warehouse');
@@ -2707,6 +2708,7 @@ async function requireBlogAdmin(req, res, next) {
 
 // Sensitive customer carts are available only to verified BOSS accounts.
 installCartMarketingRoutes(app, { getAuthenticatedUser, requireAdmin: requireBossForPromos });
+installReplenishmentMarketing(app, requireBossForPromos);
 
 app.get('/api/promos/:code', async (req, res) => {
     res.set('Cache-Control', 'no-store');
@@ -7595,6 +7597,14 @@ app.post('/api/yookassa/webhook', async (req, res) => {
         } catch (proofError) {
             console.error('1C verified payment proof storage error:', proofError.message);
             await notifyOneCExchange('🚨 RTN.PRO → 1С: оплаченный заказ ' + String(payment?.metadata?.orderId || '') + ' не поставлен в очередь 1С. Причина: ' + proofError.message, false);
+        }
+
+        // Queue estimates only after payment.succeeded has been verified against YooKassa.
+        try {
+            const paidOrder = readOrders().find(order => String(order.orderId || '') === String(payment?.metadata?.orderId || '') && Array.isArray(order.items) && order.items.length);
+            if (paidOrder) await recordPaidPurchase(payment, paidOrder);
+        } catch (refillError) {
+            console.error('RTN replenishment queue error:', refillError.message);
         }
 
         await touchPaidUserLoyalty(payment);
