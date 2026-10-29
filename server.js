@@ -2721,6 +2721,9 @@ app.get('/api/promos/:code', async (req, res) => {
 // Promo administration requires an authenticated BOSS account, checked against
 // authoritative Bitrix24 membership on every request. Admin blog tokens are not accepted.
 async function requireBossForPromos(req, res, next) {
+    // Already verified by /api/admin middleware on this same request.
+    // Avoid checking Bitrix twice for each admin endpoint.
+    if (req.rtnVerifiedBoss === true) return next();
     try {
         const user = await getAuthenticatedUser(req);
         if (!user) return res.status(401).json({ error: 'Требуется вход в личный кабинет' });
@@ -2731,6 +2734,7 @@ async function requireBossForPromos(req, res, next) {
         if (!statuses.includes('BOSS')) {
             return res.status(403).json({ error: 'Доступ к админским данным только для BOSS' });
         }
+        req.rtnVerifiedBoss = true;
         return next();
     } catch (error) {
         console.error('BOSS promo authorization unavailable:', error.message);
