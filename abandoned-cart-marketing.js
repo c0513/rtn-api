@@ -40,8 +40,15 @@ function cleanItems(items) {
     const flavor=String(item?.flavor||'').slice(0,100);
     const quantity=Math.max(1,Math.min(100,Math.floor(Number(item?.quantity)||1)));
     const price=Math.max(0,Math.min(1000000,Number(item?.priceNum)||0));
-    const candidate=String(item?.imageUrl||item?.image||'').slice(0,280);
-    const image=/^\/images\/[\w\d\- ./()%]+\.(?:png|jpe?g|webp)$/i.test(candidate) ? candidate : '';
+    // Only use the actual storefront image, hosted on RTN.PRO; never trust external URLs.
+    const candidate=String(item?.imageUrl||item?.image||'').trim().slice(0,400);
+    let image='';
+    try {
+      const url=new URL(candidate,SITE_URL+'/');
+      if (candidate && url.origin===new URL(SITE_URL).origin &&
+          url.pathname.startsWith('/images/') &&
+          /\.(?:png|jpe?g|webp|avif)$/i.test(url.pathname)) image=url.pathname;
+    } catch {}
     return {id,name,flavor,quantity,price,image};
   }).filter(item => item.id && item.name && item.price > 0);
 }
@@ -76,25 +83,19 @@ async function markCheckoutByEmail(email) {
     [normalized]
   );
 }
-const RTN_PRODUCT_PHOTOS = {
-  'whey-caramel':'/images/Whey/salted%20caramel_whey.jpg',
-  'whey-lemon':'/images/Whey/lemon%20mousse_whey.jpg',
-  'whey-raspberry':'/images/Whey/chocolate%20raspberry_whey.jpg',
-  'mass-choco':'/images/Gainer/chocolate_gainer.jpg',
-  'mass-lemon':'/images/Gainer/lemon%20mousse_gainer.jpg',
-  'mass-caramel':'/images/Gainer/salted%20caramel_gainer.jpg',
-  'bcaa-wildberries':'/images/BCAA/wildberries_BCAA_65x275.jpg',
-  'creatine-orange':'/images/Creatine/orange_creatine_65x275.jpg'
-};
+function cleanItemsForMail(raw) {
+  const items=typeof raw==='string'?JSON.parse(raw):raw;
+  if (!Array.isArray(items)) return [];
+  return items.filter(item=>item&&typeof item.name==='string'&&Number(item.quantity)>0&&Number(item.price)>0)
+    .slice(0,40).map(item=>({...item,quantity:Math.max(1,Math.floor(Number(item.quantity))),price:Number(item.price)}));
+}
 function photoFor(item) {
-  const id=String(item?.id||'').toLowerCase();
-  const name=String(item?.name||'').toUpperCase();
-  const image=RTN_PRODUCT_PHOTOS[id] ||
-    (name.includes('WHEY')?'/images/Whey/salted%20caramel_whey.jpg':
-     name.includes('MASS GAINER')?'/images/Gainer/chocolate_gainer.jpg':
-     name.includes('BCAA')?'/images/BCAA/wildberries_BCAA_65x275.jpg':
-     name.includes('КРЕАТИН')?'/images/Creatine/orange_creatine_65x275.jpg':'');
-  return image ? SITE_URL+image : '';
+  // The image URL is from the real SKU in the saved cart, not a placeholder or
+  // product-name guess that could show a different flavor to the customer.
+  const image=String(item?.image||'');
+  if (!image.startsWith('/images/') ||
+      !/\.(?:png|jpe?g|webp|avif)$/i.test(image)) return '';
+  return new URL(image,SITE_URL+'/').toString();
 }
 async function setMarketingConsentByUserId(userId, source='registration_email_otp') {
   const id=Number(userId);
@@ -109,7 +110,7 @@ async function setMarketingConsentByUserId(userId, source='registration_email_ot
 }
 function buildMail({email,items,total,token,test=false}) {
   const cartUrl=SITE_URL+'/?utm_source=email&utm_medium=abandoned_cart&utm_campaign=cart_reminder';
-  const unsubUrl='https://rhino-api-yrfq.onrender.com/api/marketing/unsubscribe?token='+encodeURIComponent(token);
+  const unsubUrl=(process.env.RTN_PUBLIC_API_URL||'https://rhino-api-yrfq.onrender.com').replace(/\/$/,'')+'/api/marketing/unsubscribe?token='+encodeURIComponent(token);
   const rows=items.map(i=>{
     const image=photoFor(i);
     return '<tr><td style="padding:12px 5px;border-bottom:1px solid #293041;width:90px">'+
@@ -276,20 +277,41 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
       token:'preview'});
     res.set('Cache-Control','no-store').type('html').send(sample.html);
   });
-  app.post('/api/admin/marketing/test-email', requireAdmin,async(req,res)=>{
+  app.post('/api/admin/marketing/test-email', requireAdmin, async(req,res)=>{
     const recipient=String(req.body?.email||'').trim().toLowerCase();
     const allowed=String(process.env.RTN_MARKETING_TEST_EMAIL||'mr.cosie@yandex.ru').trim().toLowerCase();
     if(recipient!==allowed)return res.status(403).json({error:'Тестовая отправка разрешена только на подтверждённый адрес владельца проекта'});
     const type=String(req.body?.type||'cart');
     if(type!=='cart'&&type!=='refill')return res.status(400).json({error:'Укажите тип письма cart или refill'});
-    try{
-      const content=type==='cart'?
-        buildMail({email:recipient,items:[{id:'whey-caramel',name:'WHEY PRO',flavor:'СОЛЁНАЯ КАРАМЕЛЬ',quantity:1,price:2990}],total:2990,test:true}):
-        require('./replenishment-marketing').refillMail({product:'WHEY PRO',token:'test'});
+    try {
+      let content,sourceEmail=null,sourceCartId=null,itemCount=0;
+      if(type==='cart') {
+        const userId=Number(req.body?.cartUserId);
+        if(!Number.isSafeInteger(userId)||userId<=0)
+          return res.status(400).json({error:'Выберите реальную сохранённую корзину покупателя. Тестовые товары больше не используются.'});
+        await ensureTables();
+        const [[cart]]=await getPool().execute(
+          'SELECT c.user_id,c.items_json,c.total,c.reminder_state,u.email FROM rtn_abandoned_carts c JOIN users u ON u.id=c.user_id WHERE c.user_id=? LIMIT 1',
+          [userId]
+        );
+        if(!cart)return res.status(404).json({error:'Корзина не найдена. Войдите в аккаунт на сайте и положите товары в корзину.'});
+        const items=cleanItemsForMail(cart.items_json);
+        if(!items.length)return res.status(409).json({error:'Выбранная корзина пустая. Добавьте реальные товары в корзину.'});
+        const total=items.reduce((sum,item)=>sum+item.price*item.quantity,0);
+        content=buildMail({email:recipient,items,total,token:'test',test:true});
+        sourceEmail=cart.email;
+        sourceCartId=userId;
+        itemCount=items.reduce((sum,item)=>sum+item.quantity,0);
+      } else {
+        content=require('./replenishment-marketing').refillMail({product:'WHEY PRO',token:'test'});
+      }
       const result=await sendMarketingEmail({...content,to:recipient});
-      return res.json({ok:true,to:recipient,messageId:result.messageId||null});
-    }catch(e){console.error('RTN marketing test error:',e.message);
-      return res.status(503).json({error:'Почтовый relay не отправил письмо: '+String(e.message).slice(0,180)});}
+      return res.json({ok:true,to:recipient,messageId:result.messageId||null,
+        sourceEmail,cartUserId:sourceCartId,itemCount});
+    } catch(e) {
+      console.error('RTN marketing test error:',e.message);
+      return res.status(503).json({error:'Почтовый relay не отправил письмо: '+String(e.message).slice(0,180)});
+    }
   });
   app.get('/api/admin/abandoned-carts',requireAdmin,async(_req,res)=>{
     try {await ensureTables();const [rows]=await getPool().query(
