@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
+const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
 const { createWarehouseRouter, syncWarehouseStocks } = require('./rtn-warehouse');
 const { createBitrixWarehouseAppRouter } = require('./rtn-bitrix-warehouse-app');
 const {
@@ -2710,6 +2711,8 @@ async function requireBlogAdmin(req, res, next) {
         });
     }
 }
+
+installCartMarketingRoutes(app, { getAuthenticatedUser, requireAdmin: requireBlogAdmin });
 
 app.get('/api/promos/:code', async (req, res) => {
     res.set('Cache-Control', 'no-store');
@@ -15441,6 +15444,14 @@ app.post('/api/create-payment', async (req, res) => {
                 error:
                     'ЮKassa не вернула ссылку на оплату'
             });
+        }
+
+        // Suppress abandoned-cart reminders as soon as a checkout payment is created.
+        // A marketing subsystem failure must never block an order.
+        try {
+            await markCheckoutByEmail(normalizedEmail);
+        } catch (marketingError) {
+            console.error('RTN cart checkout suppression error:', marketingError.message);
         }
 
         res.json({
