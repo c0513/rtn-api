@@ -7549,6 +7549,14 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             paidAt: payment?.captured_at || new Date().toISOString()
         });
 
+        // Convert the cart only after a verified successful payment, not
+        // when the customer merely opens the payment page.
+        try {
+            await markCheckoutByEmail(payment?.metadata?.customerEmail || '');
+        } catch (marketingError) {
+            console.error('RTN paid-cart conversion error:', marketingError.message);
+        }
+
         // Persist the payment proof for 1C only after an API-verified succeeded payment.
         try {
             const verifiedCheckout = readOrders().find(order => String(order.orderId || '') === String(payment?.metadata?.orderId || '') && Array.isArray(order.items) && order.items.length);
@@ -14921,6 +14929,14 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
                 paidAt: payment?.captured_at || new Date().toISOString()
             });
 
+            // Convert the cart only after a verified successful payment, not
+            // when the customer merely opens the payment page.
+            try {
+                await markCheckoutByEmail(payment?.metadata?.customerEmail || '');
+            } catch (marketingError) {
+                console.error('RTN paid-cart conversion error:', marketingError.message);
+            }
+
             await touchPaidUserLoyalty(payment);
 
             // Webhook может не дойти, поэтому success-page fallback обязан
@@ -15550,14 +15566,6 @@ app.post('/api/create-payment', async (req, res) => {
                 error:
                     'ЮKassa не вернула ссылку на оплату'
             });
-        }
-
-        // Suppress abandoned-cart reminders as soon as a checkout payment is created.
-        // A marketing subsystem failure must never block an order.
-        try {
-            await markCheckoutByEmail(normalizedEmail);
-        } catch (marketingError) {
-            console.error('RTN cart checkout suppression error:', marketingError.message);
         }
 
         res.json({
