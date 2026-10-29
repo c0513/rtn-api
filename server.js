@@ -13350,7 +13350,7 @@ function getPlenoshnayaDirectAttribution(data = {}) {
         age > Date.now() - 30 * 86400000;
     const source = validHistory ? supplied : null;
     const currentDirect =
-        String(data.utmSource || '').toLowerCase() === 'yandex' &&
+        ['yandex', 'ya'].includes(String(data.utmSource || '').toLowerCase()) &&
         /^(cpc|ppc|paid|cpm)$/i.test(String(data.utmMedium || '')) ||
         Boolean(data.yclid);
     if (!source && !currentDirect) return null;
@@ -13459,7 +13459,8 @@ function buildPlenoshnayaContactClickText(data = {}) {
         !/^(не передан поисковиком|не указан в метках)$/i.test(
             direct?.keyword || traffic.keyword
         )
-            ? '🔎 Запрос: ' + clean(direct?.keyword || traffic.keyword, 100)
+            ? (direct ? '🔎 Ключ: ' : '🔎 Запрос: ') +
+                clean(direct?.keyword || traffic.keyword, 100)
             : null,
         context ? '📍 ' + context : null,
         session ? '⏱ ' + session : null,
