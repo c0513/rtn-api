@@ -2712,7 +2712,8 @@ async function requireBlogAdmin(req, res, next) {
     }
 }
 
-installCartMarketingRoutes(app, { getAuthenticatedUser, requireAdmin: requireBlogAdmin });
+// Sensitive customer carts are available only to verified BOSS accounts.
+installCartMarketingRoutes(app, { getAuthenticatedUser, requireAdmin: requireBossForPromos });
 
 app.get('/api/promos/:code', async (req, res) => {
     res.set('Cache-Control', 'no-store');
