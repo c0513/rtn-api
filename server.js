@@ -13310,6 +13310,74 @@ app.post('/api/plenoshnaya/identify', async (req, res) => {
 });
 
 
+
+function getPlenoshnayaDirectAttribution(data = {}) {
+    const campaigns = {
+        '715585055': 'Поиск',
+        '715209100': 'Карты',
+        '707458653': 'ЕПК (РСЯ + Карты)',
+        '715588050': 'РСЯ — догоняющая реклама'
+    };
+    const groups = {
+        '5817622983': 'Тонировка',
+        '5817623940': 'Атермальная тонировка',
+        '5817628677': 'Бронирование фар',
+        '5817631879': 'Бронирование лобового',
+        '5817632596': 'Оклейка зон риска',
+        '5817633890': 'Растонировка',
+        '5817680791': 'Бренд (Плёношная)',
+        '5810620816': 'Тонировка',
+        '5817658284': 'Атермальная тонировка',
+        '5817658847': 'Бронирование фар',
+        '5817660853': 'Бронирование лобового',
+        '5817662030': 'Оклейка зон риска',
+        '5817662554': 'Растонировка',
+        '5817666046': 'Посетители сайта без заявки',
+        '5719936201': 'Все услуги'
+    };
+    const id = value => {
+        const clean = String(value || '').trim();
+        return /^\d{1,24}$/.test(clean) ? clean : '';
+    };
+    const supplied = data.sourceData;
+    const age = Number(supplied?.captured_at);
+    const validHistory = supplied &&
+        typeof supplied === 'object' &&
+        !Array.isArray(supplied) &&
+        supplied.traffic === 'Яндекс Директ' &&
+        Number.isFinite(age) &&
+        age <= Date.now() &&
+        age > Date.now() - 30 * 86400000;
+    const source = validHistory ? supplied : null;
+    const currentDirect =
+        String(data.utmSource || '').toLowerCase() === 'yandex' &&
+        /^(cpc|ppc|paid|cpm)$/i.test(String(data.utmMedium || '')) ||
+        Boolean(data.yclid);
+    if (!source && !currentDirect) return null;
+
+    const campaignId = id(source?.campaign_id || data.utmCampaign);
+    const groupId = id(source?.group_id ||
+        String(data.utmContent || '').split('_')[0]);
+    const campaign = campaigns[campaignId] ||
+        (campaignId ? 'кампания №' + campaignId : 'кампания не определена');
+    const service = groups[groupId] || '';
+    const place = ['Поиск', 'РСЯ'].includes(source?.place)
+        ? source.place
+        : ({search: 'Поиск', context: 'РСЯ'})[String(data.sourceType || '')] || '';
+    let keyword = cleanPlenoshnayaLeadValue(
+        source?.keyword || data.utmTerm ||
+        data.searchPhrase || data.adPhrase, 120
+    );
+    if (keyword === '---autotargeting') keyword = 'автотаргетинг';
+    if (/^\{[^}]+\}$/.test(keyword) || keyword === '—') keyword = '';
+    const returned = source?.returning === true;
+    const label = 'Яндекс Директ · ' + campaign +
+        (service ? ' — ' + service : '') +
+        (place && campaign !== place ? ' (' + place + ')' : '') +
+        (returned ? ' · повторный визит' : '');
+    return { label: label.slice(0, 260), keyword };
+}
+
 function buildPlenoshnayaContactClickText(data = {}) {
     const labels = {
         phone_click: '📞 ПЛЁНОШНАЯ · ЗВОНОК',
@@ -13320,6 +13388,7 @@ function buildPlenoshnayaContactClickText(data = {}) {
     const clean = (value, max = 160) =>
         cleanPlenoshnayaLeadValue(value, max);
 
+    const direct = getPlenoshnayaDirectAttribution(data);
     const traffic = getPlenoshnayaVisitTraffic({
         page: data.page,
         firstPage: data.firstPage,
@@ -13384,10 +13453,13 @@ function buildPlenoshnayaContactClickText(data = {}) {
         data.page ? '🔗 ' + clean(data.page, 240)
             : (data.pageTitle ? '📄 ' + clean(data.pageTitle, 100) : null),
         calculation ? '🧮 ' + calculation : null,
-        '🚦 Трафик: ' + traffic.type,
-        traffic.keyword && traffic.keyword !== '—' &&
-        !/^(не передан поисковиком|не указан в метках)$/i.test(traffic.keyword)
-            ? '🔎 Запрос: ' + clean(traffic.keyword, 100)
+        '🚦 Трафик: ' + (direct ? direct.label : traffic.type),
+        (direct?.keyword || traffic.keyword) &&
+        (direct?.keyword || traffic.keyword) !== '—' &&
+        !/^(не передан поисковиком|не указан в метках)$/i.test(
+            direct?.keyword || traffic.keyword
+        )
+            ? '🔎 Запрос: ' + clean(direct?.keyword || traffic.keyword, 100)
             : null,
         context ? '📍 ' + context : null,
         session ? '⏱ ' + session : null,
@@ -13435,6 +13507,12 @@ app.post(
                 });
             }
         }
+
+        const sourceData = (
+            body.plenoshnaya_source &&
+            typeof body.plenoshnaya_source === 'object' &&
+            !Array.isArray(body.plenoshnaya_source)
+        ) ? body.plenoshnaya_source : null;
 
         const eventType =
             cleanPlenoshnayaLeadValue(
@@ -13953,6 +14031,10 @@ app.post(
         }
 
         const text = buildPlenoshnayaContactClickText({
+            sourceData,
+            sourceType: cleanPlenoshnayaLeadValue(body.src, 30),
+            utmCampaign,
+            utmContent,
             eventType,
             phone,
             linkText,
