@@ -67,6 +67,17 @@ app.use(
 
 app.use(cors());
 
+// Emergency access control: ALL sensitive /api/admin endpoints require
+// a currently authenticated, verified BOSS role from Bitrix24.
+// This server check is authoritative; frontend link visibility is not security.
+// NOTE: requireBossForPromos is a hoisted function declaration below.
+app.use('/api/admin', requireBossForPromos);
+app.get('/api/admin/access', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return res.json({ok:true,role:'BOSS'});
+});
+
+
 // ============================================================
 // НАСТРОЙКИ
 // ============================================================
