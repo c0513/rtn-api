@@ -34,6 +34,11 @@ async function ensureTables() {
       "converted_at DATETIME NULL, reminder_state VARCHAR(20) NOT NULL DEFAULT 'pending', " +
       "last_reminder_at DATETIME NULL, INDEX idx_reminder_due (reminder_state,updated_at)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // Keep successful mail delivery separate from the live cart, which checkout clears.
+    await db.query("CREATE TABLE IF NOT EXISTS rtn_cart_mail_attribution (" +
+      "user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, sent_at_ms BIGINT UNSIGNED NOT NULL, " +
+      "paid_after_mail_ms BIGINT UNSIGNED NULL, INDEX idx_sent (sent_at_ms)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   })().catch(error => {initPromise=null; throw error;});
   return initPromise;
 }
@@ -88,6 +93,14 @@ async function markCheckoutByEmail(email) {
     "THEN 'converted_sent' ELSE 'converted' END " +
     "WHERE u.email=? AND c.reminder_state IN ('pending','failed','sending','sent')",
     [normalized]
+  );
+  // This function is only called after an authoritative YooKassa success check.
+  const paidAtMs=Date.now();
+  await db.execute(
+    "UPDATE rtn_cart_mail_attribution a JOIN users u ON u.id=a.user_id " +
+    "SET a.paid_after_mail_ms=COALESCE(a.paid_after_mail_ms,?) " +
+    "WHERE u.email=? AND a.sent_at_ms<=? AND a.sent_at_ms>=? AND a.paid_after_mail_ms IS NULL",
+    [paidAtMs,normalized,paidAtMs,paidAtMs-30*86400000]
   );
 }
 function cleanItemsForMail(raw) {
@@ -173,6 +186,12 @@ async function runReminderBatch() {
         const items=JSON.parse(row.items_json);
         const content=buildMail({email:row.email,items,total:row.total,token});
         await sendMarketingEmail({...content,eventType:'abandoned_cart'});
+        // Write only relay-confirmed sends, independent of subsequent cart changes.
+        try { await db.execute(
+          "INSERT INTO rtn_cart_mail_attribution(user_id,sent_at_ms,paid_after_mail_ms) " +
+          "VALUES(?,?,NULL) ON DUPLICATE KEY UPDATE sent_at_ms=VALUES(sent_at_ms),paid_after_mail_ms=NULL",
+          [row.user_id,Date.now()]
+        ); } catch (auditError) { console.error('RTN cart attribution audit:',auditError.message); }
         await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='sent' WHERE user_id=? AND cart_hash=?",
           [row.user_id,row.cart_hash]);
         sent++;
@@ -315,9 +334,10 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   app.get('/api/admin/abandoned-carts',requireAdmin,async(_req,res)=>{
     try {await ensureTables();const [rows]=await getPool().query(
       "SELECT c.user_id,u.email,c.items_json,c.total,c.updated_at,c.reminder_state,c.last_reminder_at,c.converted_at, "+
-      "IF(mc.agreed_at IS NOT NULL AND mc.revoked_at IS NULL,1,0) AS subscribed "+
+      "a.sent_at_ms,a.paid_after_mail_ms, IF(mc.agreed_at IS NOT NULL AND mc.revoked_at IS NULL,1,0) AS subscribed "+
       "FROM rtn_abandoned_carts c JOIN users u ON u.id=c.user_id "+
-      "LEFT JOIN rtn_marketing_consents mc ON mc.user_id=u.id ORDER BY c.updated_at DESC LIMIT 200");
+      "LEFT JOIN rtn_marketing_consents mc ON mc.user_id=u.id "+
+      "LEFT JOIN rtn_cart_mail_attribution a ON a.user_id=c.user_id ORDER BY c.updated_at DESC LIMIT 200");
       res.set('Cache-Control','no-store').json({ok:true,enabled:ENABLED,smtpConfigured:mailReady(),delayHours:DELAY_HOURS,carts:rows.map(row=>({
         ...row,items:JSON.parse(row.items_json||'[]'),items_json:undefined}))});
     }catch(e){console.error('Admin marketing cart error:',e.message);res.status(503).json({error:'Не удалось получить корзины'});}
