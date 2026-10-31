@@ -18,6 +18,10 @@ const esc = value => String(value || '').replace(/[&<>"']/g, char => ({'&':'&amp
 async function ensureTables() {
   if (!initPromise) initPromise = (async () => {
     const db = getPool();
+    await db.query("CREATE TABLE IF NOT EXISTS rtn_marketing_unsubscribe_tokens (" +
+      "token_hash CHAR(64) NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, " +
+      "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_unsubscribe_user (user_id)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     await db.query("CREATE TABLE IF NOT EXISTS rtn_marketing_consents (" +
       "user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, agreed_at DATETIME NULL, revoked_at DATETIME NULL, " +
       "source VARCHAR(64) NOT NULL DEFAULT 'cart', consent_version VARCHAR(32) NOT NULL DEFAULT 'v1', " +
@@ -161,6 +165,7 @@ async function runReminderBatch() {
         if(permission.optout_hash){
           // Existing token cannot be reversed: rotate to include the new one in this email.
         }
+        await db.execute('INSERT IGNORE INTO rtn_marketing_unsubscribe_tokens(token_hash,user_id) VALUES (?,?)', [sha(token),row.user_id]);
         await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',
           [sha(token),row.user_id]);
         const items=JSON.parse(row.items_json);
@@ -232,9 +237,13 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   app.post('/api/marketing/unsubscribe',express.urlencoded({extended:false}),async(req,res)=>{
     try{const token=String(req.body?.token||req.query?.token||'');
       if(!/^[a-f0-9]{64}$/.test(token))return res.status(400).send('Invalid unsubscribe token');
-      await ensureTables();const db=getPool();const [result]=await db.execute(
-        "UPDATE rtn_marketing_consents SET revoked_at=NOW(),optout_hash=NULL WHERE optout_hash=?",
-        [sha(token)]);
+      await ensureTables();const db=getPool();
+      const digest=sha(token);
+      // Any previous unsubscribe link remains valid after later marketing emails.
+      const [[known]]=await db.execute('SELECT user_id FROM rtn_marketing_unsubscribe_tokens WHERE token_hash=? LIMIT 1',[digest]);
+      const [result]=known
+        ? await db.execute('UPDATE rtn_marketing_consents SET revoked_at=NOW(),optout_hash=NULL WHERE user_id=?',[known.user_id])
+        : await db.execute('UPDATE rtn_marketing_consents SET revoked_at=NOW(),optout_hash=NULL WHERE optout_hash=?',[digest]);
       if(result.affectedRows)await db.execute(
         "UPDATE rtn_abandoned_carts c JOIN rtn_marketing_consents mc ON mc.user_id=c.user_id "+
         "SET c.reminder_state='suppressed' WHERE mc.revoked_at IS NOT NULL AND c.reminder_state='pending'");
