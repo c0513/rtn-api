@@ -1,3 +1,5 @@
+const { recordAccepted } = require('./rtn-email-crm');
+
 function clean(value) {
     return String(value || '').trim();
 }
@@ -141,6 +143,8 @@ async function sendVerificationCodeEmail({
         throw error;
     }
 
+    recordAccepted({to:recipient,subject:'RTN.PRO — код для входа',messageId:result.data?.messageId,eventType:'authorization'}).catch(e=>console.error('RTN CRM mail audit:',e.message));
+
     return {
         messageId: result.data?.messageId || null,
         accepted: [recipient],
@@ -178,7 +182,7 @@ function getMarketingMailStatus() {
     };
 }
 
-async function sendMarketingEmail({ to, subject, text, html }) {
+async function sendMarketingEmail({ to, subject, text, html, eventType = 'other' }) {
     const endpoint = getMarketingMailerUrl();
     if (!endpoint) {
         const error = new Error('Marketing mail relay is not configured');
@@ -212,6 +216,8 @@ async function sendMarketingEmail({ to, subject, text, html }) {
         error.code = 'RTN_MARKETING_RELAY_HTTP_' + result.status;
         throw error;
     }
+
+    recordAccepted({to:address,subject:title,messageId:result.data?.messageId,eventType}).catch(e=>console.error('RTN CRM mail audit:',e.message));
 
     return {
         messageId: result.data?.messageId || null,
