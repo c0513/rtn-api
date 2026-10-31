@@ -1,4 +1,5 @@
 const { recordAccepted } = require('./rtn-email-crm');
+const { reserve: reserveMarketingSend } = require('./rtn-marketing-mail-limits');
 
 function clean(value) {
     return String(value || '').trim();
@@ -201,6 +202,10 @@ async function sendMarketingEmail({ to, subject, text, html, eventType = 'other'
         const error = new Error('Invalid marketing email payload');
         error.code = 'RTN_MARKETING_INVALID_EMAIL';
         throw error;
+    }
+
+    if (eventType==='abandoned_cart' || eventType==='replenishment') {
+        await reserveMarketingSend(address);
     }
 
     const result = await relayRequest({
