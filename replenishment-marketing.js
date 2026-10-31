@@ -1,5 +1,6 @@
 'use strict';
 const crypto=require('crypto');
+const { buildRefillMail } = require('./rtn-smart-mail');
 const {getPool}=require('./db');
 const {sendMarketingEmail,getMarketingMailStatus}=require('./rtn-mail');
 const ENABLED=String(process.env.RTN_REPLENISHMENT_EMAIL_ENABLED||'').toLowerCase()==='true';
@@ -55,7 +56,7 @@ async function recordPaidPurchase(payment,order){
   if(Number.isNaN(paidAt.getTime()))continue;
   const dueAt=new Date(paidAt.getTime()+days*86400000);
   await getPool().execute("INSERT IGNORE INTO rtn_refill_queue (payment_id,user_id,sku,product,quantity,due_at) VALUES (?,?,?,?,?,?)",
-    [String(payment.id).slice(0,100),user.id,r.sku,String(item.name||r.name).slice(0,180),quantity,dueAt]);
+    [String(payment.id).slice(0,100),user.id,r.sku,String([item.name||r.name,item.flavor].filter(Boolean).join(' · ')).slice(0,180),quantity,dueAt]);
   count++;
  }
  return {recorded:count};
@@ -73,12 +74,8 @@ async function saveRules(rules){
  }
  return getRules();
 }
-function refillMail({product,token}){
- const href=SITE+'/catalog?utm_source=email&utm_medium=replenishment';
- const unsub='https://rhino-api-yrfq.onrender.com/api/marketing/unsubscribe?token='+encodeURIComponent(token);
- return {subject:'Твоё топливо скоро закончится · RTN.PRO',
-  text:'Топливо скоро закончится! По нашим расчётам, запас '+product+' подходит к концу. Закажи следующую банку заранее: '+href+'\nОтписаться: '+unsub,
-  html:'<!doctype html><html lang="ru"><meta charset="utf-8"><body style="font:16px Arial;background:#090b12;color:#fff;padding:24px"><div style="max-width:550px;margin:auto"><h1>RTN.PRO</h1><h2>ТОПЛИВО СКОРО ЗАКОНЧИТСЯ</h2><p>Похоже, запас <b>'+esc(product)+'</b> подходит к концу. Это приблизительный расчёт по обычной частоте приёма — проверь остаток сам.</p><a style="display:inline-block;background:#00f0ff;color:#000;padding:15px 24px;text-decoration:none;font-weight:bold" href="'+href+'">ПОПОЛНИТЬ ЗАПАС</a><p style="font-size:12px;color:#aaa">Только если ты подписался на рекламу RTN.PRO. <a style="color:#ccc" href="'+unsub+'">Отписаться</a></p></div></body></html>'};
+function refillMail({product,flavor='',token,test=false}) {
+ return buildRefillMail({product,flavor,token,test});
 }
 let running=false;
 async function sendDue(){
