@@ -347,6 +347,7 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
     try {
       await ensureTables();
       await getPool().query("DELETE FROM rtn_abandoned_carts WHERE updated_at < DATE_SUB(NOW(),INTERVAL 30 DAY)");
+      await getPool().execute("DELETE FROM rtn_cart_mail_attribution WHERE sent_at_ms < ?",[Date.now()-30*86400000]);
     } catch (error) { console.error('RTN cart retention error:',error.message); }
   }
   setTimeout(()=>{pruneOldCarts();runReminderBatch().catch(e=>console.error('RTN cart mailing job:',e.message));},30000).unref();
