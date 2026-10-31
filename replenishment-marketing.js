@@ -23,6 +23,7 @@ const esc=v=>String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function ensure(){
  if(!initialized)initialized=(async()=>{
   const db=getPool();
+  await db.query("CREATE TABLE IF NOT EXISTS rtn_marketing_unsubscribe_tokens (token_hash CHAR(64) NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_unsubscribe_user (user_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   await db.query("CREATE TABLE IF NOT EXISTS rtn_refill_rules (sku VARCHAR(80) PRIMARY KEY, name VARCHAR(150) NOT NULL, servings INT NOT NULL, per_day DECIMAL(6,2) NOT NULL, lead_days INT NOT NULL DEFAULT 3, active TINYINT NOT NULL DEFAULT 0, note VARCHAR(200) NOT NULL DEFAULT '') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   await db.query("CREATE TABLE IF NOT EXISTS rtn_refill_queue (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, payment_id VARCHAR(100) NOT NULL, user_id BIGINT UNSIGNED NOT NULL, sku VARCHAR(80) NOT NULL, product VARCHAR(180) NOT NULL, quantity INT NOT NULL, due_at DATETIME NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'pending', sent_at DATETIME NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uq_payment_product (payment_id,sku), KEY idx_due(status,due_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   for(const d of DEFAULTS)await db.execute("INSERT IGNORE INTO rtn_refill_rules (sku,name,servings,per_day,lead_days,active,note) VALUES (?,?,?,?,?,?,?)",d.map((x,i)=>i===5?(x?1:0):x));
@@ -95,7 +96,9 @@ async function sendDue(){
     const [[consent]]=await db.execute("SELECT agreed_at,revoked_at FROM rtn_marketing_consents WHERE user_id=?",[row.user_id]);
     if(!consent?.agreed_at||consent.revoked_at){await db.execute("UPDATE rtn_refill_queue SET status='suppressed' WHERE id=?",[row.id]);continue;}
     const token=crypto.randomBytes(32).toString('hex');
-    await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',[crypto.createHash('sha256').update(token).digest('hex'),row.user_id]);
+    const tokenHash=crypto.createHash('sha256').update(token).digest('hex');
+    await db.execute('INSERT IGNORE INTO rtn_marketing_unsubscribe_tokens(token_hash,user_id) VALUES (?,?)',[tokenHash,row.user_id]);
+    await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',[tokenHash,row.user_id]);
     await sendMarketingEmail({to:row.email,...refillMail({product:row.product,token})});
     await db.execute("UPDATE rtn_refill_queue SET status='sent',sent_at=NOW() WHERE id=?",[row.id]);sent++;
    }catch(e){console.error('RTN refill send:',e.message);await db.execute("UPDATE rtn_refill_queue SET status='failed' WHERE id=?",[row.id]);}
