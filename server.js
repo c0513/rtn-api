@@ -7665,7 +7665,7 @@ app.post('/api/yookassa/webhook', async (req, res) => {
         // Send exactly once for a YooKassa-verified paid order, independently of the webhook response.
         try {
             const paidOrderForMail=readOrders().find(o=>String(o.orderId||'')===String(payment?.metadata?.orderId||''));
-            await sendPaidOrderConfirmation(payment,paidOrderForMail);
+            sendPaidOrderConfirmation(payment,paidOrderForMail).catch(mailError=>console.error('RTN paid order email:',mailError.code||mailError.message));
         } catch(mailError) {console.error('RTN order payment email:',mailError.code||mailError.message);}
 
         await touchPaidUserLoyalty(payment);
@@ -15052,7 +15052,7 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
             // Fallback when the payment webhook has not reached the server yet.
             try {
                 const paidOrderForMail=readOrders().find(o=>String(o.orderId||'')===String(payment?.metadata?.orderId||''));
-                await sendPaidOrderConfirmation(payment,paidOrderForMail);
+                sendPaidOrderConfirmation(payment,paidOrderForMail).catch(mailError=>console.error('RTN paid order email:',mailError.code||mailError.message));
             } catch(mailError) {console.error('RTN paid order email fallback:',mailError.code||mailError.message);}
 
             await touchPaidUserLoyalty(payment);
