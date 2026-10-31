@@ -99,9 +99,15 @@ async function sendDue(){
     const tokenHash=crypto.createHash('sha256').update(token).digest('hex');
     await db.execute('INSERT IGNORE INTO rtn_marketing_unsubscribe_tokens(token_hash,user_id) VALUES (?,?)',[tokenHash,row.user_id]);
     await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',[tokenHash,row.user_id]);
-    await sendMarketingEmail({to:row.email,...refillMail({product:row.product,token})});
+    await sendMarketingEmail({to:row.email,...refillMail({product:row.product,token}),eventType:'replenishment'});
     await db.execute("UPDATE rtn_refill_queue SET status='sent',sent_at=NOW() WHERE id=?",[row.id]);sent++;
-   }catch(e){console.error('RTN refill send:',e.message);await db.execute("UPDATE rtn_refill_queue SET status='failed' WHERE id=?",[row.id]);}
+   }catch(e){
+    if(e.code==='RTN_MARKETING_FREQUENCY_LIMIT'){
+      await db.execute("UPDATE rtn_refill_queue SET status='suppressed' WHERE id=?",[row.id]);
+      continue;
+    }
+    console.error('RTN refill send:',e.message);await db.execute("UPDATE rtn_refill_queue SET status='failed' WHERE id=?",[row.id]);
+   }
   }
   return {sent};
  }finally{running=false;}

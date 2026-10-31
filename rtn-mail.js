@@ -1,3 +1,6 @@
+const { recordAccepted } = require('./rtn-email-crm');
+const { reserve: reserveMarketingSend } = require('./rtn-marketing-mail-limits');
+
 function clean(value) {
     return String(value || '').trim();
 }
@@ -141,6 +144,8 @@ async function sendVerificationCodeEmail({
         throw error;
     }
 
+    recordAccepted({to:recipient,subject:'RTN.PRO — код для входа',messageId:result.data?.messageId,eventType:'authorization'}).catch(e=>console.error('RTN CRM mail audit:',e.message));
+
     return {
         messageId: result.data?.messageId || null,
         accepted: [recipient],
@@ -178,7 +183,7 @@ function getMarketingMailStatus() {
     };
 }
 
-async function sendMarketingEmail({ to, subject, text, html }) {
+async function sendMarketingEmail({ to, subject, text, html, eventType = 'other' }) {
     const endpoint = getMarketingMailerUrl();
     if (!endpoint) {
         const error = new Error('Marketing mail relay is not configured');
@@ -199,6 +204,10 @@ async function sendMarketingEmail({ to, subject, text, html }) {
         throw error;
     }
 
+    if (eventType==='abandoned_cart' || eventType==='replenishment') {
+        await reserveMarketingSend(address);
+    }
+
     const result = await relayRequest({
         to: address, subject: title, text: plain, html: htmlBody
     }, 15000, endpoint);
@@ -212,6 +221,8 @@ async function sendMarketingEmail({ to, subject, text, html }) {
         error.code = 'RTN_MARKETING_RELAY_HTTP_' + result.status;
         throw error;
     }
+
+    recordAccepted({to:address,subject:title,messageId:result.data?.messageId,eventType}).catch(e=>console.error('RTN CRM mail audit:',e.message));
 
     return {
         messageId: result.data?.messageId || null,

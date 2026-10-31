@@ -170,11 +170,15 @@ async function runReminderBatch() {
           [sha(token),row.user_id]);
         const items=JSON.parse(row.items_json);
         const content=buildMail({email:row.email,items,total:row.total,token});
-        await sendMarketingEmail(content);
+        await sendMarketingEmail({...content,eventType:'abandoned_cart'});
         await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='sent' WHERE user_id=? AND cart_hash=?",
           [row.user_id,row.cart_hash]);
         sent++;
       }catch(error){
+        if(error.code==='RTN_MARKETING_FREQUENCY_LIMIT'){
+          await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='suppressed' WHERE user_id=? AND cart_hash=?",[row.user_id,row.cart_hash]);
+          continue;
+        }
         failed++;
         // No automatic retries: prevents duplicate sends after uncertain SMTP outcomes.
         await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='failed' WHERE user_id=? AND cart_hash=?",
@@ -298,7 +302,7 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
       } else {
         content=require('./replenishment-marketing').refillMail({product:'WHEY PRO',flavor:'ЛИМОННЫЙ МУСС',token:'test',test:true});
       }
-      const result=await sendMarketingEmail({...content,to:recipient});
+      const result=await sendMarketingEmail({...content,to:recipient,eventType:'admin_preview'});
       return res.json({ok:true,to:recipient,messageId:result.messageId||null,
         sourceEmail,cartUserId:sourceCartId,itemCount});
     } catch(e) {

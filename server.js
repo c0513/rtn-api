@@ -6,9 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const { getPool: getBossGrantDb } = require('./db');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
+require('./rtn-email-crm').start();
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
 const { getReplenishmentPlan } = require('./replenishment-policy');
+const { sendPaidOrderConfirmation } = require('./rtn-order-mail');
 const { install: installReplenishmentMarketing, recordPaidPurchase } = require('./replenishment-marketing');
 const { startMonitor: startSafeRouteMonitor, getStatus: getSafeRouteMonitorStatus } = require('./saferoute-monitor');
 const { installSiteSupport } = require('./site-support');
@@ -7660,6 +7662,12 @@ app.post('/api/yookassa/webhook', async (req, res) => {
             console.error('RTN replenishment queue error:', refillError.message);
         }
 
+        // Send exactly once for a YooKassa-verified paid order, independently of the webhook response.
+        try {
+            const paidOrderForMail=readOrders().find(o=>String(o.orderId||'')===String(payment?.metadata?.orderId||''));
+            sendPaidOrderConfirmation(payment,paidOrderForMail).catch(mailError=>console.error('RTN paid order email:',mailError.code||mailError.message));
+        } catch(mailError) {console.error('RTN order payment email:',mailError.code||mailError.message);}
+
         await touchPaidUserLoyalty(payment);
 
         // SafeRoute подтверждаем только после повторной проверки payment.succeeded
@@ -15040,6 +15048,12 @@ app.get('/api/payment-status/:paymentId', async (req, res) => {
             } catch (marketingError) {
                 console.error('RTN paid-cart conversion error:', marketingError.message);
             }
+
+            // Fallback when the payment webhook has not reached the server yet.
+            try {
+                const paidOrderForMail=readOrders().find(o=>String(o.orderId||'')===String(payment?.metadata?.orderId||''));
+                sendPaidOrderConfirmation(payment,paidOrderForMail).catch(mailError=>console.error('RTN paid order email:',mailError.code||mailError.message));
+            } catch(mailError) {console.error('RTN paid order email fallback:',mailError.code||mailError.message);}
 
             await touchPaidUserLoyalty(payment);
 
