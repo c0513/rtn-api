@@ -314,7 +314,7 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   });
   app.get('/api/admin/abandoned-carts',requireAdmin,async(_req,res)=>{
     try {await ensureTables();const [rows]=await getPool().query(
-      "SELECT c.user_id,u.email,c.items_json,c.total,c.updated_at,c.reminder_state,c.last_reminder_at, "+
+      "SELECT c.user_id,u.email,c.items_json,c.total,c.updated_at,c.reminder_state,c.last_reminder_at,c.converted_at, "+
       "IF(mc.agreed_at IS NOT NULL AND mc.revoked_at IS NULL,1,0) AS subscribed "+
       "FROM rtn_abandoned_carts c JOIN users u ON u.id=c.user_id "+
       "LEFT JOIN rtn_marketing_consents mc ON mc.user_id=u.id ORDER BY c.updated_at DESC LIMIT 200");
