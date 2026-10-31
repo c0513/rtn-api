@@ -1,5 +1,6 @@
 'use strict';
 const crypto=require('crypto');
+const { buildRefillMail } = require('./rtn-smart-mail');
 const {getPool}=require('./db');
 const {sendMarketingEmail,getMarketingMailStatus}=require('./rtn-mail');
 const ENABLED=String(process.env.RTN_REPLENISHMENT_EMAIL_ENABLED||'').toLowerCase()==='true';
@@ -22,6 +23,7 @@ const esc=v=>String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function ensure(){
  if(!initialized)initialized=(async()=>{
   const db=getPool();
+  await db.query("CREATE TABLE IF NOT EXISTS rtn_marketing_unsubscribe_tokens (token_hash CHAR(64) NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_unsubscribe_user (user_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   await db.query("CREATE TABLE IF NOT EXISTS rtn_refill_rules (sku VARCHAR(80) PRIMARY KEY, name VARCHAR(150) NOT NULL, servings INT NOT NULL, per_day DECIMAL(6,2) NOT NULL, lead_days INT NOT NULL DEFAULT 3, active TINYINT NOT NULL DEFAULT 0, note VARCHAR(200) NOT NULL DEFAULT '') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   await db.query("CREATE TABLE IF NOT EXISTS rtn_refill_queue (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, payment_id VARCHAR(100) NOT NULL, user_id BIGINT UNSIGNED NOT NULL, sku VARCHAR(80) NOT NULL, product VARCHAR(180) NOT NULL, quantity INT NOT NULL, due_at DATETIME NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'pending', sent_at DATETIME NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uq_payment_product (payment_id,sku), KEY idx_due(status,due_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   for(const d of DEFAULTS)await db.execute("INSERT IGNORE INTO rtn_refill_rules (sku,name,servings,per_day,lead_days,active,note) VALUES (?,?,?,?,?,?,?)",d.map((x,i)=>i===5?(x?1:0):x));
@@ -55,7 +57,7 @@ async function recordPaidPurchase(payment,order){
   if(Number.isNaN(paidAt.getTime()))continue;
   const dueAt=new Date(paidAt.getTime()+days*86400000);
   await getPool().execute("INSERT IGNORE INTO rtn_refill_queue (payment_id,user_id,sku,product,quantity,due_at) VALUES (?,?,?,?,?,?)",
-    [String(payment.id).slice(0,100),user.id,r.sku,String(item.name||r.name).slice(0,180),quantity,dueAt]);
+    [String(payment.id).slice(0,100),user.id,r.sku,String([item.name||r.name,item.flavor].filter(Boolean).join(' · ')).slice(0,180),quantity,dueAt]);
   count++;
  }
  return {recorded:count};
@@ -73,12 +75,8 @@ async function saveRules(rules){
  }
  return getRules();
 }
-function refillMail({product,token}){
- const href=SITE+'/catalog?utm_source=email&utm_medium=replenishment';
- const unsub='https://rhino-api-yrfq.onrender.com/api/marketing/unsubscribe?token='+encodeURIComponent(token);
- return {subject:'Твоё топливо скоро закончится · RTN.PRO',
-  text:'Топливо скоро закончится! По нашим расчётам, запас '+product+' подходит к концу. Закажи следующую банку заранее: '+href+'\nОтписаться: '+unsub,
-  html:'<!doctype html><html lang="ru"><meta charset="utf-8"><body style="font:16px Arial;background:#090b12;color:#fff;padding:24px"><div style="max-width:550px;margin:auto"><h1>RTN.PRO</h1><h2>ТОПЛИВО СКОРО ЗАКОНЧИТСЯ</h2><p>Похоже, запас <b>'+esc(product)+'</b> подходит к концу. Это приблизительный расчёт по обычной частоте приёма — проверь остаток сам.</p><a style="display:inline-block;background:#00f0ff;color:#000;padding:15px 24px;text-decoration:none;font-weight:bold" href="'+href+'">ПОПОЛНИТЬ ЗАПАС</a><p style="font-size:12px;color:#aaa">Только если ты подписался на рекламу RTN.PRO. <a style="color:#ccc" href="'+unsub+'">Отписаться</a></p></div></body></html>'};
+function refillMail({product,flavor='',token,test=false}) {
+ return buildRefillMail({product,flavor,token,test});
 }
 let running=false;
 async function sendDue(){
@@ -98,7 +96,9 @@ async function sendDue(){
     const [[consent]]=await db.execute("SELECT agreed_at,revoked_at FROM rtn_marketing_consents WHERE user_id=?",[row.user_id]);
     if(!consent?.agreed_at||consent.revoked_at){await db.execute("UPDATE rtn_refill_queue SET status='suppressed' WHERE id=?",[row.id]);continue;}
     const token=crypto.randomBytes(32).toString('hex');
-    await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',[crypto.createHash('sha256').update(token).digest('hex'),row.user_id]);
+    const tokenHash=crypto.createHash('sha256').update(token).digest('hex');
+    await db.execute('INSERT IGNORE INTO rtn_marketing_unsubscribe_tokens(token_hash,user_id) VALUES (?,?)',[tokenHash,row.user_id]);
+    await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',[tokenHash,row.user_id]);
     await sendMarketingEmail({to:row.email,...refillMail({product:row.product,token})});
     await db.execute("UPDATE rtn_refill_queue SET status='sent',sent_at=NOW() WHERE id=?",[row.id]);sent++;
    }catch(e){console.error('RTN refill send:',e.message);await db.execute("UPDATE rtn_refill_queue SET status='failed' WHERE id=?",[row.id]);}

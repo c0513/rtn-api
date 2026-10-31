@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { getMarketingMailStatus, sendMarketingEmail } = require('./rtn-mail');
 const express = require('express');
+const { buildCartMail } = require('./rtn-smart-mail');
 const { getPool } = require('./db');
 
 const SITE_URL = (process.env.RTN_MARKETING_SITE_URL || 'https://rtn.pro').replace(/\/$/, '');
@@ -17,6 +18,10 @@ const esc = value => String(value || '').replace(/[&<>"']/g, char => ({'&':'&amp
 async function ensureTables() {
   if (!initPromise) initPromise = (async () => {
     const db = getPool();
+    await db.query("CREATE TABLE IF NOT EXISTS rtn_marketing_unsubscribe_tokens (" +
+      "token_hash CHAR(64) NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, " +
+      "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_unsubscribe_user (user_id)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     await db.query("CREATE TABLE IF NOT EXISTS rtn_marketing_consents (" +
       "user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, agreed_at DATETIME NULL, revoked_at DATETIME NULL, " +
       "source VARCHAR(64) NOT NULL DEFAULT 'cart', consent_version VARCHAR(32) NOT NULL DEFAULT 'v1', " +
@@ -109,36 +114,8 @@ async function setMarketingConsentByUserId(userId, source='registration_email_ot
   return {ok:true};
 }
 function buildMail({email,items,total,token,test=false}) {
-  const cartUrl=SITE_URL+'/?utm_source=email&utm_medium=abandoned_cart&utm_campaign=cart_reminder';
-  const unsubUrl=(process.env.RTN_PUBLIC_API_URL||'https://rhino-api-yrfq.onrender.com').replace(/\/$/,'')+'/api/marketing/unsubscribe?token='+encodeURIComponent(token);
-  const rows=items.map(i=>{
-    const image=photoFor(i);
-    return '<tr><td style="padding:12px 5px;border-bottom:1px solid #293041;width:90px">'+
-       (image?'<img src="'+esc(image)+'" width="80" height="96" alt="" style="object-fit:contain;max-width:80px;display:block">':'')+'</td>'+
-       '<td style="padding:12px 5px;border-bottom:1px solid #293041;color:#fff"><b>'+esc(i.name)+'</b><br><span style="font-size:12px;color:#a7adbe">'+esc(i.flavor||'')+' · '+i.quantity+' шт.</span></td>'+
-       '<td align="right" style="padding:12px 5px;border-bottom:1px solid #293041;white-space:nowrap">'+(i.price*i.quantity).toLocaleString('ru-RU')+' ₽</td></tr>';
-  }).join('');
-  const unsubscribe=test ? '<span style="color:#a7adbe">Это тестовое письмо для проверки оформления.</span>' :
-    '<a style="color:#a7adbe" href="'+unsubUrl+'">Отписаться от рассылки</a>';
-  const html='<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>'+
-    '<body style="background:#080b13;margin:0;padding:24px 12px;color:#fff;font-family:Arial,sans-serif">'+
-    '<div style="max-width:560px;margin:auto;background:#101723;border:1px solid #222f3e;padding:26px 20px">'+
-    '<div style="letter-spacing:4px;color:#00f0ff;font-size:14px;font-weight:900">RHINO TECH NUTRITION</div>'+
-    '<h1 style="font-size:28px;line-height:1.15;text-transform:uppercase;margin:25px 0 12px">ТВОЯ МОЩЬ ВСЁ ЕЩЁ В КОРЗИНЕ</h1>'+
-    '<p style="line-height:1.65;color:#ced5e5">Ты добавил товары, но так и не решился оформить заказ. Самое время вернуться за своей мощью.</p>'+
-    '<table width="100%" style="border-collapse:collapse;font-size:14px;margin:22px 0">'+rows+'</table>'+
-    '<p style="font-size:20px;font-weight:bold">Товары: '+Number(total).toLocaleString('ru-RU')+' ₽</p>'+
-    '<div style="background:#00232b;border:1px solid #00a4c0;padding:16px;text-align:center;margin:20px 0">'+
-    '<div style="font-size:12px;color:#8deaff;text-transform:uppercase;letter-spacing:2px">ТВОЙ ЗАРЯД УВЕРЕННОСТИ</div>'+
-    '<div style="font-size:26px;letter-spacing:4px;font-weight:900;margin:6px 0">RTN2026</div>'+
-    '<div style="font-size:14px;color:#fff">Скидка 5% по промокоду</div></div>'+
-    '<a href="'+cartUrl+'" style="display:block;background:#00f0ff;color:#080d13;text-align:center;padding:16px 15px;font-size:14px;font-weight:900;text-decoration:none">ЗАБРАТЬ СВОЮ МОЩЬ</a>'+
-    '<p style="color:#8e9aae;font-size:11px;line-height:1.6;margin-top:23px">RTN.PRO. '+(test?'Тест оформления письма.':'Вы получили письмо, так как дали отдельное согласие на рекламные сообщения RTN.PRO.')+'</p>'+
-    '<p style="font-size:11px">'+unsubscribe+'</p></div></body></html>';
-  const plain=items.map(i=>'- '+i.name+' '+i.flavor+' ×'+i.quantity).join('\n');
-  return {to:email,subject:(test?'[ТЕСТ] ':'')+'Твоя мощь всё ещё в корзине · RTN.PRO',text:'Твоя мощь всё ещё в корзине!\n'+plain+'\n\nПромокод RTN2026 даёт скидку 5%.\nКорзина: '+cartUrl+(test?'':'\nОтписаться: '+unsubUrl),html};
+  return buildCartMail({email,items,total,token,test});
 }
-
 let working=false;
 async function runReminderBatch() {
   if (working || !ENABLED || !mailReady()) return {skipped:true,reason:!ENABLED?'disabled':'smtp_not_configured'};
@@ -188,6 +165,7 @@ async function runReminderBatch() {
         if(permission.optout_hash){
           // Existing token cannot be reversed: rotate to include the new one in this email.
         }
+        await db.execute('INSERT IGNORE INTO rtn_marketing_unsubscribe_tokens(token_hash,user_id) VALUES (?,?)', [sha(token),row.user_id]);
         await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',
           [sha(token),row.user_id]);
         const items=JSON.parse(row.items_json);
@@ -259,9 +237,13 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
   app.post('/api/marketing/unsubscribe',express.urlencoded({extended:false}),async(req,res)=>{
     try{const token=String(req.body?.token||req.query?.token||'');
       if(!/^[a-f0-9]{64}$/.test(token))return res.status(400).send('Invalid unsubscribe token');
-      await ensureTables();const db=getPool();const [result]=await db.execute(
-        "UPDATE rtn_marketing_consents SET revoked_at=NOW(),optout_hash=NULL WHERE optout_hash=?",
-        [sha(token)]);
+      await ensureTables();const db=getPool();
+      const digest=sha(token);
+      // Any previous unsubscribe link remains valid after later marketing emails.
+      const [[known]]=await db.execute('SELECT user_id FROM rtn_marketing_unsubscribe_tokens WHERE token_hash=? LIMIT 1',[digest]);
+      const [result]=known
+        ? await db.execute('UPDATE rtn_marketing_consents SET revoked_at=NOW(),optout_hash=NULL WHERE user_id=?',[known.user_id])
+        : await db.execute('UPDATE rtn_marketing_consents SET revoked_at=NOW(),optout_hash=NULL WHERE optout_hash=?',[digest]);
       if(result.affectedRows)await db.execute(
         "UPDATE rtn_abandoned_carts c JOIN rtn_marketing_consents mc ON mc.user_id=c.user_id "+
         "SET c.reminder_state='suppressed' WHERE mc.revoked_at IS NOT NULL AND c.reminder_state='pending'");
@@ -314,7 +296,7 @@ function installCartMarketingRoutes(app,{getAuthenticatedUser,requireAdmin}) {
         sourceCartId=userId;
         itemCount=items.reduce((sum,item)=>sum+item.quantity,0);
       } else {
-        content=require('./replenishment-marketing').refillMail({product:'WHEY PRO',token:'test'});
+        content=require('./replenishment-marketing').refillMail({product:'WHEY PRO',flavor:'ЛИМОННЫЙ МУСС',token:'test',test:true});
       }
       const result=await sendMarketingEmail({...content,to:recipient});
       return res.json({ok:true,to:recipient,messageId:result.messageId||null,
