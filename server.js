@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { getPool: getBossGrantDb } = require('./db');
 const { createAccountRouter, getAuthenticatedUser, RTN_ADMIN_EMAIL } = require('./account');
+require('./rtn-email-crm').start();
 const { getPromo, listPromos, savePromo, disablePromo } = require('./promo-codes');
 const { installCartMarketingRoutes, markCheckoutByEmail } = require('./abandoned-cart-marketing');
 const { getReplenishmentPlan } = require('./replenishment-policy');
