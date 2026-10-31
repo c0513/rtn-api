@@ -43,6 +43,18 @@ function normalizeEmail(value) {
 
 
 const EMAIL_CODE_TTL_MINUTES = 10;
+const PASSWORD_SETUP_TTL_MINUTES = 15;
+let passwordProofReady = null;
+async function ensurePasswordProofTable() {
+    if (!passwordProofReady) passwordProofReady = getPool().query(
+        'CREATE TABLE IF NOT EXISTS rtn_password_email_proofs (' +
+        'session_hash BINARY(32) NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, ' +
+        'expires_at DATETIME NOT NULL, INDEX idx_password_proof_expires(expires_at)' +
+        ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+    ).catch(error => { passwordProofReady = null; throw error; });
+    return passwordProofReady;
+}
+
 const EMAIL_CODE_MAX_ATTEMPTS = 5;
 const EMAIL_CODE_RESEND_SECONDS = 60;
 const EMAIL_CODE_WINDOW_MINUTES = 10;
@@ -750,6 +762,7 @@ function createAccountRouter() {
         let connection;
 
         try {
+            await ensurePasswordProofTable();
             const db = getPool();
             connection = await db.getConnection();
             await connection.beginTransaction();
@@ -946,6 +959,13 @@ function createAccountRouter() {
             );
 
             const token = await createSession(connection, user.id, req);
+            // The same verified OTP authorizes one password creation/reset for 15 minutes.
+            await connection.execute(
+                'INSERT INTO rtn_password_email_proofs(session_hash,user_id,expires_at) ' +
+                'VALUES (?,?,DATE_ADD(NOW(),INTERVAL 15 MINUTE)) ' +
+                'ON DUPLICATE KEY UPDATE user_id=VALUES(user_id),expires_at=VALUES(expires_at)',
+                [hashSessionToken(token), user.id]
+            );
 
             const [publicRows] = await connection.execute(
                 `SELECT
@@ -1026,149 +1046,61 @@ function createAccountRouter() {
         }
     });
 
-    router.post('/register', async (req, res) => {
-        const email = normalizeEmail(req.body?.email);
-        const phone = normalizePhone(req.body?.phone);
+    // Never let an unverified email create a usable password account.
+    // New users are created by /email/verify after proof of mailbox ownership.
+    router.post('/register', (_req, res) => res.status(410).json({
+        error: 'Для регистрации подтвердите email одноразовым кодом. Затем можно создать пароль.'
+    }));
+
+    router.post('/password/set', async (req, res) => {
         const password = String(req.body?.password || '');
-        const firstName = cleanText(req.body?.firstName, 100);
-        const lastName = cleanText(req.body?.lastName, 100);
-
-        if (!email && !phone) {
-            return res.status(400).json({
-                error: 'Укажите корректный email или телефон'
-            });
+        if (password.length < 10 || Buffer.byteLength(password, 'utf8') > 72 || password.length > 72) {
+            return res.status(400).json({ error: 'Пароль: не менее 10 символов и не более 72 байт' });
         }
-
-        if (password.length < 8 || password.length > 200) {
-            return res.status(400).json({
-                error: 'Пароль должен содержать от 8 до 200 символов'
-            });
+        const token = getSessionToken(req);
+        if (!token) return res.status(401).json({ error: 'Войдите по коду из письма' });
+        const ip = getClientIp(req);
+        if (!consumeMemoryRateLimit('password-set-ip:'+ip, 12, 60 * 60 * 1000)) {
+            return res.status(429).json({error:'Слишком много попыток. Попробуйте позже'});
         }
-
-        const db = getPool();
-        const connection = await db.getConnection();
-
+        const origin = req.get('origin');
+        if (origin && !['https://rtn.pro','https://www.rtn.pro'].includes(origin)) {
+            return res.status(403).json({error:'Недопустимый источник запроса'});
+        }
+        let connection;
         try {
+            await ensurePasswordProofTable();
+            const user = await getAuthenticatedUser(req);
+            if (!user || !user.email || !user.email_verified_at) {
+                return res.status(401).json({error:'Сначала подтвердите email одноразовым кодом'});
+            }
+            const db = getPool();
+            connection = await db.getConnection();
             await connection.beginTransaction();
-
-            const conditions = [];
-            const values = [];
-
-            if (email) {
-                conditions.push('email = ?');
-                values.push(email);
-            }
-
-            if (phone) {
-                conditions.push('phone = ?');
-                values.push(phone);
-            }
-
-            const [existing] = await connection.execute(
-                `SELECT id FROM users WHERE ${conditions.join(' OR ')} LIMIT 1`,
-                values
+            const tokenHash = hashSessionToken(token);
+            const [proofs] = await connection.execute(
+                'SELECT user_id FROM rtn_password_email_proofs ' +
+                'WHERE session_hash=? AND user_id=? AND expires_at>NOW() LIMIT 1 FOR UPDATE',
+                [tokenHash, user.id]
             );
-
-            if (existing.length) {
+            if (!proofs.length) {
                 await connection.rollback();
-
-                return res.status(409).json({
-                    error: 'Пользователь с таким email или телефоном уже существует'
-                });
+                return res.status(403).json({error:'Для установки пароля подтвердите email новым одноразовым кодом'});
             }
-
-            const publicId = crypto.randomUUID();
             const passwordHash = await bcrypt.hash(password, 12);
-
-            const [result] = await connection.execute(
-                `INSERT INTO users
-                    (public_id, email, phone, password_hash, first_name, last_name)
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [
-                    publicId,
-                    email || null,
-                    phone || null,
-                    passwordHash,
-                    firstName || null,
-                    lastName || null
-                ]
-            );
-
-            const userId = result.insertId;
-
-            await connection.execute(
-                'INSERT INTO rhino_coin_accounts (user_id) VALUES (?)',
-                [userId]
-            );
-
-            const token = await createSession(connection, userId, req);
-
+            await connection.execute('UPDATE users SET password_hash=?,updated_at=NOW() WHERE id=?',
+                [passwordHash, user.id]);
+            await connection.execute('DELETE FROM rtn_password_email_proofs WHERE session_hash=?',[tokenHash]);
+            // If old sessions were stolen, a password reset invalidates them.
+            await connection.execute('DELETE FROM sessions WHERE user_id=? AND token_hash<>?',
+                [user.id, tokenHash]);
             await connection.commit();
-
-            setSessionCookie(res, token);
-
-            const registeredUser = {
-                id: userId,
-                public_id: publicId,
-                email: email || null,
-                phone: phone || null,
-                first_name: firstName || null,
-                last_name: lastName || null
-            };
-
-            ensureAccountBitrixContact(registeredUser).catch(error => {
-                console.error(
-                    'RTN account register Bitrix sync error:',
-                    error.message
-                );
-            });
-
-            sendNewUserTelegram({
-                user: registeredUser,
-                req,
-                source: 'PASSWORD REGISTER'
-            }).catch(error => {
-                console.error(
-                    'RTN new user Telegram error:',
-                    error.message
-                );
-            });
-
-            return res.status(201).json({
-                ok: true,
-                sessionToken: token,
-                user: {
-                    id: publicId,
-                    email: email || null,
-                    phone: phone || null,
-                    firstName,
-                    lastName,
-                    bitrixContactId: null,
-                    emailVerified: false,
-                    phoneVerified: false,
-                    status: 'active',
-                    rhinoCoins: 0
-                }
-            });
-        } catch (error) {
-            try {
-                await connection.rollback();
-            } catch (_) {}
-
-            console.error('RTN account register error:', error.message);
-
-            if (error?.code === 'ER_DUP_ENTRY') {
-                return res.status(409).json({
-                    error: 'Пользователь с таким email или телефоном уже существует'
-                });
-            }
-
-            return res.status(500).json({
-                error: 'Не удалось создать аккаунт'
-            });
-        } finally {
-            connection.release();
-        }
+            return res.json({ok:true,hasPassword:true});
+        } catch(error) {
+            if(connection) await connection.rollback().catch(()=>{});
+            console.error('RTN password setup error:',error.message);
+            return res.status(503).json({error:'Не удалось сохранить пароль. Попробуйте снова'});
+        } finally { connection?.release(); }
     });
 
     router.post('/login', async (req, res) => {
@@ -1176,10 +1108,15 @@ function createAccountRouter() {
         const phone = normalizePhone(req.body?.phone);
         const password = String(req.body?.password || '');
 
-        if ((!email && !phone) || !password) {
-            return res.status(400).json({
-                error: 'Укажите email/телефон и пароль'
-            });
+        if (!email || !password || password.length > 200 || Buffer.byteLength(password,'utf8') > 512) {
+            return res.status(400).json({error:'Укажите корректный email и пароль'});
+        }
+        const ip=getClientIp(req);
+        // Limit both account-targeted guessing and IP-wide brute force.
+        const emailKey=crypto.createHash('sha256').update(email).digest('hex');
+        if (!consumeMemoryRateLimit('password-login-email:'+emailKey, 8, 15*60*1000) ||
+            !consumeMemoryRateLimit('password-login-ip:'+ip, 40, 15*60*1000)) {
+            return res.status(429).json({error:'Слишком много попыток. Повторите вход позже или воспользуйтесь кодом из письма'});
         }
 
         try {
@@ -1190,9 +1127,9 @@ function createAccountRouter() {
                     COALESCE(a.balance, 0) AS rhino_coin_balance
                  FROM users u
                  LEFT JOIN rhino_coin_accounts a ON a.user_id = u.id
-                 WHERE ${email ? 'u.email = ?' : 'u.phone = ?'}
+                 WHERE u.email = ?
                  LIMIT 1`,
-                [email || phone]
+                [email]
             );
 
             const user = rows[0];
@@ -1200,6 +1137,7 @@ function createAccountRouter() {
             if (
                 !user ||
                 user.status !== 'active' ||
+                !user.email_verified_at ||
                 !(await bcrypt.compare(password, user.password_hash))
             ) {
                 return res.status(401).json({
