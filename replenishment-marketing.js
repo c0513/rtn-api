@@ -101,7 +101,13 @@ async function sendDue(){
     await db.execute('UPDATE rtn_marketing_consents SET optout_hash=? WHERE user_id=?',[tokenHash,row.user_id]);
     await sendMarketingEmail({to:row.email,...refillMail({product:row.product,token}),eventType:'replenishment'});
     await db.execute("UPDATE rtn_refill_queue SET status='sent',sent_at=NOW() WHERE id=?",[row.id]);sent++;
-   }catch(e){console.error('RTN refill send:',e.message);await db.execute("UPDATE rtn_refill_queue SET status='failed' WHERE id=?",[row.id]);}
+   }catch(e){
+    if(e.code==='RTN_MARKETING_FREQUENCY_LIMIT'){
+      await db.execute("UPDATE rtn_refill_queue SET status='suppressed' WHERE id=?",[row.id]);
+      continue;
+    }
+    console.error('RTN refill send:',e.message);await db.execute("UPDATE rtn_refill_queue SET status='failed' WHERE id=?",[row.id]);
+   }
   }
   return {sent};
  }finally{running=false;}
