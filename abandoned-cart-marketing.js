@@ -83,8 +83,10 @@ async function markCheckoutByEmail(email) {
   await ensureTables();
   const db=getPool();
   await db.execute(
-    "UPDATE rtn_abandoned_carts c JOIN users u ON u.id=c.user_id SET c.converted_at=NOW(),c.reminder_state='converted' " +
-    "WHERE u.email=? AND c.reminder_state IN ('pending','failed','sending')",
+    "UPDATE rtn_abandoned_carts c JOIN users u ON u.id=c.user_id SET c.converted_at=NOW(), " +
+    "c.reminder_state=CASE WHEN c.reminder_state='sent' AND c.last_reminder_at IS NOT NULL " +
+    "THEN 'converted_sent' ELSE 'converted' END " +
+    "WHERE u.email=? AND c.reminder_state IN ('pending','failed','sending','sent')",
     [normalized]
   );
 }
