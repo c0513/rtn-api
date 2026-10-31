@@ -175,6 +175,10 @@ async function runReminderBatch() {
           [row.user_id,row.cart_hash]);
         sent++;
       }catch(error){
+        if(error.code==='RTN_MARKETING_FREQUENCY_LIMIT'){
+          await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='suppressed' WHERE user_id=? AND cart_hash=?",[row.user_id,row.cart_hash]);
+          continue;
+        }
         failed++;
         // No automatic retries: prevents duplicate sends after uncertain SMTP outcomes.
         await db.execute("UPDATE rtn_abandoned_carts SET reminder_state='failed' WHERE user_id=? AND cart_hash=?",
